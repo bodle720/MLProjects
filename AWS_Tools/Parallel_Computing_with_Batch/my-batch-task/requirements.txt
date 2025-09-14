@@ -1,0 +1,9 @@
+# requirements.txt
+
+boto3==1.40.23          # AWS SDK for Python
+pandas                  # Data analysis library
+numpy                   # Compatible with pandas_ta
+pandas-ta               # Technical analysis indicators
+pyarrow                 # Apache Arrow support
+psutil                  # Used to log memory usage.
+
