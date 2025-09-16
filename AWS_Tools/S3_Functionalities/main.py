@@ -7,14 +7,19 @@ Note: The upload functionalities will overwrite existing data, which will then b
 Further, be cautious with deleting buckets as delete_s3_bucket will erase all data in the indicated bucket.
 """
 
-#%% Imports
+#%% Imports and defintions.
 
+import boto3
 import pandas as pd
 import helpers
 
+AWS_REGION = 'us-east-1'
+s3_client = boto3.client('s3', region_name=AWS_REGION)
+s3_resource = boto3.resource('s3', region_name=AWS_REGION)
+
 #%% Retrieve the list of existing buckets and summarize. Repeat cell to see any changes.
 
-for bucket in helpers.summarize_buckets():
+for bucket in helpers.summarize_buckets(s3_client):
     bucket_name = bucket['Name']
     print(f"\nBucket: {bucket_name}")
     for key, value in bucket.items():
@@ -29,19 +34,22 @@ helpers.create_bucket(random_bucket_name,
 
 #%% Delete the bucket you just made and everything in it. Careful.
 
-helpers.delete_s3_bucket(random_bucket_name,
+helpers.delete_s3_bucket(s3_resource,
+                         random_bucket_name,
                          force=True)
 
 #%% Push a local file to S3 to a key you prefer (the object_name 'folder' structure.)
 
 local_path_txt_sample = "sample_file_to_push.txt"
-helpers.upload_local_file_to_s3(local_path_txt_sample,
+helpers.upload_local_file_to_s3(s3_client,
+                                local_path_txt_sample,
                                 bucket_name,
                                 object_name = 'my/subfolderinS3/sample.txt')
 
 #%% Download the file back to local file system.
 
-helpers.download_s3_obj_to_local_file(bucket_name,
+helpers.download_s3_obj_to_local_file(s3_client,
+                                      bucket_name,
                                       'my/subfolderinS3/sample.txt',
                                       'downloaded_file_from_s3.txt')
 
@@ -62,13 +70,15 @@ data_dict = {
         }
     }
 
-helpers.upload_dict_to_s3(data_dict,
+helpers.upload_dict_to_s3(s3_client,
+                          data_dict,
                           bucket_name,
                           'json_data_files/my_data.json')
 
 #%% Upload Python text string to S3 as .txt file.
 
-helpers.upload_text_to_s3('This is a\nmultiline text file.\nThanks for reading,\nAuthor.',
+helpers.upload_text_to_s3(s3_client,
+                          'This is a\nmultiline text file.\nThanks for reading,\nAuthor.',
                           bucket_name,
                           'text_data_files/my_data.txt')
 
@@ -80,7 +90,8 @@ df = pd.DataFrame({
     'city': ['NY', 'LA', 'Chicago']
 })
 
-helpers.upload_dataframe_to_s3(df,
+helpers.upload_dataframe_to_s3(s3_client,
+                               df,
                                bucket_name,
                                'csvs_data_files/my_data.csv',
                                encoding='utf-8',
@@ -88,14 +99,16 @@ helpers.upload_dataframe_to_s3(df,
 
 #%% Retrieve the dictionary we pushed to S3 earlier.
 
-data_dict_pulled = helpers.get_dict_from_s3(bucket_name,
+data_dict_pulled = helpers.get_dict_from_s3(s3_client,
+                                            bucket_name,
                                             'json_data_files/my_data.json',
                                             encoding='utf-8')
 print(data_dict_pulled)
 
 #%% Get the Python text we pushed to S3 earlier.
 
-my_text = helpers.get_text_from_s3(bucket_name,
+my_text = helpers.get_text_from_s3(s3_client,
+                                   bucket_name,
                                    'text_data_files/my_data.txt',
                                    encoding='utf-8')
 print(my_text)
@@ -103,7 +116,8 @@ print(my_text)
 
 #%% Get the Pandas DataFrame we pushed to S3 earlier.
 
-my_df = helpers.get_dataframe_from_s3(bucket_name,
+my_df = helpers.get_dataframe_from_s3(s3_client,
+                                      bucket_name,
                                       'csvs_data_files/my_data.csv',
                                       encoding='utf-8',
                                       delimiter=',')
@@ -111,24 +125,28 @@ print(my_df.head())
 
 #%% Now let's upload the df above as a .parquet file.
 
-helpers.upload_df_or_dict_as_parquet_to_s3(df,
+helpers.upload_df_or_dict_as_parquet_to_s3(s3_client,
+                                           df,
                                            bucket_name,
                                            'parquet_data_files/my_data.parquet')
 
 #%% Now upload the dict data_dict above as a .parquet file.
 
-helpers.upload_df_or_dict_as_parquet_to_s3(data_dict,
+helpers.upload_df_or_dict_as_parquet_to_s3(s3_client,
+                                           data_dict,
                                            bucket_name,
                                            'parquet_data_files/my_data_dict.parquet')
 
 #%% Finally, retureve the .parquet files. First, the DataFrame, indicated as return_as_dict = False.
 
-df_from_par = helpers.get_df_or_dict_parquet_from_s3(bucket_name,
+df_from_par = helpers.get_df_or_dict_parquet_from_s3(s3_client,
+                                                     bucket_name,
                                                      'parquet_data_files/my_data.parquet',
                                                      return_as_dict=False)
 
 #%% And do the same for the dict, using return_as_dict = True. This returns a list of dicts.
 
-data_dict_from_par = helpers.get_df_or_dict_parquet_from_s3(bucket_name,
+data_dict_from_par = helpers.get_df_or_dict_parquet_from_s3(s3_client,
+                                                            bucket_name,
                                                             'parquet_data_files/my_data_dict.parquet',
                                                             return_as_dict=True)

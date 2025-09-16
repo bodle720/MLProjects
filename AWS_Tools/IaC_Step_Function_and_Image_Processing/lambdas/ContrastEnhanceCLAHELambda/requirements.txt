@@ -1,0 +1,5 @@
+# requirements.txt
+
+boto3==1.40.23          # AWS SDK for Python
+psutil                  # Used to log memory usage.
+
