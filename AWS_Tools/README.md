@@ -26,11 +26,19 @@ This directory contains Python applications leveraging various AWS services. Som
 
 3. **Parallel_Computing_with_Batch**  
    A scalable template for parallel workloads using **AWS Batch**, originally built for stock feature generation but easily adaptable to other domains.
-   
    - Programmatically configure **AWS Batch** via `boto3`, including Job Queues, Job Definitions, and Compute Environments.  
    - Launch thousands of jobs in parallel to process financial data or any other repeatable task.  
    - Read and write data to **Amazon S3** for downstream model training, backtesting, or archival.  
    - Monitor and analyze worker performance—track **CPU and memory usage** to optimize job definitions and compute resource allocation.
+  
+4. **Lambda_Functions_for_Image_Processing**  
+   Two examples of constructing AWS Lambda functions for image processing tasks like normalization and contrast enhancement
+   - Walkthrough of a ZIP-based Lambda (`NormalizeLambda`) using a modular dependency layer with NumPy and Pillow
+   - Walkthrough of a Docker-based Lambda (`ContrastEnhanceClaheLambda`) using scikit-image for CLAHE contrast enhancement
+   - Covers the full lifecycle: packaging, deployment, invocation, and result inspection
+   - Applies each Lambda to a sample image (`curious_cat.jpg`) and saves outputs to S3
+   - Visualizes pixel intensity histograms before and after processing for auditability
+
 
 
 
