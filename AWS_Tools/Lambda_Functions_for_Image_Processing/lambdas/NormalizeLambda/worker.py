@@ -6,11 +6,11 @@ Description of behavior:
     It may be the case earlier steps in the state machine were skipped, and we 
     just wanted to normalize an image. In that case, s3_raw_uri exists, but 
     s3_output_uri does not.
-    Check and make sure s3_raw_urialways exists.
+    Check and make sure s3_raw_uri always exists.
     If s3_output_uri does not exist, load in s3_raw_uri and save output to s3_output_uri.
     if s3_output_uri exists, load in s3_output_uri and save to s3_output_uri, because it's
     assumed to be the next step in a pipeline.
-    Ths keeps the lambda modular and reusable in different applications (ad hoc or part of a state machine workflow)
+    This keeps the Lambda modular and reusable in different applications (ad hoc or part of a state machine workflow)
 """
 
 import logging
@@ -35,7 +35,7 @@ def lambda_handler(event, context):
     Behavior:
         - s3_raw_uri must exist in S3 and is used as the input if s3_output_uri does not exist.
         - If s3_output_uri exists in S3, it is used as the input instead of s3_raw_uri.
-        - The normalized image is saved to s3_output_uri, preserving the original file extension.
+        - The normalized image is saved to s3_output_uri.
         - Only .png, .jpg, .jpeg and .npy extensions are allowed (case-insensitive).
         - Supports grayscale (H,W), single-band (H,W,1), and RGB (H,W,3) image formats.
         - Uses min-max normalization for both modes, without assuming 0–255 input range.

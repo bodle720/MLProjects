@@ -1,0 +1,7 @@
+# requirements.txt
+
+boto3==1.40.23                  # AWS SDK for Python
+numpy==1.26.4                   # Core array operations
+scikit-image==0.22.0            # CLAHE, image I/O, color conversions
+botocore==1.40.23               # Required by boto3
+

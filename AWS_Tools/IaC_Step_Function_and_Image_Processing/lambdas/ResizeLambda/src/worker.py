@@ -23,7 +23,6 @@ def lambda_handler(event, context):
         preserve_range_str = str(event.get("preserve_range")) # Just in case.
         preserve_range = preserve_range_str.lower() == "true"
 
-
         if not input_image_s3_uri or not re.match(r'^s3://([^/]+)/(.+)$', input_image_s3_uri):
             raise ValueError("Invalid or missing S3 URI")
 
@@ -93,4 +92,3 @@ def lambda_handler(event, context):
     except Exception as e:
         # Fail the state machine with a clear error
         raise RuntimeError(f"Lambda failed: {str(e)}")
-

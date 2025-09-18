@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Helpers for normalizing an image.
+S3 I/O utilities for ContrastEnhanceClaheLambda.
 """
 
 import os
 from io import BytesIO
 import numpy as np
-from PIL import Image
+from skimage import io as skio
 
 def parse_s3_uri(uri):
-    assert uri.startswith("s3://"), f"[NormalizeLambda]: Invalid S3 URI: {uri}"
+    assert uri.startswith("s3://"), f"[ContrastEnhanceClaheLambda]: Invalid S3 URI: {uri}"
     parts = uri[5:].split("/", 1)
     return parts[0], parts[1]
 
 def get_extension(key):
     ext = os.path.splitext(key)[1].lower()
-    if ext not in ['.png', '.jpg', '.jpeg', '.npy']:
-        raise ValueError(f"[NormalizeLambda]: Unsupported image extension: {ext}")
     return ext
 
 def load_numpy_from_s3(s3_client, bucket_name, object_key):
@@ -66,9 +64,8 @@ def load_png_jpg_jpeg_image_from_s3(s3_client, bucket_name, object_key):
     response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
     buffer = BytesIO(response['Body'].read())
 
-    # Load image using Pillow
-    with Image.open(buffer) as img:
-        image_array = np.array(img)
+    # Load image using skimage.io
+    image_array = skio.imread(buffer)
         
     return image_array
 

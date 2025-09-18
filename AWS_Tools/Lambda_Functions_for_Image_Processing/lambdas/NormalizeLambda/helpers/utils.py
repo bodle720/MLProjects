@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Helpers for normalizing an image.
+S3-based image normalization helpers for NormalizeLambda.
 """
 
 import os
@@ -93,5 +93,5 @@ def upload_numpy_to_s3(s3_client, nparray, bucket_name, object_key):
         Bucket=bucket_name,
         Key=object_key,
         Body=buffer,
-        ContentType='application/octet-stream' # raw binary data 
+        ContentType='application/octet-stream' # raw binary data , .npy files are binary blobs
     )

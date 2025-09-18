@@ -11,7 +11,11 @@ Further, be cautious with deleting buckets as delete_s3_bucket will erase all da
 
 import boto3
 import pandas as pd
-import helpers
+import numpy as np
+from skimage.io import imread
+from skimage.color import rgb2gray
+
+import s3_helpers as helpers
 
 AWS_REGION = 'us-east-1'
 s3_client = boto3.client('s3', region_name=AWS_REGION)
@@ -150,3 +154,74 @@ data_dict_from_par = helpers.get_df_or_dict_parquet_from_s3(s3_client,
                                                             bucket_name,
                                                             'parquet_data_files/my_data_dict.parquet',
                                                             return_as_dict=True)
+
+#%% Let's load in an image in different formats as a numpy array and save to S3.
+
+local_img_path = "imgs/boat.jpg"
+image_array_rgb = imread(local_img_path)
+
+print('RGB Image type: ', type(image_array_rgb)) 
+print('RGB Image shape: ', image_array_rgb.shape) # (H, W, 3) = (image height, image width, num bands)
+print('RGB Image dtype: ', image_array_rgb.dtype)  # uint8
+print('-'*50)
+# Convert to grayscale
+image_array_gray = rgb2gray(image_array_rgb)
+print('Grayscale Image type: ', type(image_array_gray))
+print('Grayscale Image shape: ', image_array_gray.shape) # (H, W)
+print('Grayscale Image dtype: ', image_array_gray.dtype)  # float64
+print('-'*50)
+
+# Make the Grayscale image have one band
+image_array_gray3d = np.expand_dims(image_array_gray, axis=-1)
+print('Grayscale Single Band Image type: ', type(image_array_gray3d))
+print('Grayscale Single Band Image shape: ', image_array_gray3d.shape) # (H, W, 1)
+print('Grayscale Single Band Image dtype: ', image_array_gray3d.dtype) # float64
+print('-'*50)
+
+#%% Save them to S3
+
+helpers.upload_numpy_to_s3(s3_client, image_array_rgb, bucket_name, 'img_rgb.npy')
+helpers.upload_numpy_to_s3(s3_client, image_array_gray, bucket_name, 'img_gray.npy')
+helpers.upload_numpy_to_s3(s3_client, image_array_gray3d, bucket_name, 'img_gray3d.npy')
+
+#%% Load them in and inspect. Preserves shape and data type.
+
+img_rgb = helpers.load_numpy_from_s3(s3_client, bucket_name, 'img_rgb.npy')
+img_gray = helpers.load_numpy_from_s3(s3_client, bucket_name, 'img_gray.npy')
+img_gray3d = helpers.load_numpy_from_s3(s3_client, bucket_name, 'img_gray3d.npy')
+
+print('Loaded in RGB Image type: ', type(img_rgb)) 
+print('Loaded in RGB Image shape: ', img_rgb.shape) # (H, W, 3)
+print('Loaded in RGB Image dtype: ', img_rgb.dtype)  # uint8
+print('-'*50)
+
+print('Loaded in Grayscale Image type: ', type(img_gray))
+print('Loaded in Grayscale Image shape: ', img_gray.shape) # (H, W)
+print('Loaded in Grayscale Image dtype: ', img_gray.dtype)  # float64
+print('-'*50)
+
+print('Loaded in Grayscale Single Band Image type: ', type(img_gray3d))
+print('Loaded in Grayscale Single Band Image shape: ', img_gray3d.shape) # (H, W, 1)
+print('Loaded in Grayscale Single Band Image dtype: ', img_gray3d.dtype) # float64
+
+#%% Save the image file itself to S3 (as a .jpg)
+
+helpers.upload_local_file_to_s3(s3_client, local_img_path, bucket_name, object_name = "imgs/boat.jpg")
+
+#%% Load the .jpg back in as a numpy array.
+
+loaded_img_arr = helpers.load_png_jpg_jpeg_image_from_s3(s3_client, bucket_name, "imgs/boat.jpg")
+
+print('Loaded in Image type: ', type(loaded_img_arr))
+print('Loaded in Image shape: ', loaded_img_arr.shape) # (H, W, 3)
+print('Loaded in Image dtype: ', loaded_img_arr.dtype) # uint8
+
+
+
+
+
+
+
+
+
+
