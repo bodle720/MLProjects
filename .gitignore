@@ -5,3 +5,4 @@ __pycache__/
 scratch.py
 .aws/
 generated_permissions/
+logs/
