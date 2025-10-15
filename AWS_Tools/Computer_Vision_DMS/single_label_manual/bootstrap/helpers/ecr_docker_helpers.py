@@ -32,7 +32,8 @@ def make_new_repo(ecr_client,
         dict: Metadata for the ECR repository, including keys like 'repositoryUri', 'repositoryArn', and 'registryId'.
     """
     
-    if not re.match(r'^[a-z0-9-_]+$', ecr_repo_name):
+ 
+    if not (1 <= len(ecr_repo_name) <= 256 and re.match(r'^[a-z0-9]+(?:[._/-][a-z0-9]+)*$', ecr_repo_name)):
         raise ValueError(f"Invalid ECR repo name: {ecr_repo_name}")
 
     try:

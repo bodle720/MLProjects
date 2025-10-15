@@ -60,6 +60,17 @@ def unlock_dataset(dataset_id, job_id):
     except ClientError as e:
         logger.warning(f"[unlock_dataset] Could not unlock dataset {dataset_id}: {e}")
 
+def extension_to_mime(ext: str) -> str:
+    ext = ext.lower().lstrip(".")
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    elif ext == "png":
+        return "image/png"
+    elif ext in ("tif", "tiff"):
+        return "image/tiff"
+    else:
+        raise ValueError(f"Unsupported extension: {ext}")
+        
 # --- Event handlers ---
 def handle_image_upload(event):
     dataset_id = event["dataset_id"]
@@ -82,7 +93,8 @@ def handle_image_upload(event):
             phash = entry["phash"]
             label = entry["label"]
             filename = entry["filename"]
-
+            ext = entry["extension"] # one of {"jpg", "jpeg", "png", "tif", "tiff"}, lowercase
+            
             dataset_phash = f"{dataset_id}#{phash}"
 
             # Insert imagery row into DDB_IMAGERY_TABLE
@@ -93,21 +105,26 @@ def handle_image_upload(event):
                     "dataset_id": {"S": dataset_id},
                     "phash": {"S": phash},
                     "label": {"S": label},
+                    "extension": {"S": ext},
                     "filename": {"S": filename},
+                    "bands_count": {"N": str(entry["bands_count"])},
+                    "bands_map": {"S": json.dumps(entry["bands_map"])},
+                    "bands_source": {"S": entry["bands_source"]},
+                    "forced_split": {"S": entry["forced_split"]},
                     "created_at": {"S": datetime.datetime.utcnow().isoformat()}
                 }
             )
 
             # Move image from temp-images/ to images/
-            src_key = f"{S3_DATASETS_ROOT}/temp-images/{phash}.png"
-            dest_key = f"{S3_DATASETS_ROOT}/images/{phash}.png"
+            src_key = f"{S3_DATASETS_ROOT}/temp-images/{phash}.{ext}"
+            dest_key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
 
             # Copy to images/
             s3.copy_object(
                 Bucket=S3_BUCKET_NAME,
                 CopySource={"Bucket": S3_BUCKET_NAME, "Key": src_key},
                 Key=dest_key,
-                ContentType="image/png"
+                ContentType=extension_to_mime(ext)
             )
 
             # Delete from temp-images/
@@ -135,15 +152,24 @@ def handle_image_upload(event):
 def handle_remove_images(event):
     dataset_id = event["dataset_id"]
     job_id = event["job_id"]
-    images = event["images"]  # list of phashes
-    logger.info(f"[ImageOpsLambda] Handling REMOVE_IMAGES_FROM_DATASET for {dataset_id}, job {job_id}")
+    logger.info(f"[ImageOpsLambda] Handling REMOVE_IMAGES for {dataset_id}, job {job_id}")
+
+    manifest_key = f"{S3_DATASETS_ROOT}/temp-deletions/{job_id}.json"
 
     try:
-        # 1. For each phash in the list
+        # 1. Load manifest JSON from S3
+        resp = s3.get_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
+        manifest = json.loads(resp["Body"].read().decode("utf-8"))
+        images = manifest.get("images", [])
+
+        if not images:
+            raise Exception(f"Manifest {manifest_key} contained no images.")
+
+        # 2. For each phash in the manifest
         for phash in images:
             dataset_phash = f"{dataset_id}#{phash}"
 
-            # Delete imagery row for this dataset + phash
+            # Delete imagery row
             try:
                 ddb.delete_item(
                     TableName=DDB_IMAGERY_TABLE,
@@ -153,14 +179,14 @@ def handle_remove_images(event):
             except Exception as ddb_err:
                 logger.warning(f"[ImageOpsLambda] Failed to delete imagery row {dataset_phash}: {ddb_err}")
 
-            # 2. Check if this phash is still referenced by any other dataset
+            # 3. Check if this phash is still referenced by any other dataset
             resp = ddb.query(
                 TableName=DDB_IMAGERY_TABLE,
-                IndexName="PhashIndex",  # new GSI on phash
+                IndexName="PhashIndex",
                 KeyConditionExpression="phash = :p",
                 ExpressionAttributeValues={":p": {"S": phash}}
             )
-            if not resp.get("Items"):  # no other dataset references this image
+            if not resp.get("Items"):
                 key = f"{S3_DATASETS_ROOT}/images/{phash}.png"
                 try:
                     s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
@@ -168,13 +194,17 @@ def handle_remove_images(event):
                 except Exception as s3err:
                     logger.warning(f"[ImageOpsLambda] Failed to delete {key}: {s3err}")
 
-        # 3. Mark job complete and unlock dataset
+        # 4. Delete manifest file
+        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
+        logger.info(f"[ImageOpsLambda] Deleted manifest {manifest_key}")
+
+        # 5. Mark job complete and unlock dataset
         job_update(job_id, "COMPLETE", f"Removed {len(images)} images from dataset {dataset_id}.")
         unlock_dataset(dataset_id, job_id)
-        logger.info(f"[ImageOpsLambda] REMOVE_IMAGES_FROM_DATASET job {job_id} completed for dataset {dataset_id}")
+        logger.info(f"[ImageOpsLambda] REMOVE_IMAGES job {job_id} completed for dataset {dataset_id}")
 
     except Exception as e:
-        logger.error(f"[ImageOpsLambda] REMOVE_IMAGES_FROM_DATASET failed for {dataset_id}: {e}")
+        logger.error(f"[ImageOpsLambda] REMOVE_IMAGES failed for {dataset_id}: {e}")
         job_error(job_id, f"Image removal failed for dataset {dataset_id}: {e}")
         try:
             unlock_dataset(dataset_id, job_id)
@@ -184,10 +214,6 @@ def handle_remove_images(event):
 
 # --- Lambda entrypoint ---
 def lambda_handler(event, context):
-    """
-    Lambda entrypoint for image operations.
-    Triggered by SQS messages from the image ops queue.
-    """
     for record in event.get("Records", []):
         try:
             body = json.loads(record["body"])
@@ -196,7 +222,7 @@ def lambda_handler(event, context):
 
             if event_type == "IMAGE_UPLOAD":
                 handle_image_upload(body)
-            elif event_type == "REMOVE_IMAGES_FROM_DATASET":
+            elif event_type == "REMOVE_IMAGES":
                 handle_remove_images(body)
             else:
                 logger.warning(f"[ImageOpsLambda] Unknown event_type: {event_type}")

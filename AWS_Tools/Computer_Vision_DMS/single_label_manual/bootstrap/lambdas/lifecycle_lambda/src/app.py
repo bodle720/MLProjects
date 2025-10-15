@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
 """
+This Lambda handles two events from the API, which are routed here through the 
+lifecycle queue.
+
+1. DELETE_DATASET - keys are 'event_type', 'dataset_id', 'job_id'
+2. REMOVE_CLASS - keys are 'event_type', 'dataset_id', 'job_id', 'class_name'
 """
 
 import os
@@ -61,12 +66,6 @@ def job_update(job_id, status, summary=None):
         ExpressionAttributeValues=values
     )
 
-def job_complete(job_id, summary=None):
-    job_update(job_id, "COMPLETE", summary)
-
-def job_error(job_id, summary=None):
-    job_update(job_id, "FAILED", summary)
-
 # --- Event handlers ---
 def handle_delete_dataset(event):
     dataset_id = event["dataset_id"]
@@ -83,7 +82,7 @@ def handle_delete_dataset(event):
         )
         imagery_items = resp.get("Items", [])
 
-        phashes_to_check = [item["phash"]["S"] for item in imagery_items]
+        phashes_exts_to_check = [(item["phash"]["S"], item["extension"]["S"]) for item in imagery_items]
 
         # Delete imagery rows for this dataset
         for item in imagery_items:
@@ -93,15 +92,17 @@ def handle_delete_dataset(event):
             )
 
         # 2. For each phash, check if any other dataset references it
-        for phash in phashes_to_check:
+        for phash, ext in phashes_exts_to_check:
             resp = ddb.query(
                 TableName=DDB_IMAGERY_TABLE,
                 IndexName="PhashIndex",
                 KeyConditionExpression="phash = :p",
                 ExpressionAttributeValues={":p": {"S": phash}}
             )
+            
+            # when uloading, we guarntee phashes are unique.
             if not resp.get("Items"):  # no other dataset references this image
-                key = f"{S3_DATASETS_ROOT}/images/{phash}.png"
+                key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                 try:
                     s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
                     logger.info(f"[LifecycleLambda] Deleted image {key} from S3")
@@ -128,7 +129,7 @@ def handle_delete_dataset(event):
 
     except Exception as e:
         logger.error(f"[LifecycleLambda] DELETE_DATASET failed for {dataset_id}: {e}")
-        job_error(job_id, f"Deletion failed for dataset {dataset_id}: {e}")
+        job_update(job_id, "FAILED", f"Deletion failed for dataset {dataset_id}: {e}")
         try:
             unlock_dataset(dataset_id, job_id)
         except Exception as unlock_err:
@@ -139,7 +140,7 @@ def handle_remove_class_from_dataset(event):
     dataset_id = event["dataset_id"]
     class_name = event["class_name"]
     job_id = event["job_id"]
-    logger.info(f"[LifecycleLambda] Handling REMOVE_CLASS_FROM_DATASET for {dataset_id}, class {class_name}, job {job_id}")
+    logger.info(f"[LifecycleLambda] Handling REMOVE_CLASS for {dataset_id}, class {class_name}, job {job_id}")
 
     try:
         # 1. Fetch dataset row
@@ -186,7 +187,7 @@ def handle_remove_class_from_dataset(event):
         # 4. For each image in this class, delete imagery row and maybe S3 object
         for item in imagery_items:
             phash = item["phash"]["S"]
-            label = item.get("label", {}).get("S")  # assuming imagery rows store label
+            label = item["label"]['S']
             if label == class_name:
                 # Delete imagery row
                 ddb.delete_item(
@@ -202,7 +203,8 @@ def handle_remove_class_from_dataset(event):
                     ExpressionAttributeValues={":p": {"S": phash}}
                 )
                 if not resp2.get("Items"):
-                    key = f"{S3_DATASETS_ROOT}/images/{phash}.png"
+                    ext = item["extension"]["S"]
+                    key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                     try:
                         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
                         logger.info(f"[LifecycleLambda] Deleted image {key} from S3")
@@ -212,11 +214,11 @@ def handle_remove_class_from_dataset(event):
         # 5. Mark job complete and unlock dataset
         job_update(job_id, "COMPLETE", f"Class '{class_name}' removed from dataset {dataset_id}.")
         unlock_dataset(dataset_id, job_id)
-        logger.info(f"[LifecycleLambda] REMOVE_CLASS_FROM_DATASET job {job_id} completed for dataset {dataset_id}")
+        logger.info(f"[LifecycleLambda] REMOVE_CLASS job {job_id} completed for dataset {dataset_id}")
 
     except Exception as e:
-        logger.error(f"[LifecycleLambda] REMOVE_CLASS_FROM_DATASET failed for {dataset_id}, class {class_name}: {e}")
-        job_error(job_id, f"Class removal failed for dataset {dataset_id}, class '{class_name}': {e}")
+        logger.error(f"[LifecycleLambda] REMOVE_CLASS failed for {dataset_id}, class {class_name}: {e}")
+        job_update(job_id, "FAILED", f"Class removal failed for dataset {dataset_id}, class '{class_name}': {e}")
         try:
             unlock_dataset(dataset_id, job_id)
         except Exception as unlock_err:
@@ -237,7 +239,7 @@ def lambda_handler(event, context):
 
             if event_type == "DELETE_DATASET":
                 handle_delete_dataset(body)
-            elif event_type == "REMOVE_CLASS_FROM_DATASET":
+            elif event_type == "REMOVE_CLASS":
                 handle_remove_class_from_dataset(body)
             else:
                 logger.warning(f"[LifecycleLambda] Unknown event_type: {event_type}")

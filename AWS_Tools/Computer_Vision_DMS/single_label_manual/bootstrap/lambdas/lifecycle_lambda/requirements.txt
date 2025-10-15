@@ -1,0 +1,2 @@
+# requirements.txt
+# (intentionally left blank - Lambda runtime provides boto3/botocore)
