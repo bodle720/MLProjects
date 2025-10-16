@@ -134,6 +134,26 @@ def generate_bootstrap_policy(account_id, config):
             f"arn:aws:ecr:{config['AWS_REGION']}:{account_id}:repository/{config['IMAGE_NAME_SYNC']}",
             f"arn:aws:ecr:{config['AWS_REGION']}:{account_id}:repository/{config['IMAGE_NAME_DLQ']}"
           ]
+        },
+        {
+          "Sid": "MakeLogGroup",
+          "Effect": "Allow",
+          "Action": [
+            "logs:CreateLogGroup",
+            "logs:PutRetentionPolicy",
+            "logs:DescribeLogGroups"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "AllowSSMParamAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ssm:GetParametersByPath",
+            "ssm:GetParameters",
+            "ssm:GetParameter"
+          ],
+          "Resource": f"arn:aws:ssm:{config['AWS_REGION']}:{account_id}:parameter/cv-datasets/single-label/{config['INFRASTRUCTURE_NAME']}/infrastructure/*"
         }
       ]
     }
@@ -204,6 +224,25 @@ def generate_api_policy(account_id, config):
           "Resource": [
             f"arn:aws:s3:::{config['S3_BUCKET_NAME']}/{config['S3_DATASETS_ROOT']}/temp-images/*"
           ]
+        },
+        {
+          "Sid": "AllowLogQuery",
+          "Effect": "Allow",
+          "Action": [
+            "logs:StartQuery",
+            "logs:GetQueryResults",
+          ],
+          "Resource": "*"
+        },
+        {
+          "Sid": "AllowSSMParamAccess",
+          "Effect": "Allow",
+          "Action": [
+            "ssm:GetParametersByPath",
+            "ssm:GetParameters",
+            "ssm:GetParameter"
+          ],
+          "Resource": f"arn:aws:ssm:{config['AWS_REGION']}:{account_id}:parameter/cv-datasets/single-label/{config['INFRASTRUCTURE_NAME']}/infrastructure/*"
         }
       ]
     }
@@ -306,6 +345,21 @@ def generate_teardown_policy(account_id, config):
                 "Effect": "Allow",
                 "Action": "sts:GetCallerIdentity",
                 "Resource": "*"
+            },
+            {
+                "Sid": "DeleteLogGroup",
+                "Effect": "Allow",
+                "Action": "logs:DeleteLogGroup",
+                "Resource": f"arn:aws:logs:{config['AWS_REGION']}:{account_id}:log-group:{config['LOG_GROUP_NAME']}"
+            },
+            {
+                "Sid": "SSMRemoveParameterStore",
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:DeleteParameter",
+                    "ssm:DeleteParameters"
+                ],
+                "Resource": f"arn:aws:ssm:{config['AWS_REGION']}:{account_id}:parameter/cv-datasets/single-label/{config['INFRASTRUCTURE_NAME']}/*"
             }
         ]
     }
@@ -379,6 +433,7 @@ if __name__ == "__main__":
             "iam": session.client("iam"),
             "ecr": session.client("ecr"),
             "ssm": session.client("ssm"),
+            'logs': session.client("logs")
         }
         
     identity = clients['sts'].get_caller_identity()
@@ -396,6 +451,9 @@ if __name__ == "__main__":
         "S3_BUCKET_NAME": bucket_name,
         "S3_DATASETS_ROOT": bucket_root,
     
+        # Log Group
+        "LOG_GROUP_NAME": f"{infrastructure_name}/loggroup-{random_short_hash()}",
+
         # SQS Queues
         "SQS_QUEUE_LIFECYCLE": f"{infrastructure_name}-lifecyclequeue-{random_short_hash()}",
         "SQS_QUEUE_IMAGE_OPS": f"{infrastructure_name}-imgopsqueue-{random_short_hash()}",

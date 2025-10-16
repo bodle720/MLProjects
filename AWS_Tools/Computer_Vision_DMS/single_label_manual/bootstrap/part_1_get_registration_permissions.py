@@ -71,6 +71,12 @@ def generate_validation_policy(account_id: str, region: str) -> dict:
                 "Effect": "Allow",
                 "Action": "sts:GetCallerIdentity",
                 "Resource": "*"
+            },
+            {
+                "Sid": "CheckLogGroupExistence",
+                "Effect": "Allow",
+                "Action": "logs:DescribeLogGroups",
+                "Resource": "*"
             }
         ]
     }

@@ -40,8 +40,11 @@ if __name__ == "__main__":
     # Configure logging
     # -------------------------------
     main_dir = os.path.dirname(__file__)
-
-    logging_save_to = os.path.join(main_dir, "logs.txt")
+    base_logs = os.path.join(main_dir, "logs")
+    os.makedirs(base_logs, exist_ok=True)
+        
+    logging_save_to = os.path.join(base_logs, "teardown_logs.txt")
+    
     logger = logging.getLogger()
     if logger.hasHandlers():
         logger.handlers.clear()

@@ -4,13 +4,14 @@ Main API functionality.
 """
 
 import os
-import logging
+import time
+import datetime
 import uuid
 import json
+import logging
+
 import boto3
 from botocore.exceptions import ClientError
-import datetime
-import mimetypes
 
 import api_helpers
  
@@ -19,8 +20,11 @@ import api_helpers
 # --------------------------
 main_dir = os.path.dirname(__file__)
     
-logging_save_to = os.path.join(main_dir, 'logs.txt')
-    
+base_logs = os.path.join(main_dir, "logs")
+os.makedirs(base_logs, exist_ok=True)
+
+logging_save_to = os.path.join(base_logs, "api_logs.txt")
+
 logger = logging.getLogger()
 if logger.hasHandlers():
     logger.handlers.clear() 
@@ -36,17 +40,6 @@ console_handler.setFormatter(formatter)
 
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
-
-def extension_to_mime(ext: str) -> str:
-    ext = ext.lower().lstrip(".")
-    if ext in ("jpg", "jpeg"):
-        return "image/jpeg"
-    elif ext == "png":
-        return "image/png"
-    elif ext in ("tif", "tiff"):
-        return "image/tiff"
-    else:
-        raise ValueError(f"Unsupported extension: {ext}")
         
 class InfrastructureAPI:
     def __init__(self, infrastructure_name: str, region: str, profile_name: str):
@@ -82,6 +75,7 @@ class InfrastructureAPI:
                 "iam": session.client("iam"),
                 "ecr": session.client("ecr"),
                 "ssm": ssm,
+                'logs': session.client("logs")
             }
 
         identity = self.clients["sts"].get_caller_identity()
@@ -340,6 +334,7 @@ class InfrastructureAPI:
                 Item={
                     "dataset_id": {"S": dataset_id},
                     "locked": {"BOOL": True},
+                    "synced": {"BOOL": True},
                     "locked_by": {"S": job_id},
                     "class_to_id_dict": {"S": json.dumps(class_to_id_dict)},
                     "band_info": {"S": json.dumps(band_info)}
@@ -432,478 +427,558 @@ class InfrastructureAPI:
         finally:
             if locked:
                 self.unlock_dataset(dataset_id, job_id)
-    
-        def delete_dataset(self, dataset_id: str) -> str:
-            """Initiate deletion of a dataset by sending a DELETE_DATASET event to the lifecycle queue."""
-            ddb = self.clients['ddb']
-            sqs = self.clients['sqs']
-    
-            job_id = str(uuid.uuid4())
-            created_at = datetime.datetime.utcnow().isoformat()
-    
-            # Insert job row
-            ddb.put_item(
-                TableName=self.config['DDB_JOB_TABLE'],
-                Item={
-                    "job_id": {"S": job_id},
-                    "created_at": {"S": created_at},
-                    "event_type": {"S": "DELETE_DATASET"},
-                    "job_summary": {"S": f"Deleting dataset {dataset_id}"},
-                    "job_status": {"S": "PENDING"}
-                }
-            )
-    
-            sent_to_queue = False
-            locked = False
-            try:
-                queue_url = sqs.get_queue_url(QueueName=self.config['SQS_QUEUE_LIFECYCLE'])["QueueUrl"]
-    
-                if not self.dataset_exists(dataset_id):
-                    raise Exception(f"Dataset {dataset_id} does not exist.")
-    
-                if self.dataset_locked(dataset_id):
-                    raise Exception(f"Dataset {dataset_id} is currently locked.")
-    
-                self.lock_dataset(dataset_id, job_id)
-                locked = True
-    
-                event = {"event_type": "DELETE_DATASET", "dataset_id": dataset_id, "job_id": job_id}
-                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                sent_to_queue = True
-                logger.info(f"[delete_dataset] Sent DELETE_DATASET event for {dataset_id} under job {job_id}.")
-                return job_id
-    
-            except Exception as e:
-                logger.error(f"[delete_dataset] Error: {e}")
-                self.job_error(job_id, f"Deletion init failed for {dataset_id}: {e}")
-                raise
-            finally:
-                if locked and not sent_to_queue:
-                    self.unlock_dataset(dataset_id, job_id)
-    
-        def remove_class_from_dataset(self, dataset_id: str, class_name: str) -> str:
-            """Initiate removal of a class from a dataset by sending a REMOVE_CLASS event."""
-            ddb = self.clients['ddb']
-            sqs = self.clients['sqs']
-    
-            job_id = str(uuid.uuid4())
-            created_at = datetime.datetime.utcnow().isoformat()
-    
-            # Insert job row
-            ddb.put_item(
-                TableName=self.config['DDB_JOB_TABLE'],
-                Item={
-                    "job_id": {"S": job_id},
-                    "created_at": {"S": created_at},
-                    "event_type": {"S": "REMOVE_CLASS"},
-                    "job_summary": {"S": f"Removing class '{class_name}' from dataset {dataset_id}"},
-                    "job_status": {"S": "PENDING"}
-                }
-            )
-    
-            sent_to_queue = False
-            locked = False
-            try:
-                queue_url = sqs.get_queue_url(QueueName=self.config['SQS_QUEUE_LIFECYCLE'])["QueueUrl"]
-    
-                if not self.dataset_exists(dataset_id):
-                    raise Exception(f"Dataset {dataset_id} does not exist.")
-    
-                if self.dataset_locked(dataset_id):
-                    raise Exception(f"Dataset {dataset_id} is currently locked.")
-    
-                self.lock_dataset(dataset_id, job_id)
-                locked = True
-    
-                if not isinstance(class_name, str):
-                    raise Exception(f"class_name must be a string. Got {type(class_name)}.")
-    
-                resp = ddb.get_item(
-                    TableName=self.config['DDB_DATASET_TABLE'],
-                    Key={'dataset_id': {'S': dataset_id}},
-                    ConsistentRead=True
-                )
-                item = resp.get('Item')
-                if not item:
-                    raise Exception(f"Dataset {dataset_id} not found after existence check.")
-    
-                class_dict_str = item.get('class_to_id_dict', {}).get('S', '{}')
-                try:
-                    class_dict = json.loads(class_dict_str)
-                except json.JSONDecodeError:
-                    raise Exception(f"Corrupted class_to_id_dict for dataset {dataset_id}.")
-    
-                if class_name not in class_dict:
-                    raise Exception(f"Class '{class_name}' does not exist in dataset {dataset_id}.")
-    
-                if len(class_dict) == 1:
-                    raise Exception("Cannot remove the only class; call delete_dataset instead.")
-    
-                event = {
-                    "event_type": "REMOVE_CLASS",
-                    "dataset_id": dataset_id,
-                    "class_name": class_name,
-                    "job_id": job_id
-                }
-                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                sent_to_queue = True
-                logger.info(f"[remove_class_from_dataset] Sent REMOVE_CLASS for {dataset_id}, class '{class_name}' under job {job_id}.")
-                return job_id
-    
-            except Exception as e:
-                logger.error(f"[remove_class_from_dataset] Error: {e}")
-                self.job_error(job_id, f"Removal init failed for {dataset_id}, class '{class_name}': {e}")
-                raise
-            finally:
-                if locked and not sent_to_queue:
-                    self.unlock_dataset(dataset_id, job_id)
-                    
-         #%% left off here           
-        def remove_images_from_dataset(self, dataset_id: str, images: list[str]) -> str:
-            """
-            Remove images from a dataset by uploading a deletion manifest to S3
-            and sending a REMOVE_IMAGES event to the image ops queue.
-            """
-            ddb = self.clients['ddb']
-            s3 = self.clients['s3']
-            sqs = self.clients['sqs']
-            job_table = self.config['DDB_JOB_TABLE']
-            image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
-            bucket = self.config['S3_BUCKET_NAME']
-            root = self.config['S3_DATASETS_ROOT']
-    
-            queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
-    
-            # Pre-checks
+
+    def delete_dataset(self, dataset_id: str) -> str:
+        """Initiate deletion of a dataset by sending a DELETE_DATASET event to the lifecycle queue."""
+        ddb = self.clients['ddb']
+        sqs = self.clients['sqs']
+
+        job_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat()
+
+        # Insert job row
+        ddb.put_item(
+            TableName=self.config['DDB_JOB_TABLE'],
+            Item={
+                "job_id": {"S": job_id},
+                "created_at": {"S": created_at},
+                "event_type": {"S": "DELETE_DATASET"},
+                "job_summary": {"S": f"Deleting dataset {dataset_id}"},
+                "job_status": {"S": "PENDING"}
+            }
+        )
+
+        sent_to_queue = False
+        locked = False
+        try:
+            queue_url = sqs.get_queue_url(QueueName=self.config['SQS_QUEUE_LIFECYCLE'])["QueueUrl"]
+
             if not self.dataset_exists(dataset_id):
                 raise Exception(f"Dataset {dataset_id} does not exist.")
+
             if self.dataset_locked(dataset_id):
                 raise Exception(f"Dataset {dataset_id} is currently locked.")
-            if not isinstance(images, list) or not all(isinstance(ph, str) for ph in images):
-                raise Exception("images must be a list of strings (pHashes).")
-            if len(images) == 0:
-                raise Exception("images list cannot be empty.")
+
+            self.lock_dataset(dataset_id, job_id)
+            locked = True
+
+            event = {"event_type": "DELETE_DATASET", "dataset_id": dataset_id, "job_id": job_id}
+            sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+            sent_to_queue = True
+            logger.info(f"[delete_dataset] Sent DELETE_DATASET event for {dataset_id} under job {job_id}.")
+            return job_id
+
+        except Exception as e:
+            logger.error(f"[delete_dataset] Error: {e}")
+            self.job_error(job_id, f"Deletion init failed for {dataset_id}: {e}")
+            raise
+        finally:
+            if locked and not sent_to_queue:
+                self.unlock_dataset(dataset_id, job_id)
     
-            job_id = str(uuid.uuid4())
-            created_at = datetime.datetime.utcnow().isoformat()
-            locked = False
-            sent_to_queue = False
-            uploaded_keys: list[str] = []
-    
-            try:
-                # Lock dataset
-                self.lock_dataset(dataset_id, job_id)
-                locked = True
-    
-                # Insert job row
-                ddb.put_item(
-                    TableName=job_table,
-                    Item={
-                        "job_id": {"S": job_id},
-                        "created_at": {"S": created_at},
-                        "event_type": {"S": "REMOVE_IMAGES"},
-                        "job_summary": {"S": f"Removing {len(images)} images from dataset {dataset_id}"},
-                        "job_status": {"S": "PENDING"}
-                    }
-                )
-    
-                # Write manifest to S3
-                manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": images}
-                manifest_key = f"{root}/temp-deletions/{job_id}.json"
-                s3.put_object(
-                    Bucket=bucket,
-                    Key=manifest_key,
-                    Body=json.dumps(manifest).encode("utf-8"),
-                    ContentType="application/json"
-                )
-                uploaded_keys.append(manifest_key)
-    
-                # Send lightweight event
-                event = {"event_type": "REMOVE_IMAGES", "dataset_id": dataset_id, "job_id": job_id}
-                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                sent_to_queue = True
-    
-                logger.info(f"[remove_images_from_dataset] Enqueued REMOVE_IMAGES job {job_id} "
-                            f"for dataset {dataset_id}, manifest {manifest_key}.")
-                return job_id
-    
-            except Exception as e:
-                logger.error(f"[remove_images_from_dataset] Error: {e}")
-                self.job_error(job_id, f"Removal init failed for dataset {dataset_id}: {e}")
-    
-                # Cleanup manifest if enqueue failed
-                if uploaded_keys and not sent_to_queue:
-                    for key in uploaded_keys:
-                        try:
-                            s3.delete_object(Bucket=bucket, Key=key)
-                            logger.info(f"[remove_images_from_dataset] Cleaned up {key} after failure.")
-                        except Exception as cleanup_err:
-                            logger.warning(f"[remove_images_from_dataset] Failed to cleanup {key}: {cleanup_err}")
-                raise
-            finally:
-                if locked and not sent_to_queue:
-                    self.unlock_dataset(dataset_id, job_id)
-                    
-        def upload_images_to_dataset(
-                                self,
-                                dataset_id: str,
-                                images: list[str],
-                                labels: list[str],
-                                bands_mapping: dict[str, str],
-                                forced_split: str | None = None) -> str:
-            """
-            Upload local images to the global temp-images folder and enqueue an IMAGE_UPLOAD job.
-            """
-            
-            ddb = self.clients['ddb']
-            s3 = self.clients['s3']
-            sqs = self.clients['sqs']
-            job_table = self.config['DDB_JOB_TABLE']
-            dataset_table = self.config['DDB_DATASET_TABLE']
-            image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
-            bucket = self.config['S3_BUCKET_NAME']
-            root = self.config['S3_DATASETS_ROOT']
-    
-            # Pre-checks
-            if bands_mapping is None:
-                raise ValueError("bands_mapping is required for all uploads.")
-            if forced_split not in (None, "training", "validation", "testing"):
-                raise ValueError("forced_split must be one of None, 'training', 'validation', or 'testing'")
+    def remove_class_from_dataset(self, dataset_id: str, class_name: str) -> str:
+        """Initiate removal of a class from a dataset by sending a REMOVE_CLASS event."""
+        ddb = self.clients['ddb']
+        sqs = self.clients['sqs']
+
+        job_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat()
+
+        # Insert job row
+        ddb.put_item(
+            TableName=self.config['DDB_JOB_TABLE'],
+            Item={
+                "job_id": {"S": job_id},
+                "created_at": {"S": created_at},
+                "event_type": {"S": "REMOVE_CLASS"},
+                "job_summary": {"S": f"Removing class '{class_name}' from dataset {dataset_id}"},
+                "job_status": {"S": "PENDING"}
+            }
+        )
+
+        sent_to_queue = False
+        locked = False
+        try:
+            queue_url = sqs.get_queue_url(QueueName=self.config['SQS_QUEUE_LIFECYCLE'])["QueueUrl"]
+
             if not self.dataset_exists(dataset_id):
                 raise Exception(f"Dataset {dataset_id} does not exist.")
+
             if self.dataset_locked(dataset_id):
                 raise Exception(f"Dataset {dataset_id} is currently locked.")
-            if not isinstance(images, list) or not all(isinstance(p, str) for p in images):
-                raise Exception("images must be a list of local file paths (strings).")
-            if not isinstance(labels, list) or not all(isinstance(l, str) for l in labels):
-                raise Exception("labels must be a list of strings.")
-            if len(images) != len(labels):
-                raise Exception("images and labels must have the same length.")
-            if not images:
-                raise Exception("images list cannot be empty.")
-    
-            # Validate each path
-            valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-            for path in images:
-                if not os.path.exists(path):
-                    raise Exception(f"Image path does not exist: {path}")
-                ext = os.path.splitext(path)[1].lower()
-                if ext not in valid_exts:
-                    raise Exception(f"Unsupported image type for {path}. Must be jpg/jpeg/png/tif/tiff.")
-    
-            # Fetch dataset row
+
+            self.lock_dataset(dataset_id, job_id)
+            locked = True
+
+            if not isinstance(class_name, str):
+                raise Exception(f"class_name must be a string. Got {type(class_name)}.")
+
             resp = ddb.get_item(
-                TableName=dataset_table,
+                TableName=self.config['DDB_DATASET_TABLE'],
                 Key={'dataset_id': {'S': dataset_id}},
                 ConsistentRead=True
             )
             item = resp.get('Item')
             if not item:
                 raise Exception(f"Dataset {dataset_id} not found after existence check.")
-    
-            # Load dataset schema
+
             class_dict_str = item.get('class_to_id_dict', {}).get('S', '{}')
-            dataset_band_info_str = item.get('band_info', {}).get('S')
-            if not dataset_band_info_str:
-                raise Exception(f"Dataset {dataset_id} missing band_info definition.")
             try:
                 class_dict = json.loads(class_dict_str)
-                dataset_band_info = json.loads(dataset_band_info_str)
             except json.JSONDecodeError:
-                raise Exception(f"Corrupted dataset metadata for {dataset_id}.")
-    
-            # Validate labels
-            for label in labels:
-                if label not in class_dict:
-                    raise Exception(f"Label '{label}' not found in dataset {dataset_id} classes.")
-    
-            # Validate bands_mapping against dataset definition
-            if bands_mapping != dataset_band_info:
-                raise Exception(f"bands_mapping {bands_mapping} does not match dataset band_info {dataset_band_info}")
-    
-            job_id = str(uuid.uuid4())
-            created_at = datetime.datetime.utcnow().isoformat()
-            locked = False
-            sent_to_queue = False
-            uploaded_keys: list[str] = []
-    
-            try:
-                # Lock dataset
-                self.lock_dataset(dataset_id, job_id)
-                locked = True
-    
-                # Insert job row
-                ddb.put_item(
-                    TableName=job_table,
-                    Item={
-                        "job_id": {"S": job_id},
-                        "created_at": {"S": created_at},
-                        "event_type": {"S": "IMAGE_UPLOAD"},
-                        "job_summary": {"S": f"Starting uploading of {len(images)} images to dataset {dataset_id}"},
-                        "job_status": {"S": "PENDING"}
-                    }
-                )
-    
-                manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": []}
-    
-                for path, label in zip(images, labels):
-                    phash = api_helpers.compute_phash(path)
-                    
-                    if self.phash_exists(phash):
-                        logger.info(f"[upload_images_to_dataset] phash of image at {path} in class {label} already present in images folder, skipping.")
-                        continue
-                    
-                    ext = os.path.splitext(path)[1].lower()
-    
-                    # Extract band info
-                    bands_info = api_helpers.extract_bands(path, [bands_mapping[str(i)] for i in range(len(bands_mapping))])
-    
-                    # Extra check for GeoTIFF
-                    if ext in (".tif", ".tiff") and bands_info["bands_source"] == "gdal_metadata":
-                        if bands_info["bands_map"] != dataset_band_info:
-                            raise Exception(
-                                f"GeoTIFF metadata {bands_info['bands_map']} does not match dataset band_info {dataset_band_info}"
-                            )
-    
-                    # Upload original file (no conversion)
-                    key = f"{root}/temp-images/{phash}{ext}"
-                    with open(path, "rb") as f:
-                        s3.put_object(
-                            Bucket=bucket,
-                            Key=key,
-                            Body=f,
-                            ContentType=extension_to_mime(ext)
-                        )
-                    uploaded_keys.append(key)
-    
-                    manifest["images"].append({
-                        "phash": phash,
-                        "filename": os.path.basename(path),
-                        "label": label,
-                        'extension': ext.replace('.',''),
-                        "bands_count": bands_info["bands_count"],
-                        "bands_map": bands_info["bands_map"],
-                        "bands_source": bands_info["bands_source"],
-                        "forced_split": forced_split
-                    })
-    
-                # Upload manifest JSON
-                if len(manifest["images"]) > 0:
-                    manifest_key = f"{root}/temp-images/{job_id}.json"
-                    s3.put_object(
-                        Bucket=bucket,
-                        Key=manifest_key,
-                        Body=json.dumps(manifest).encode("utf-8"),
-                        ContentType="application/json"
-                    )
-                    uploaded_keys.append(manifest_key)
-    
-                    # Send event to image ops queue
-                    queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
-                    event = {"event_type": "IMAGE_UPLOAD", "dataset_id": dataset_id, "job_id": job_id}
-                    sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                    sent_to_queue = True
-    
-                logger.info(f"[upload_images_to_dataset] Enqueued IMAGE_UPLOAD job {job_id} for dataset {dataset_id}.")
-                return job_id
-    
-            except Exception as e:
-                logger.error(f"[upload_images_to_dataset] Error: {e}")
-                self.job_error(job_id, f"Image upload init failed for dataset {dataset_id}: {e}")
-    
-                # Cleanup uploaded files if enqueue failed
-                if uploaded_keys and not sent_to_queue:
-                    for key in uploaded_keys:
-                        try:
-                            s3.delete_object(Bucket=bucket, Key=key)
-                            logger.info(f"[upload_images_to_dataset] Cleaned up {key} after failure.")
-                        except Exception as cleanup_err:
-                            logger.warning(f"[upload_images_to_dataset] Failed to cleanup {key}: {cleanup_err}")
-                raise
-            finally:
-                if locked and not sent_to_queue:
-                    self.unlock_dataset(dataset_id, job_id)
-                    
-        def sync_datasets(self, dataset_ids: str | list[str]) -> str:
-            """
-            Initiate a sync operation for one or more datasets by sending a SYNC event
-            to the sync SQS queue. Tracks the operation as a Job in the Job table.
-            """
-            ddb = self.clients['ddb']
-            sqs = self.clients['sqs']
-            dataset_table = self.config['DDB_DATASET_TABLE']
-            job_table = self.config['DDB_JOB_TABLE']
-            sync_queue_name = self.config['SQS_QUEUE_SYNC']
-    
-            queue_url = sqs.get_queue_url(QueueName=sync_queue_name)["QueueUrl"]
-    
-            resolved_ids: list[str] = []
-            if dataset_ids == "all":
-                # Scan dataset table for all unlocked datasets
-                resp = ddb.scan(TableName=dataset_table, ConsistentRead=True)
-                for item in resp.get("Items", []):
-                    dsid = item["dataset_id"]["S"]
-                    locked = item.get("locked", {}).get("BOOL", False)
-                    if not locked:
-                        resolved_ids.append(dsid)
-                if not resolved_ids:
-                    raise Exception("No unlocked datasets available to sync.")
-            elif isinstance(dataset_ids, list) and all(isinstance(d, str) for d in dataset_ids):
-                for dsid in dataset_ids:
-                    if not self.dataset_exists(dsid):
-                        raise Exception(f"Dataset {dsid} does not exist.")
-                    if self.dataset_locked(dsid):
-                        raise Exception(f"Dataset {dsid} is currently locked.")
+                raise Exception(f"Corrupted class_to_id_dict for dataset {dataset_id}.")
+
+            if class_name not in class_dict:
+                raise Exception(f"Class '{class_name}' does not exist in dataset {dataset_id}.")
+
+            if len(class_dict) == 1:
+                raise Exception("Cannot remove the only class; call delete_dataset instead.")
+
+            event = {
+                "event_type": "REMOVE_CLASS",
+                "dataset_id": dataset_id,
+                "class_name": class_name,
+                "job_id": job_id
+            }
+            sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+            sent_to_queue = True
+            logger.info(f"[remove_class_from_dataset] Sent REMOVE_CLASS for {dataset_id}, class '{class_name}' under job {job_id}.")
+            return job_id
+
+        except Exception as e:
+            logger.error(f"[remove_class_from_dataset] Error: {e}")
+            self.job_error(job_id, f"Removal init failed for {dataset_id}, class '{class_name}': {e}")
+            raise
+        finally:
+            if locked and not sent_to_queue:
+                self.unlock_dataset(dataset_id, job_id)
+                
+    #%% left off here   
+    def upload_images_to_dataset(
+                             self,
+                             dataset_id: str,
+                             images: list[str],
+                             labels: list[str],
+                             bands_mapping: dict[str, str],
+                             forced_split: str | None = None) -> str:
+         """
+         Upload local images to the global temp-images folder and enqueue an IMAGE_UPLOAD job.
+         """
+         
+         ddb = self.clients['ddb']
+         s3 = self.clients['s3']
+         sqs = self.clients['sqs']
+         job_table = self.config['DDB_JOB_TABLE']
+         dataset_table = self.config['DDB_DATASET_TABLE']
+         image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
+         bucket = self.config['S3_BUCKET_NAME']
+         root = self.config['S3_DATASETS_ROOT']
+ 
+         # Pre-checks
+         if bands_mapping is None:
+             raise ValueError("bands_mapping is required for all uploads.")
+         if forced_split not in (None, "training", "validation", "testing"):
+             raise ValueError("forced_split must be one of None, 'training', 'validation', or 'testing'")
+         if not self.dataset_exists(dataset_id):
+             raise Exception(f"Dataset {dataset_id} does not exist.")
+         if self.dataset_locked(dataset_id):
+             raise Exception(f"Dataset {dataset_id} is currently locked.")
+         if not isinstance(images, list) or not all(isinstance(p, str) for p in images):
+             raise Exception("images must be a list of local file paths (strings).")
+         if not isinstance(labels, list) or not all(isinstance(l, str) for l in labels):
+             raise Exception("labels must be a list of strings.")
+         if len(images) != len(labels):
+             raise Exception("images and labels must have the same length.")
+         if not images:
+             raise Exception("images list cannot be empty.")
+ 
+         # Validate each path
+         valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+         for path in images:
+             if not os.path.exists(path):
+                 raise Exception(f"Image path does not exist: {path}")
+             ext = os.path.splitext(path)[1].lower()
+             if ext not in valid_exts:
+                 raise Exception(f"Unsupported image type for {path}. Must be jpg/jpeg/png/tif/tiff.")
+ 
+         # Fetch dataset row
+         resp = ddb.get_item(
+             TableName=dataset_table,
+             Key={'dataset_id': {'S': dataset_id}},
+             ConsistentRead=True
+         )
+         item = resp.get('Item')
+         if not item:
+             raise Exception(f"Dataset {dataset_id} not found after existence check.")
+ 
+         # Load dataset schema
+         class_dict_str = item.get('class_to_id_dict', {}).get('S', '{}')
+         dataset_band_info_str = item.get('band_info', {}).get('S')
+         if not dataset_band_info_str:
+             raise Exception(f"Dataset {dataset_id} missing band_info definition.")
+         try:
+             class_dict = json.loads(class_dict_str)
+             dataset_band_info = json.loads(dataset_band_info_str)
+         except json.JSONDecodeError:
+             raise Exception(f"Corrupted dataset metadata for {dataset_id}.")
+ 
+         # Validate labels
+         for label in labels:
+             if label not in class_dict:
+                 raise Exception(f"Label '{label}' not found in dataset {dataset_id} classes.")
+ 
+         # Validate bands_mapping against dataset definition
+         if bands_mapping != dataset_band_info:
+             raise Exception(f"bands_mapping {bands_mapping} does not match dataset band_info {dataset_band_info}")
+ 
+         job_id = str(uuid.uuid4())
+         created_at = datetime.datetime.utcnow().isoformat()
+         locked = False
+         sent_to_queue = False
+         uploaded_keys: list[str] = []
+ 
+         try:
+             # Lock dataset
+             self.lock_dataset(dataset_id, job_id)
+             locked = True
+ 
+             # Insert job row
+             ddb.put_item(
+                 TableName=job_table,
+                 Item={
+                     "job_id": {"S": job_id},
+                     "created_at": {"S": created_at},
+                     "event_type": {"S": "IMAGE_UPLOAD"},
+                     "job_summary": {"S": f"Starting uploading of {len(images)} images to dataset {dataset_id}"},
+                     "job_status": {"S": "PENDING"}
+                 }
+             )
+ 
+             manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": []}
+ 
+             for path, label in zip(images, labels):
+                 phash = api_helpers.compute_phash(path)
+                 
+                 if self.phash_exists(phash):
+                     logger.info(f"[upload_images_to_dataset] phash of image at {path} in class {label} already present in images folder, skipping.")
+                     continue
+                 
+                 ext = os.path.splitext(path)[1].lower()
+ 
+                 # Extract band info
+                 bands_info = api_helpers.extract_bands(path, [bands_mapping[str(i)] for i in range(len(bands_mapping))])
+ 
+                 # Extra check for GeoTIFF
+                 if ext in (".tif", ".tiff") and bands_info["bands_source"] == "gdal_metadata":
+                     if bands_info["bands_map"] != dataset_band_info:
+                         raise Exception(
+                             f"GeoTIFF metadata {bands_info['bands_map']} does not match dataset band_info {dataset_band_info}"
+                         )
+ 
+                 # Upload original file (no conversion)
+                 key = f"{root}/temp-images/{phash}{ext}"
+                 with open(path, "rb") as f:
+                     s3.put_object(
+                         Bucket=bucket,
+                         Key=key,
+                         Body=f,
+                         ContentType=api_helpers.extension_to_mime(ext)
+                     )
+                 uploaded_keys.append(key)
+ 
+                 manifest["images"].append({
+                     "phash": phash,
+                     "filename": os.path.basename(path),
+                     "label": label,
+                     'extension': ext.replace('.',''),
+                     "bands_count": bands_info["bands_count"],
+                     "bands_map": bands_info["bands_map"],
+                     "bands_source": bands_info["bands_source"],
+                     "forced_split": forced_split
+                 })
+ 
+             # Upload manifest JSON
+             if len(manifest["images"]) > 0:
+                 manifest_key = f"{root}/temp-images/{job_id}.json"
+                 s3.put_object(
+                     Bucket=bucket,
+                     Key=manifest_key,
+                     Body=json.dumps(manifest).encode("utf-8"),
+                     ContentType="application/json"
+                 )
+                 uploaded_keys.append(manifest_key)
+ 
+                 # Send event to image ops queue
+                 queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
+                 event = {"event_type": "IMAGE_UPLOAD", "dataset_id": dataset_id, "job_id": job_id}
+                 sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+                 sent_to_queue = True
+ 
+             logger.info(f"[upload_images_to_dataset] Enqueued IMAGE_UPLOAD job {job_id} for dataset {dataset_id}.")
+             return job_id
+ 
+         except Exception as e:
+             logger.error(f"[upload_images_to_dataset] Error: {e}")
+             self.job_error(job_id, f"Image upload init failed for dataset {dataset_id}: {e}")
+ 
+             # Cleanup uploaded files if enqueue failed
+             if uploaded_keys and not sent_to_queue:
+                 for key in uploaded_keys:
+                     try:
+                         s3.delete_object(Bucket=bucket, Key=key)
+                         logger.info(f"[upload_images_to_dataset] Cleaned up {key} after failure.")
+                     except Exception as cleanup_err:
+                         logger.warning(f"[upload_images_to_dataset] Failed to cleanup {key}: {cleanup_err}")
+             raise
+         finally:
+             if locked and not sent_to_queue:
+                 self.unlock_dataset(dataset_id, job_id)
+                 
+    def remove_images_from_dataset(self, dataset_id: str, images: list[str]) -> str:
+        """
+        Remove images from a dataset by uploading a deletion manifest to S3
+        and sending a REMOVE_IMAGES event to the image ops queue.
+        """
+        ddb = self.clients['ddb']
+        s3 = self.clients['s3']
+        sqs = self.clients['sqs']
+        job_table = self.config['DDB_JOB_TABLE']
+        image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
+        bucket = self.config['S3_BUCKET_NAME']
+        root = self.config['S3_DATASETS_ROOT']
+
+        queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
+
+        # Pre-checks
+        if not self.dataset_exists(dataset_id):
+            raise Exception(f"Dataset {dataset_id} does not exist.")
+        if self.dataset_locked(dataset_id):
+            raise Exception(f"Dataset {dataset_id} is currently locked.")
+        if not isinstance(images, list) or not all(isinstance(ph, str) for ph in images):
+            raise Exception("images must be a list of strings (pHashes).")
+        if len(images) == 0:
+            raise Exception("images list cannot be empty.")
+
+        job_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat()
+        locked = False
+        sent_to_queue = False
+        uploaded_keys: list[str] = []
+
+        try:
+            # Lock dataset
+            self.lock_dataset(dataset_id, job_id)
+            locked = True
+
+            # Insert job row
+            ddb.put_item(
+                TableName=job_table,
+                Item={
+                    "job_id": {"S": job_id},
+                    "created_at": {"S": created_at},
+                    "event_type": {"S": "REMOVE_IMAGES"},
+                    "job_summary": {"S": f"Removing {len(images)} images from dataset {dataset_id}"},
+                    "job_status": {"S": "PENDING"}
+                }
+            )
+
+            # Write manifest to S3
+            manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": images}
+            manifest_key = f"{root}/temp-deletions/{job_id}.json"
+            s3.put_object(
+                Bucket=bucket,
+                Key=manifest_key,
+                Body=json.dumps(manifest).encode("utf-8"),
+                ContentType="application/json"
+            )
+            uploaded_keys.append(manifest_key)
+
+            # Send lightweight event
+            event = {"event_type": "REMOVE_IMAGES", "dataset_id": dataset_id, "job_id": job_id}
+            sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+            sent_to_queue = True
+
+            logger.info(f"[remove_images_from_dataset] Enqueued REMOVE_IMAGES job {job_id} "
+                        f"for dataset {dataset_id}, manifest {manifest_key}.")
+            return job_id
+
+        except Exception as e:
+            logger.error(f"[remove_images_from_dataset] Error: {e}")
+            self.job_error(job_id, f"Removal init failed for dataset {dataset_id}: {e}")
+
+            # Cleanup manifest if enqueue failed
+            if uploaded_keys and not sent_to_queue:
+                for key in uploaded_keys:
+                    try:
+                        s3.delete_object(Bucket=bucket, Key=key)
+                        logger.info(f"[remove_images_from_dataset] Cleaned up {key} after failure.")
+                    except Exception as cleanup_err:
+                        logger.warning(f"[remove_images_from_dataset] Failed to cleanup {key}: {cleanup_err}")
+            raise
+        finally:
+            if locked and not sent_to_queue:
+                self.unlock_dataset(dataset_id, job_id)
+                                    
+    def sync_datasets(self, dataset_ids: str | list[str]) -> str:
+        """
+        Initiate a sync operation for one or more datasets by sending a SYNC event
+        to the sync SQS queue. Tracks the operation as a Job in the Job table.
+        """
+        ddb = self.clients['ddb']
+        sqs = self.clients['sqs']
+        dataset_table = self.config['DDB_DATASET_TABLE']
+        job_table = self.config['DDB_JOB_TABLE']
+        sync_queue_name = self.config['SQS_QUEUE_SYNC']
+
+        queue_url = sqs.get_queue_url(QueueName=sync_queue_name)["QueueUrl"]
+
+        resolved_ids: list[str] = []
+        if dataset_ids == "all":
+            # Scan dataset table for all unlocked datasets
+            resp = ddb.scan(TableName=dataset_table, ConsistentRead=True)
+            for item in resp.get("Items", []):
+                dsid = item["dataset_id"]["S"]
+                locked = item.get("locked", {}).get("BOOL", False)
+                if not locked:
                     resolved_ids.append(dsid)
-            else:
-                raise Exception("dataset_ids must be 'all' or a list of strings.")
-    
-            job_id = str(uuid.uuid4())
-            created_at = datetime.datetime.utcnow().isoformat()
-            locked_ids: list[str] = []
-            sent_to_queue = False
-    
-            try:
-                # Lock each dataset under this job_id
-                for dsid in resolved_ids:
-                    self.lock_dataset(dsid, job_id)
-                    locked_ids.append(dsid)
-    
-                # Insert job row
-                ddb.put_item(
-                    TableName=job_table,
-                    Item={
-                        "job_id": {"S": job_id},
-                        "created_at": {"S": created_at},
-                        "event_type": {"S": "SYNC"},
-                        "job_summary": {"S": f"Syncing {len(resolved_ids)} datasets"},
-                        "job_status": {"S": "PENDING"}
-                    }
-                )
-    
-                # Build event
-                event = {"event_type": "SYNC", "job_id": job_id, "dataset_ids": resolved_ids}
-    
-                # Send to sync queue
-                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                sent_to_queue = True
-                logger.info(f"[sync_datasets] Enqueued SYNC job {job_id} for {len(resolved_ids)} datasets.")
-                return job_id
-    
-            except Exception as e:
-                logger.error(f"[sync_datasets] Error: {e}")
-                self.job_error(job_id, f"Sync init failed: {e}")
-                # Unlock any datasets we locked
+            if not resolved_ids:
+                raise Exception("No unlocked datasets available to sync.")
+        elif isinstance(dataset_ids, list) and all(isinstance(d, str) for d in dataset_ids):
+            for dsid in dataset_ids:
+                if not self.dataset_exists(dsid):
+                    raise Exception(f"Dataset {dsid} does not exist.")
+                if self.dataset_locked(dsid):
+                    raise Exception(f"Dataset {dsid} is currently locked.")
+                resolved_ids.append(dsid)
+        else:
+            raise Exception("dataset_ids must be 'all' or a list of strings.")
+
+        job_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat()
+        locked_ids: list[str] = []
+        sent_to_queue = False
+
+        try:
+            # Lock each dataset under this job_id
+            for dsid in resolved_ids:
+                self.lock_dataset(dsid, job_id)
+                locked_ids.append(dsid)
+
+            # Insert job row
+            ddb.put_item(
+                TableName=job_table,
+                Item={
+                    "job_id": {"S": job_id},
+                    "created_at": {"S": created_at},
+                    "event_type": {"S": "SYNC"},
+                    "job_summary": {"S": f"Syncing {len(resolved_ids)} datasets"},
+                    "job_status": {"S": "PENDING"}
+                }
+            )
+
+            # Build event
+            event = {"event_type": "SYNC", "job_id": job_id, "dataset_ids": resolved_ids}
+
+            # Send to sync queue
+            sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+            sent_to_queue = True
+            logger.info(f"[sync_datasets] Enqueued SYNC job {job_id} for {len(resolved_ids)} datasets.")
+            return job_id
+
+        except Exception as e:
+            logger.error(f"[sync_datasets] Error: {e}")
+            self.job_error(job_id, f"Sync init failed: {e}")
+            # Unlock any datasets we locked
+            for dsid in locked_ids:
+                try:
+                    self.unlock_dataset(dsid, job_id)
+                except Exception as unlock_err:
+                    logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
+            raise
+        finally:
+            if not sent_to_queue:
                 for dsid in locked_ids:
                     try:
                         self.unlock_dataset(dsid, job_id)
                     except Exception as unlock_err:
                         logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
-                raise
-            finally:
-                if not sent_to_queue:
-                    for dsid in locked_ids:
-                        try:
-                            self.unlock_dataset(dsid, job_id)
-                        except Exception as unlock_err:
-                            logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
+                        
+    def query_logs(self,
+                   filters: dict,
+                   look_back_hours: float = 1.0,
+                   timeout_seconds: int = 30,
+                   poll_interval: int = 2,
+                   limit: int = 1000):
+        """
+        Run a CloudWatch Logs Insights query with flexible filters.
+        
+        filters: dict of field -> value, e.g. {"job_id": "12345", "level": "ERROR"}
+        look_back_hours: how many hours back from 'now' to search (can be fractional).
+        timeout_seconds: max time to wait for query to complete.
+        poll_interval: how often to poll for results.
+        limit: max number of results to return.
+        
+        Example calls:
+            Query by job_id only
+            results = api.query_logs({"job_id": "12345"}, look_back_hours=2)
+            
+            Query by job_id and level
+            results = api.query_logs({"job_id": "12345", "level": "ERROR"}, look_back_hours=6)
+            
+            Query all logs in last 30 minutes (no filters)
+            results = api.query_logs({}, look_back_hours=0.5)
+
+        """
+        log_group_name = self.config['LOG_GROUP_NAME']
+        logs = self.clients['logs']
+    
+        # Compute time window
+        end_time = int(time.time())
+        start_time = int(end_time - look_back_hours * 3600)
+    
+        # Build filter expression
+        filter_exprs = [f'{field} = "{value}"' for field, value in filters.items()]
+        filter_clause = " and ".join(filter_exprs) if filter_exprs else ""
+    
+        # Build query string
+        query = f"""
+        fields @timestamp, lambda, job_id, status, level, utc_time
+        {"| filter " + filter_clause if filter_clause else ""}
+        | sort @timestamp asc
+        """
+    
+        start_query_response = logs.start_query(
+            logGroupName=log_group_name,
+            startTime=start_time,
+            endTime=end_time,
+            queryString=query,
+            limit=limit
+        )
+    
+        query_id = start_query_response["queryId"]
+    
+        # Poll with timeout
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            resp = logs.get_query_results(queryId=query_id)
+            
+            if resp["status"] == "Failed":
+                logger.error(f"Query {query_id} failed: {resp}")
+                return {"status": "Failed", "results": None, "raw": resp}
+            
+            elif resp["status"] == "Cancelled":
+                logger.error(f"Query {query_id} cancelled: {resp}")
+                return {"status": "Cancelled", "results": None, "raw": resp}
+            
+            elif resp["status"] == "Complete":
+                logger.info(f"Query {query_id} completed successfully.")
+                parsed = [
+                    {col["field"]: col["value"] for col in row}
+                    for row in resp["results"]
+                ]
+                return {"status": "Complete", "results": parsed, "raw": resp}
+                              
+            time.sleep(poll_interval)
+    
+        logger.warning(f"Query {query_id} timed out after {timeout_seconds}s")
+        raise TimeoutError(f"Logs Insights query did not complete within {timeout_seconds} seconds")

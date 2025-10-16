@@ -8,14 +8,13 @@ lifecycle queue.
 """
 
 import os
+import time
+import uuid
 import json
-import boto3
-import datetime
-import logging
-from botocore.exceptions import ClientError
+from datetime import datetime, timezone
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+import boto3
+from botocore.exceptions import ClientError
 
 # --- Environment variables ---
 AWS_REGION = os.environ["AWS_REGION"]
@@ -24,12 +23,67 @@ S3_DATASETS_ROOT = os.environ["S3_DATASETS_ROOT"]
 DDB_IMAGERY_TABLE = os.environ["DDB_IMAGERY_TABLE"]
 DDB_DATASET_TABLE = os.environ["DDB_DATASET_TABLE"]
 DDB_JOB_TABLE = os.environ["DDB_JOB_TABLE"]
+LOG_GROUP_NAME = os.environ["LOG_GROUP_NAME"] # Main centralized log group all calls in this infrastructure log to.
+AWS_LAMBDA_FUNCTION_NAME = os.environ["AWS_LAMBDA_FUNCTION_NAME"]
 
 # --- AWS clients ---
 s3 = boto3.client("s3", region_name=AWS_REGION)
 ddb = boto3.client("dynamodb", region_name=AWS_REGION)
+logs = boto3.client("logs")
 
-# --- Helpers for job and dataset status ---
+# Generate a unique stream name per container, prevents race conditions on logs.
+# Use Lambda function name + container-specific UUID
+LOG_STREAM = f"{AWS_LAMBDA_FUNCTION_NAME}-{int(time.time())}-{uuid.uuid4()}"
+
+_sequence_token = None
+_stream_initialized = False
+
+# --- Helpers---
+def init_log_stream():
+    global _stream_initialized
+    if _stream_initialized:
+        return
+    try:
+        logs.create_log_stream(
+            logGroupName=LOG_GROUP_NAME,
+            logStreamName=LOG_STREAM
+        )
+    except logs.exceptions.ResourceAlreadyExistsException:
+        pass
+    _stream_initialized = True
+
+def log_event_core(log_dict: dict):
+    """
+    Write a structured JSON log event into the container's dedicated stream.
+    """
+    global _sequence_token
+    init_log_stream()
+
+    event = {
+        "timestamp": int(time.time() * 1000), # unix in milliseconds required by CloudWatch.
+        "message": json.dumps(log_dict)
+    }
+
+    kwargs = {
+        "logGroupName": LOG_GROUP_NAME,
+        "logStreamName": LOG_STREAM,
+        "logEvents": [event]
+    }
+    if _sequence_token:
+        kwargs["sequenceToken"] = _sequence_token
+
+    resp = logs.put_log_events(**kwargs)
+    _sequence_token = resp.get("nextSequenceToken")
+
+def log_event(job_id, message, level = 'INFO'):
+    log_event_core({
+                    "lambda": AWS_LAMBDA_FUNCTION_NAME,
+                    "job_id": job_id,
+                    "status": message,
+                    'level': level,
+                    'utc_time': datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                })
+
 def unlock_dataset(dataset_id, job_id):
     """
     Unlock a dataset, clearing the lock and lock owner.
@@ -45,9 +99,9 @@ def unlock_dataset(dataset_id, job_id):
             },
             ConditionExpression="locked_by = :job_id"
         )
-        logger.info(f"[unlock_dataset] Dataset {dataset_id} unlocked by job {job_id}.")
+        log_event(job_id, f"Dataset {dataset_id} unlocked by job id {job_id}")
     except ClientError as e:
-        logger.warning(f"[unlock_dataset] Could not unlock dataset {dataset_id}: {e}")
+        log_event(job_id, f"Could not unlock dataset {dataset_id}: {e}", level = 'ERROR')
 
 def job_update(job_id, status, summary=None):
     """Update job status in the Job table."""
@@ -70,7 +124,8 @@ def job_update(job_id, status, summary=None):
 def handle_delete_dataset(event):
     dataset_id = event["dataset_id"]
     job_id = event["job_id"]
-    logger.info(f"[LifecycleLambda] Handling DELETE_DATASET for {dataset_id}, job {job_id}")
+
+    log_event(job_id, f"Handling DELETE_DATASET event for dataset {dataset_id} and job id {job_id}")
 
     try:
         # 1. Query imagery table for all images belonging to this dataset
@@ -100,14 +155,14 @@ def handle_delete_dataset(event):
                 ExpressionAttributeValues={":p": {"S": phash}}
             )
             
-            # when uloading, we guarntee phashes are unique.
+            # when uploading, we guarantee phashes are unique.
             if not resp.get("Items"):  # no other dataset references this image
                 key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                 try:
                     s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-                    logger.info(f"[LifecycleLambda] Deleted image {key} from S3")
+                    log_event(job_id, f"Deleted image {key} from S3")
                 except Exception as s3err:
-                    logger.warning(f"[LifecycleLambda] Failed to delete {key}: {s3err}")
+                    log_event(job_id, f"Failed to delete {key}: {s3err}", level = 'ERROR')
 
         # 3. Delete manifest folder for this dataset
         manifest_prefix = f"{S3_DATASETS_ROOT}/manifests/{dataset_id}/"
@@ -115,7 +170,7 @@ def handle_delete_dataset(event):
         for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=manifest_prefix):
             for obj in page.get("Contents", []):
                 s3.delete_object(Bucket=S3_BUCKET_NAME, Key=obj["Key"])
-                logger.info(f"[LifecycleLambda] Deleted manifest object {obj['Key']}")
+                log_event(job_id, f"Deleted manifest object {obj['Key']}")
 
         # 4. Delete dataset row
         ddb.delete_item(
@@ -125,23 +180,24 @@ def handle_delete_dataset(event):
 
         # 5. Mark job complete
         job_update(job_id, "COMPLETE", f"Dataset {dataset_id} deleted successfully.")
-        logger.info(f"[LifecycleLambda] DELETE_DATASET job {job_id} completed for dataset {dataset_id}")
+        log_event(job_id, f"DELETE_DATASET job {job_id} completed for dataset {dataset_id}")
 
     except Exception as e:
-        logger.error(f"[LifecycleLambda] DELETE_DATASET failed for {dataset_id}: {e}")
+        log_event(job_id, f"DELETE_DATASET failed for {dataset_id}: {e}", level = 'ERROR')
         job_update(job_id, "FAILED", f"Deletion failed for dataset {dataset_id}: {e}")
         try:
             unlock_dataset(dataset_id, job_id)
         except Exception as unlock_err:
-            logger.warning(f"[LifecycleLambda] Failed to unlock {dataset_id} after error: {unlock_err}")
+            log_event(job_id, f"Failed to unlock {dataset_id} after error: {unlock_err}", level = 'ERROR')
         raise
 
 def handle_remove_class_from_dataset(event):
     dataset_id = event["dataset_id"]
     class_name = event["class_name"]
     job_id = event["job_id"]
-    logger.info(f"[LifecycleLambda] Handling REMOVE_CLASS for {dataset_id}, class {class_name}, job {job_id}")
-
+    
+    log_event(job_id, f"Handling REMOVE_CLASS event for class {class_name} in dataset {dataset_id} and job id {job_id}")
+    
     try:
         # 1. Fetch dataset row
         resp = ddb.get_item(
@@ -207,22 +263,21 @@ def handle_remove_class_from_dataset(event):
                     key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                     try:
                         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-                        logger.info(f"[LifecycleLambda] Deleted image {key} from S3")
+                        log_event(job_id, f"Deleted image {key} from S3")
                     except Exception as s3err:
-                        logger.warning(f"[LifecycleLambda] Failed to delete {key}: {s3err}")
+                        log_event(job_id, f"Failed to delete {key}: {s3err}", level = 'ERROR')
 
         # 5. Mark job complete and unlock dataset
         job_update(job_id, "COMPLETE", f"Class '{class_name}' removed from dataset {dataset_id}.")
         unlock_dataset(dataset_id, job_id)
-        logger.info(f"[LifecycleLambda] REMOVE_CLASS job {job_id} completed for dataset {dataset_id}")
-
+        log_event(job_id, f"REMOVE_CLASS job {job_id} completed for dataset {dataset_id}")
     except Exception as e:
-        logger.error(f"[LifecycleLambda] REMOVE_CLASS failed for {dataset_id}, class {class_name}: {e}")
+        log_event(job_id, f"REMOVE_CLASS failed for {dataset_id}, class {class_name}: {e}", level = 'ERROR')
         job_update(job_id, "FAILED", f"Class removal failed for dataset {dataset_id}, class '{class_name}': {e}")
         try:
             unlock_dataset(dataset_id, job_id)
         except Exception as unlock_err:
-            logger.warning(f"[LifecycleLambda] Failed to unlock {dataset_id} after error: {unlock_err}")
+            log_event(job_id, f"Failed to unlock {dataset_id} after error: {unlock_err}", level = 'ERROR')
         raise
 
 # --- Lambda entrypoint ---
@@ -231,19 +286,21 @@ def lambda_handler(event, context):
     Lambda entrypoint for lifecycle operations.
     Triggered by SQS messages from the lifecycle queue.
     """
+    
     for record in event.get("Records", []):
         try:
             body = json.loads(record["body"])
+            job_id = body["job_id"]
             event_type = body.get("event_type")
-            logger.info(f"[LifecycleLambda] Received event: {event_type}")
+            log_event(job_id, f"Received event: {event_type}")
 
             if event_type == "DELETE_DATASET":
                 handle_delete_dataset(body)
             elif event_type == "REMOVE_CLASS":
                 handle_remove_class_from_dataset(body)
             else:
-                logger.warning(f"[LifecycleLambda] Unknown event_type: {event_type}")
+                log_event(job_id, f"Unknown event_type: {event_type}", level = 'ERROR')
         except Exception as e:
-            logger.error(f"[LifecycleLambda] Error processing record: {e}")
+            log_event(job_id, f"Error processing record: {e}", level = 'ERROR')
             # Let the exception bubble up so SQS/Lambda retry/DLQ can handle it
             raise

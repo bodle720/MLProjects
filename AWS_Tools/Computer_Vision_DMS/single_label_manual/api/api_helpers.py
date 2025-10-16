@@ -10,7 +10,18 @@ import tifffile
 import xml.etree.ElementTree as ET
 import numpy as np
 
-VALID_BANDS = {"Red","Green","Blue","Gray","NIR","SWIR1","SWIR2"}  # extendable
+VALID_BANDS = {"red","green","blue","gray","nir","swir1","swir2"}  # extendable
+
+def extension_to_mime(ext: str) -> str:
+    ext = ext.lower().lstrip(".")
+    if ext in ("jpg", "jpeg"):
+        return "image/jpeg"
+    elif ext == "png":
+        return "image/png"
+    elif ext in ("tif", "tiff"):
+        return "image/tiff"
+    else:
+        raise ValueError(f"Unsupported extension: {ext}")
 
 def load_config_from_ssm(ssm_client, infrastructure_name: str) -> dict:
     """
@@ -83,11 +94,13 @@ def extract_bands(path: str, bands: list[str]):
         else:
             bands_map = {str(i): b for i,b in enumerate(bands)}
 
-    else:  # PNG/JPEG
+    elif ext in ('.jpeg', '.jpg', '.png'):  # PNG/JPEG
         with Image.open(path) as img:
             arr = np.array(img)
             bands_count = len(img.getbands())
         bands_map = {str(i): b for i,b in enumerate(bands)}
+    else:
+        raise ValueError(f"Extension is not supported: {ext}")
 
     if len(bands) != bands_count:
         raise ValueError(f"Provided bands {bands} do not match image band count {bands_count}")
@@ -97,4 +110,6 @@ def extract_bands(path: str, bands: list[str]):
 def compute_phash(path: str) -> str:
     """Compute perceptual hash (phash) of an image file."""
     with Image.open(path) as img:
+        # Ensure consistent conversion
+        img = img.convert("L")
         return str(imagehash.phash(img))

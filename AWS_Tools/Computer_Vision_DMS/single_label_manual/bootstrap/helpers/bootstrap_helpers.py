@@ -5,6 +5,97 @@ Utilitiy functions to assist in setting up the infrastructure.
 
 import json
 import logging
+from botocore.exceptions import ClientError
+
+def load_config_from_ssm(ssm_client, infrastructure_name: str) -> dict:
+    """
+    Loads all parameters for a given infrastructure_name from SSM Parameter Store
+    and returns them as a dict.
+
+    Raises:
+        ValueError: if no parameters are found for the given infrastructure_name.
+    """
+    prefix = f"/cv-datasets/single-label/{infrastructure_name}/infrastructure/"
+    config = {}
+
+    paginator = ssm_client.get_paginator("get_parameters_by_path")
+    for page in paginator.paginate(Path=prefix, Recursive=True, WithDecryption=True):
+        for param in page.get("Parameters", []):
+            key = param["Name"].split("/")[-1]  # last segment is the config key
+            config[key] = param["Value"]
+
+    if not config:
+        raise ValueError(
+            f"No parameters found under {prefix}. "
+            f"Did you run part 2 to register this infrastructure?"
+        )
+
+    return config
+
+def store_arns_in_ssm(clients,
+                      infrastructure_name,
+                      role_arns,
+                      queue_arns,
+                      lambda_arns,
+                      table_arns,
+                      image_uris,
+                      log_group_arn):
+    
+    ssm_client = clients['ssm']
+    prefix = f"/cv-datasets/single-label/{infrastructure_name}/infrastructure/"
+
+    # Merge role, queue, table, lambdas, and log group ARNs
+    all_arns = {**role_arns, **queue_arns, **lambda_arns, **table_arns, **image_uris, "LOG_GROUP_ARN": log_group_arn}
+
+    for key, value in all_arns.items():
+        if not isinstance(value, str):
+            raise ValueError(f"Value for {key} must be a string ARN, got {type(value)}")
+        try:
+            ssm_client.put_parameter(
+                Name=f"{prefix}{key}",
+                Value=value,
+                Type="String",
+                Overwrite=True,
+                Description=f"{key} for {infrastructure_name}"
+            )
+            logging.info(f"Stored {key} -> {prefix}{key}")
+        except ClientError as e:
+            logging.error(f"Failed to store {key} in SSM: {e}")
+            raise
+
+def make_log_group(config, clients, retention_days=30):
+    logs_client = clients['logs']
+    log_group_name = config['LOG_GROUP_NAME']
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group_name)
+        logging.info(f"Created log group: {log_group_name}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceAlreadyExistsException":
+            logging.error(f"Log group {log_group_name} already exists, part 2 check failed.")
+        else:
+            raise
+
+    # Apply retention policy
+    logs_client.put_retention_policy(
+        logGroupName=log_group_name,
+        retentionInDays=retention_days
+    )
+
+    # Retrieve ARN via describe_log_groups
+    resp = logs_client.describe_log_groups(
+        logGroupNamePrefix=log_group_name
+    )
+    arn = None
+    for lg in resp.get("logGroups", []):
+        if lg["logGroupName"] == log_group_name:
+            arn = lg["arn"]
+            break
+
+    if arn is None:
+        raise RuntimeError(f"Could not find ARN for log group {log_group_name}")
+
+    return arn
 
 def create_roles(config, clients):
     aws_region = config['AWS_REGION']
@@ -28,11 +119,10 @@ def create_roles(config, clients):
             {
                 "Effect": "Allow",
                 "Action": [
-                    "logs:CreateLogGroup",
                     "logs:CreateLogStream",
                     "logs:PutLogEvents"
                 ],
-                "Resource": "*"
+                "Resource": f"arn:aws:logs:{aws_region}:{account_id}:log-group:{config['LOG_GROUP_NAME']}:*"
             },
             {
                 "Effect": "Allow",
@@ -116,11 +206,10 @@ def create_roles(config, clients):
             {
                 "Effect": "Allow",
                 "Action": [
-                    "logs:CreateLogGroup",
                     "logs:CreateLogStream",
                     "logs:PutLogEvents"
                 ],
-                "Resource": "*"
+                "Resource": f"arn:aws:logs:{aws_region}:{account_id}:log-group:{config['LOG_GROUP_NAME']}:*"
             },
             {
                 "Effect": "Allow",
@@ -213,11 +302,10 @@ def create_roles(config, clients):
             {
                 "Effect": "Allow",
                 "Action": [
-                    "logs:CreateLogGroup",
                     "logs:CreateLogStream",
                     "logs:PutLogEvents"
                 ],
-                "Resource": "*"
+                "Resource": f"arn:aws:logs:{aws_region}:{account_id}:log-group:{config['LOG_GROUP_NAME']}:*"
             },
             {
                 "Effect": "Allow",
@@ -295,26 +383,12 @@ def create_roles(config, clients):
           "Version": "2012-10-17",
           "Statement": [
             {
-              "Sid": "CloudWatchLogs",
               "Effect": "Allow",
               "Action": [
-                "logs:CreateLogGroup",
                 "logs:CreateLogStream",
                 "logs:PutLogEvents"
               ],
-              "Resource": "*"
-            },
-            {
-              "Effect": "Allow",
-              "Action": "s3:ListBucket",
-              "Resource": f"arn:aws:s3:::{config['S3_BUCKET_NAME']}",
-              "Condition": {
-                "StringLike": {
-                  "s3:prefix": [
-                    f"{config['S3_DATASETS_ROOT']}/dlq-logs/*"
-                  ]
-                }
-              }
+              "Resource": f"arn:aws:logs:{aws_region}:{account_id}:log-group:{config['LOG_GROUP_NAME']}:*"
             },
             {
               "Sid": "SQSPermissions",
@@ -326,15 +400,6 @@ def create_roles(config, clients):
                 "sqs:GetQueueUrl"
               ],
               "Resource": f"arn:aws:sqs:{aws_region}:{account_id}:{config['SQS_QUEUE_DLQ']}"
-            },
-            {
-              "Sid": "S3Permissions",
-              "Effect": "Allow",
-              "Action": [
-                "s3:GetObject",
-                "s3:PutObject"
-              ],
-              "Resource": f"arn:aws:s3:::{config['S3_BUCKET_NAME']}/{config['S3_DATASETS_ROOT']}/dlq-logs/*"
             }
           ]
         }
@@ -553,7 +618,7 @@ def make_tables(config, clients):
 
     tables = [
         {
-            "name": config['DDB_DATASET_TABLE'],
+            "name_key": 'DDB_DATASET_TABLE',
             "params": {
                 "AttributeDefinitions": [
                     {"AttributeName": "dataset_id", "AttributeType": "S"}
@@ -565,7 +630,7 @@ def make_tables(config, clients):
             }
         },
         {
-            "name": config['DDB_IMAGERY_TABLE'],
+            "name_key": 'DDB_IMAGERY_TABLE',
             "params": {
                 "AttributeDefinitions": [
                     {"AttributeName": "dataset_phash", "AttributeType": "S"},
@@ -597,7 +662,7 @@ def make_tables(config, clients):
         },
 
         {
-            "name": config['DDB_JOB_TABLE'],
+            "name_key": 'DDB_JOB_TABLE',
             "params": {
                 "AttributeDefinitions": [
                     {"AttributeName": "jobId", "AttributeType": "S"}
@@ -610,14 +675,20 @@ def make_tables(config, clients):
         }
     ]
 
+    table_arns = {}
     for table in tables:
         try:
-            ddb.create_table(TableName=table["name"], **table["params"])
-            logging.info(f"Creating DynamoDB table {table['name']}")
+            table_name = config[table["name_key"]]
+            resp = ddb.create_table(TableName=table_name, **table["params"])
+            logging.info(f"Creating DynamoDB table {table_name}")
             waiter = ddb.get_waiter("table_exists")
-            waiter.wait(TableName=table["name"])
-            logging.info(f"DynamoDB table {table['name']} is active.")
+            waiter.wait(TableName=table_name)
+            logging.info(f"DynamoDB table {table_name} is active.")
+            arn = resp["TableDescription"]["TableArn"]
+            table_arns[table["name_key"] + '_ARN'] = arn
         except ddb.exceptions.ResourceInUseException:
-            logging.info(f"DynamoDB table {table['name']} already exists, skipping.")
+            logging.error(f"DynamoDB table {table_name} already exists, part 2 failed existence check.")
 
-    logging.info("DynamoDB tables created.")   
+    logging.info("DynamoDB tables created.")  
+    
+    return table_arns

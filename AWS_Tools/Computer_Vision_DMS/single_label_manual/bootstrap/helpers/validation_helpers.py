@@ -99,8 +99,20 @@ def run_all_validations(config):
     if err := validate_img_name(config["IMAGE_NAME_DLQ"]):
         errors.append(err)
 
+    if err := validate_log_group(config["LOG_GROUP_NAME"]):
+        errors.append(err)
+            
     if errors:
         raise ValidationError(errors)
+
+def validate_log_group(name: str):
+    # Allowed: letters, numbers, underscore, hyphen, slash, period
+    LOG_GROUP_REGEX = re.compile(r'^[A-Za-z0-9_\-./]{1,512}$')
+    
+    if not LOG_GROUP_REGEX.match(name):
+        return f"Invalid CloudWatch Log Group name: {name}"
+    
+    return None
 
 def validate_infrastructure_name(name: str):
     """
@@ -235,7 +247,29 @@ def role_exists(iam, role_name):
             return False
         raise
 
+def log_group_exists(logs_client, log_group_name):
+    try:
+        resp = logs_client.describe_log_groups(
+            logGroupNamePrefix=log_group_name,
+            limit=1
+        )
+        for lg in resp.get("logGroups", []):
+            if lg["logGroupName"] == log_group_name:
+                return True
+        return False
+    except ClientError as e:
+        logging.error(f"Error describing log groups: {e}")
+        raise
+        
 # --- High-level check_* wrappers (return None or error string) ---
+
+def check_log_group(logs_client, log_group_name):
+    try:
+        if log_group_exists(logs_client, log_group_name):
+            return f"CloudWatch Log Group {log_group_name} already exists"
+    except Exception as e:
+        return f"Error checking CloudWatch Log Group {log_group_name}: {e}"
+    return None
 
 def check_bucket_and_root(s3, bucket_name, bucket_root):
     try:
@@ -320,5 +354,8 @@ def run_existence_checks(config, clients):
         if err := check_image(clients["ecr"], config[key]):
             errors.append(err)
 
+    if err := check_log_group(clients["logs"], config['LOG_GROUP_NAME']):
+        errors.append(err)
+            
     if errors:
         raise ValidationError(errors)
