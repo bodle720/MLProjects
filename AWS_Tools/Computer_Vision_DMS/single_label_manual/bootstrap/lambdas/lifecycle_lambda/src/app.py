@@ -108,7 +108,7 @@ def job_update(job_id, status, summary=None):
     expr = "SET job_status = :s, updated_at = :t"
     values = {
         ":s": {"S": status},
-        ":t": {"S": datetime.datetime.utcnow().isoformat()}
+        ":t": {"S": datetime.utcnow().isoformat()}
     }
     if summary:
         expr += ", job_summary = :sum"
@@ -128,6 +128,8 @@ def handle_delete_dataset(event):
     log_event(job_id, f"Handling DELETE_DATASET event for dataset {dataset_id} and job id {job_id}")
 
     try:
+        job_update(job_id, 'IN_PROGRESS', summary='Calling appropriate handler for dataset deletion.')
+
         # 1. Query imagery table for all images belonging to this dataset
         resp = ddb.query(
             TableName=DDB_IMAGERY_TABLE,
@@ -199,6 +201,8 @@ def handle_remove_class_from_dataset(event):
     log_event(job_id, f"Handling REMOVE_CLASS event for class {class_name} in dataset {dataset_id} and job id {job_id}")
     
     try:
+        job_update(job_id, 'IN_PROGRESS', summary='Calling appropriate handler for removing a class.')
+
         # 1. Fetch dataset row
         resp = ddb.get_item(
             TableName=DDB_DATASET_TABLE,
@@ -286,7 +290,6 @@ def lambda_handler(event, context):
     Lambda entrypoint for lifecycle operations.
     Triggered by SQS messages from the lifecycle queue.
     """
-    
     for record in event.get("Records", []):
         try:
             body = json.loads(record["body"])
@@ -301,6 +304,9 @@ def lambda_handler(event, context):
             else:
                 log_event(job_id, f"Unknown event_type: {event_type}", level = 'ERROR')
         except Exception as e:
-            log_event(job_id, f"Error processing record: {e}", level = 'ERROR')
-            # Let the exception bubble up so SQS/Lambda retry/DLQ can handle it
+            log_event(job_id, f"Error processing record: {e}", level='ERROR')
+            try:
+                job_update(job_id, 'FAILED', summary=f'Handler exception: {e}')
+            except Exception as update_err:
+                log_event(job_id, f"Failed to update job status for {job_id}: {update_err}", level='ERROR')
             raise

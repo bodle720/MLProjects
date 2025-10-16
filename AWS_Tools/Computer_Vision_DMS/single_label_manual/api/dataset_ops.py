@@ -558,8 +558,7 @@ class InfrastructureAPI:
         finally:
             if locked and not sent_to_queue:
                 self.unlock_dataset(dataset_id, job_id)
-                
-    #%% left off here   
+                 
     def upload_images_bulk(
                         self,
                         datasets: Union[str, list[str]],
@@ -803,11 +802,11 @@ class InfrastructureAPI:
                     except Exception as unlock_err:
                         logger.warning(f"[upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
-                     
+    #%% left off here
     def remove_images_from_dataset(self, dataset_id: str, images: list[str]) -> str:
         """
         Remove images from a dataset by uploading a deletion manifest to S3
-        and sending a REMOVE_IMAGES event to the image ops queue.
+        and sending a IMAGE_DELETE event to the image ops queue.
         """
         ddb = self.clients['ddb']
         s3 = self.clients['s3']
@@ -846,7 +845,7 @@ class InfrastructureAPI:
                 Item={
                     "job_id": {"S": job_id},
                     "created_at": {"S": created_at},
-                    "event_type": {"S": "REMOVE_IMAGES"},
+                    "event_type": {"S": "IMAGE_DELETE"},
                     "job_summary": {"S": f"Removing {len(images)} images from dataset {dataset_id}"},
                     "job_status": {"S": "PENDING"}
                 }
@@ -864,11 +863,11 @@ class InfrastructureAPI:
             uploaded_keys.append(manifest_key)
 
             # Send lightweight event
-            event = {"event_type": "REMOVE_IMAGES", "dataset_id": dataset_id, "job_id": job_id}
+            event = {"event_type": "IMAGE_DELETE", "dataset_id": dataset_id, "job_id": job_id}
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
 
-            logger.info(f"[remove_images_from_dataset] Enqueued REMOVE_IMAGES job {job_id} "
+            logger.info(f"[remove_images_from_dataset] Enqueued IMAGE_DELETE job {job_id} "
                         f"for dataset {dataset_id}, manifest {manifest_key}.")
             return job_id
 
