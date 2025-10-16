@@ -4,13 +4,32 @@ Utility functions for the API.
 """
 
 import os
-from PIL import Image
-import imagehash
-import tifffile
 import xml.etree.ElementTree as ET
-import numpy as np
 
-VALID_BANDS = {"red","green","blue","gray","nir","swir1","swir2"}  # extendable
+import tifffile
+import imagehash
+from PIL import Image
+
+VALID_BANDS = {"r", "g", "b", "l", "nir", "swir1", "swir2"}  # "l" = grayscale
+
+BAND_ALIASES = {
+    # visible
+    "r": "r", "red": "r",
+    "g": "g", "green": "g",
+    "b": "b", "blue": "b",
+    # grayscale
+    "l": "l", "gray": "l", "grey": "l", "grayscale": "l", "lum": "l", "luma": "l",
+    # multispectral
+    "nir": "nir", "nearinfrared": "nir", "near-infrared": "nir",
+    "swir1": "swir1",
+    "swir2": "swir2"
+}
+
+def band_name_to_valid_name(band_name: str) -> str:
+    key = band_name.strip().lower()
+    if key in BAND_ALIASES:
+        return BAND_ALIASES[key]
+    raise ValueError(f"Invalid band name: {band_name} (expected one of {sorted(VALID_BANDS)})")
 
 def extension_to_mime(ext: str) -> str:
     ext = ext.lower().lstrip(".")
@@ -23,6 +42,80 @@ def extension_to_mime(ext: str) -> str:
     else:
         raise ValueError(f"Unsupported extension: {ext}")
 
+def validate_band_info(band_info: dict[str, str]):
+    if not isinstance(band_info, dict):
+        raise ValueError("band_info must be a dict[str,str].")
+
+    # Require consecutive "0..N-1" as strings
+    keys = sorted(band_info.keys(), key=lambda k: int(k))
+    expected = [str(i) for i in range(len(keys))]
+    if keys != expected:
+        raise ValueError(f"band_info keys must be consecutive strings starting at '0'. Got {keys}")
+
+    # Require that the *raw* values are already valid canonical band names
+    values = list(band_info.values())
+    for v in values:
+        if v not in VALID_BANDS:
+            raise ValueError(f"Invalid band name '{v}'. Must be one of {sorted(VALID_BANDS)}.")
+
+    # No duplicates allowed
+    if len(set(values)) != len(values):
+        raise ValueError(f"Duplicate band names found in {values}.")
+
+def bands_appear_valid(path: str, desired_bands_order: list[str]) -> tuple[bool, str]:
+    """
+    Lightweight sanity check that the image at `path` appears consistent with desired_bands_order.
+    Returns (True, "") if valid, or (False, reason) if not.
+    """
+    ext = os.path.splitext(path)[1].lower()
+
+    try:
+        if ext in (".tif", ".tiff"):
+            with tifffile.TiffFile(path) as tif:
+                arr = tif.asarray()
+                bands_count = arr.shape[2] if arr.ndim == 3 else 1
+
+                if bands_count != len(desired_bands_order):
+                    return False, f"Band count {bands_count} does not match expected {len(desired_bands_order)}"
+
+                # Try GDAL metadata
+                tags = {}
+                for page in tif.pages:
+                    for tag in page.tags.values():
+                        tags[tag.name] = tag.value
+                if "GDAL_METADATA" in tags:
+                    try:
+                        root = ET.fromstring(tags["GDAL_METADATA"])
+                        names = [item.text for item in root.findall(".//Item[@name='BandName']") if item.text]
+                        if names and len(names) == bands_count:
+                            norm_names = [band_name_to_valid_name(n) for n in names]
+                            if norm_names != desired_bands_order:
+                                return False, f"GDAL metadata bands {norm_names} do not match expected {desired_bands_order}"
+                    except Exception as parse_err:
+                        return False, f"Failed to parse GDAL metadata: {parse_err}"
+
+        elif ext in (".jpeg", ".jpg", ".png"):
+            with Image.open(path) as img:
+                bands_count = len(img.getbands())
+                if bands_count != len(desired_bands_order):
+                    return False, f"Image has {bands_count} channels but expected {len(desired_bands_order)}"
+
+        else:
+            return False, f"Unsupported extension {ext}"
+
+    except Exception as e:
+        return False, f"Error inspecting {path}: {e}"
+
+    return True, ""
+
+
+def compute_phash(path: str) -> str:
+    """Compute perceptual hash (phash) of an image file."""
+    with Image.open(path) as img:
+        # Ensure consistent conversion
+        img = img.convert("L")
+        return str(imagehash.phash(img))
+    
 def load_config_from_ssm(ssm_client, infrastructure_name: str) -> dict:
     """
     Loads all parameters for a given infrastructure_name from SSM Parameter Store
@@ -47,69 +140,3 @@ def load_config_from_ssm(ssm_client, infrastructure_name: str) -> dict:
         )
 
     return config
-
-def validate_band_info(band_info: dict[str,str]):
-    if not isinstance(band_info, dict):
-        raise ValueError("band_info must be a dict[str,str].")
-        
-    keys = list(band_info.keys())
-    expected = [str(i) for i in range(len(keys))]
-    
-    if sorted(keys, key=int) != expected:
-        raise ValueError(f"band_info keys must be consecutive strings starting at '0'. Got {keys}")
-        
-    for v in band_info.values():
-        if v not in VALID_BANDS:
-            raise ValueError(f"Invalid band name '{v}'. Must be one of {VALID_BANDS}.")
-    
-def extract_bands(path: str, bands: list[str]):
-    """
-    Inspect image and return band metadata. No conversion, just validation.
-    """
-    ext = os.path.splitext(path)[1].lower()
-    bands_count = None
-    bands_map = {}
-    source = "api_arg"
-
-    if ext in (".tif",".tiff"):
-        with tifffile.TiffFile(path) as tif:
-            arr = tif.asarray()
-            tags = {tag.name: tag.value for page in tif.pages for tag in page.tags.values()}
-        bands_count = arr.shape[2] if arr.ndim == 3 else 1
-
-        if "GDAL_METADATA" in tags:
-            try:
-                xml_str = tags["GDAL_METADATA"]
-                root = ET.fromstring(xml_str)
-                names = []
-                for band_meta in root.findall(".//BandMetadata"):
-                    for item in band_meta.findall("Item"):
-                        if item.attrib.get("name") == "BandName":
-                            names.append(item.text)
-                if len(names) == bands_count:
-                    bands_map = {str(i): n for i,n in enumerate(names)}
-                    source = "gdal_metadata"
-            except Exception:
-                pass
-        else:
-            bands_map = {str(i): b for i,b in enumerate(bands)}
-
-    elif ext in ('.jpeg', '.jpg', '.png'):  # PNG/JPEG
-        with Image.open(path) as img:
-            arr = np.array(img)
-            bands_count = len(img.getbands())
-        bands_map = {str(i): b for i,b in enumerate(bands)}
-    else:
-        raise ValueError(f"Extension is not supported: {ext}")
-
-    if len(bands) != bands_count:
-        raise ValueError(f"Provided bands {bands} do not match image band count {bands_count}")
-
-    return {"bands_count": bands_count, "bands_map": bands_map, "bands_source": source}
-
-def compute_phash(path: str) -> str:
-    """Compute perceptual hash (phash) of an image file."""
-    with Image.open(path) as img:
-        # Ensure consistent conversion
-        img = img.convert("L")
-        return str(imagehash.phash(img))

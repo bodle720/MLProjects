@@ -9,6 +9,7 @@ import datetime
 import uuid
 import json
 import logging
+from typing import Union, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -292,6 +293,10 @@ class InfrastructureAPI:
 
     def register_dataset(self, dataset_id: str, class_to_id_dict: dict[str, int], band_info: dict[str, str]) -> str:
         """Register a new dataset and track the operation as a Job."""
+        
+        if dataset_id == 'all':
+            raise ValueError('The string all is a reserved key that cannot be used as a dataset id.')
+            
         ddb = self.clients['ddb']
         
         job_id = str(uuid.uuid4())
@@ -326,6 +331,7 @@ class InfrastructureAPI:
             if self.dataset_exists(dataset_id):
                 raise Exception(f"Dataset {dataset_id} already exists.")
 
+            band_info = {str(k): v for k, v in band_info.items()}
             api_helpers.validate_band_info(band_info)
 
             # Insert dataset row with lock
@@ -554,186 +560,250 @@ class InfrastructureAPI:
                 self.unlock_dataset(dataset_id, job_id)
                 
     #%% left off here   
-    def upload_images_to_dataset(
-                             self,
-                             dataset_id: str,
-                             images: list[str],
-                             labels: list[str],
-                             bands_mapping: dict[str, str],
-                             forced_split: str | None = None) -> str:
-         """
-         Upload local images to the global temp-images folder and enqueue an IMAGE_UPLOAD job.
-         """
-         
-         ddb = self.clients['ddb']
-         s3 = self.clients['s3']
-         sqs = self.clients['sqs']
-         job_table = self.config['DDB_JOB_TABLE']
-         dataset_table = self.config['DDB_DATASET_TABLE']
-         image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
-         bucket = self.config['S3_BUCKET_NAME']
-         root = self.config['S3_DATASETS_ROOT']
- 
-         # Pre-checks
-         if bands_mapping is None:
-             raise ValueError("bands_mapping is required for all uploads.")
-         if forced_split not in (None, "training", "validation", "testing"):
-             raise ValueError("forced_split must be one of None, 'training', 'validation', or 'testing'")
-         if not self.dataset_exists(dataset_id):
-             raise Exception(f"Dataset {dataset_id} does not exist.")
-         if self.dataset_locked(dataset_id):
-             raise Exception(f"Dataset {dataset_id} is currently locked.")
-         if not isinstance(images, list) or not all(isinstance(p, str) for p in images):
-             raise Exception("images must be a list of local file paths (strings).")
-         if not isinstance(labels, list) or not all(isinstance(l, str) for l in labels):
-             raise Exception("labels must be a list of strings.")
-         if len(images) != len(labels):
-             raise Exception("images and labels must have the same length.")
-         if not images:
-             raise Exception("images list cannot be empty.")
- 
-         # Validate each path
-         valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-         for path in images:
-             if not os.path.exists(path):
-                 raise Exception(f"Image path does not exist: {path}")
-             ext = os.path.splitext(path)[1].lower()
-             if ext not in valid_exts:
-                 raise Exception(f"Unsupported image type for {path}. Must be jpg/jpeg/png/tif/tiff.")
- 
-         # Fetch dataset row
-         resp = ddb.get_item(
-             TableName=dataset_table,
-             Key={'dataset_id': {'S': dataset_id}},
-             ConsistentRead=True
-         )
-         item = resp.get('Item')
-         if not item:
-             raise Exception(f"Dataset {dataset_id} not found after existence check.")
- 
-         # Load dataset schema
-         class_dict_str = item.get('class_to_id_dict', {}).get('S', '{}')
-         dataset_band_info_str = item.get('band_info', {}).get('S')
-         if not dataset_band_info_str:
-             raise Exception(f"Dataset {dataset_id} missing band_info definition.")
-         try:
-             class_dict = json.loads(class_dict_str)
-             dataset_band_info = json.loads(dataset_band_info_str)
-         except json.JSONDecodeError:
-             raise Exception(f"Corrupted dataset metadata for {dataset_id}.")
- 
-         # Validate labels
-         for label in labels:
-             if label not in class_dict:
-                 raise Exception(f"Label '{label}' not found in dataset {dataset_id} classes.")
- 
-         # Validate bands_mapping against dataset definition
-         if bands_mapping != dataset_band_info:
-             raise Exception(f"bands_mapping {bands_mapping} does not match dataset band_info {dataset_band_info}")
- 
-         job_id = str(uuid.uuid4())
-         created_at = datetime.datetime.utcnow().isoformat()
-         locked = False
-         sent_to_queue = False
-         uploaded_keys: list[str] = []
- 
-         try:
-             # Lock dataset
-             self.lock_dataset(dataset_id, job_id)
-             locked = True
- 
-             # Insert job row
-             ddb.put_item(
-                 TableName=job_table,
-                 Item={
-                     "job_id": {"S": job_id},
-                     "created_at": {"S": created_at},
-                     "event_type": {"S": "IMAGE_UPLOAD"},
-                     "job_summary": {"S": f"Starting uploading of {len(images)} images to dataset {dataset_id}"},
-                     "job_status": {"S": "PENDING"}
-                 }
-             )
- 
-             manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": []}
- 
-             for path, label in zip(images, labels):
-                 phash = api_helpers.compute_phash(path)
-                 
-                 if self.phash_exists(phash):
-                     logger.info(f"[upload_images_to_dataset] phash of image at {path} in class {label} already present in images folder, skipping.")
-                     continue
-                 
-                 ext = os.path.splitext(path)[1].lower()
- 
-                 # Extract band info
-                 bands_info = api_helpers.extract_bands(path, [bands_mapping[str(i)] for i in range(len(bands_mapping))])
- 
-                 # Extra check for GeoTIFF
-                 if ext in (".tif", ".tiff") and bands_info["bands_source"] == "gdal_metadata":
-                     if bands_info["bands_map"] != dataset_band_info:
-                         raise Exception(
-                             f"GeoTIFF metadata {bands_info['bands_map']} does not match dataset band_info {dataset_band_info}"
-                         )
- 
-                 # Upload original file (no conversion)
-                 key = f"{root}/temp-images/{phash}{ext}"
-                 with open(path, "rb") as f:
-                     s3.put_object(
-                         Bucket=bucket,
-                         Key=key,
-                         Body=f,
-                         ContentType=api_helpers.extension_to_mime(ext)
-                     )
-                 uploaded_keys.append(key)
- 
-                 manifest["images"].append({
-                     "phash": phash,
-                     "filename": os.path.basename(path),
-                     "label": label,
-                     'extension': ext.replace('.',''),
-                     "bands_count": bands_info["bands_count"],
-                     "bands_map": bands_info["bands_map"],
-                     "bands_source": bands_info["bands_source"],
-                     "forced_split": forced_split
-                 })
- 
-             # Upload manifest JSON
-             if len(manifest["images"]) > 0:
-                 manifest_key = f"{root}/temp-images/{job_id}.json"
-                 s3.put_object(
-                     Bucket=bucket,
-                     Key=manifest_key,
-                     Body=json.dumps(manifest).encode("utf-8"),
-                     ContentType="application/json"
-                 )
-                 uploaded_keys.append(manifest_key)
- 
-                 # Send event to image ops queue
-                 queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
-                 event = {"event_type": "IMAGE_UPLOAD", "dataset_id": dataset_id, "job_id": job_id}
-                 sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
-                 sent_to_queue = True
- 
-             logger.info(f"[upload_images_to_dataset] Enqueued IMAGE_UPLOAD job {job_id} for dataset {dataset_id}.")
-             return job_id
- 
-         except Exception as e:
-             logger.error(f"[upload_images_to_dataset] Error: {e}")
-             self.job_error(job_id, f"Image upload init failed for dataset {dataset_id}: {e}")
- 
-             # Cleanup uploaded files if enqueue failed
-             if uploaded_keys and not sent_to_queue:
-                 for key in uploaded_keys:
-                     try:
-                         s3.delete_object(Bucket=bucket, Key=key)
-                         logger.info(f"[upload_images_to_dataset] Cleaned up {key} after failure.")
-                     except Exception as cleanup_err:
-                         logger.warning(f"[upload_images_to_dataset] Failed to cleanup {key}: {cleanup_err}")
-             raise
-         finally:
-             if locked and not sent_to_queue:
-                 self.unlock_dataset(dataset_id, job_id)
-                 
+    def upload_images_bulk(
+                        self,
+                        datasets: Union[str, list[str]],
+                        images: list[str],
+                        labels: list[str],
+                        bands_mapping: dict[str, str],
+                        attributes: Optional[dict[str, str]] = None
+                    ) -> str:
+        """
+        Bulk upload images to one or more datasets with optional attributes.
+    
+        - datasets: a dataset id string, a list of dataset ids, or the string "all"
+        - images: list of local file paths
+        - labels: list of labels (same length as images)
+        - bands_mapping: dict[str(str_index) -> str(band_name)] exactly matching VALID_BANDS, no duplicates
+        - attributes: optional dict applied to each imagery item in the bulk upload manifest, can be used when
+                      querying images from imagery table.
+        Returns: job_id (string)
+        """
+    
+        ddb = self.clients['ddb']
+        s3 = self.clients['s3']
+        sqs = self.clients['sqs']
+
+        job_table = self.config['DDB_JOB_TABLE']
+        dataset_table = self.config['DDB_DATASET_TABLE']
+        image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
+        bucket = self.config['S3_BUCKET_NAME']
+        root = self.config['S3_DATASETS_ROOT']
+    
+        # --- Resolve datasets ---
+        if isinstance(datasets, str):
+            if datasets == "all":
+                # Use scan; in production consider pagination and a dedicated GSI if size grows
+                resp = ddb.scan(TableName=dataset_table, ProjectionExpression="dataset_id")
+                dataset_ids = [item["dataset_id"]["S"] for item in resp.get("Items", [])]
+                if not dataset_ids:
+                    raise Exception("No datasets found in dataset table.")
+            else:
+                dataset_ids = [datasets]
+        elif isinstance(datasets, list) and all(isinstance(ds, str) for ds in datasets):
+            dataset_ids = datasets
+        else:
+            raise ValueError("datasets must be a string, list of strings, or 'all'.")
+    
+        # --- Pre-checks on inputs ---
+        
+        if bands_mapping is None or not isinstance(bands_mapping, dict) or not bands_mapping:
+            raise ValueError("bands_mapping is required and must be a non-empty dict.")
+    
+        bands_mapping = {str(k): v for k, v in bands_mapping.items()}
+        api_helpers.validate_band_info(bands_mapping)
+
+        if not isinstance(images, list) or not all(isinstance(p, str) for p in images):
+            raise Exception("images must be a list of local file paths (strings).")
+    
+        if not isinstance(labels, list) or not all(isinstance(l, str) and l.strip() for l in labels):
+            raise Exception("labels must be a list of non-empty strings.")
+    
+        if len(images) != len(labels):
+            raise Exception("images and labels must have the same length.")
+    
+        if not images:
+            raise Exception("images list cannot be empty.")
+    
+        # --- Validate images and extensions ---
+        valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        canonical_ext_map = {".jpg": ".jpeg", ".jpeg": ".jpeg", ".png": ".png", ".tif": ".tiff", ".tiff": ".tiff"}
+    
+        for path in images:
+            if not os.path.exists(path):
+                raise Exception(f"Image path does not exist: {path}")
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in valid_exts:
+                raise Exception(f"Unsupported image type for {path}. Must be jpg/jpeg/png/tif/tiff.")
+    
+        # --- Validate datasets and load rows ---
+        dataset_rows = {}
+        for ds in dataset_ids:
+            if not self.dataset_exists(ds):
+                raise Exception(f"Dataset {ds} does not exist.")
+            if self.dataset_locked(ds):
+                raise Exception(f"Dataset {ds} is currently locked.")
+            resp = ddb.get_item(TableName=dataset_table, Key={'dataset_id': {'S': ds}}, ConsistentRead=True)
+            item = resp.get('Item')
+            if not item:
+                raise Exception(f"Dataset {ds} not found after existence check.")
+            dataset_rows[ds] = item
+    
+        # --- Validate class dicts ---
+        class_dicts = {}
+        for ds, item in dataset_rows.items():
+            class_dict_str = item.get("class_to_id_dict", {}).get("S", "{}")
+            try:
+                class_dict = json.loads(class_dict_str)
+            except json.JSONDecodeError:
+                raise Exception(f"Corrupted class_to_id_dict for dataset {ds}.")
+            class_dicts[ds] = class_dict
+    
+            for label in labels:
+                if label not in class_dict:
+                    raise Exception(f"Label '{label}' not found in dataset {ds} classes.")
+    
+        # --- Validate band_info consistency across all selected datasets ---
+        band_infos = {}
+        for ds, item in dataset_rows.items():
+            band_info_str = item.get("band_info", {}).get("S")
+            if not band_info_str:
+                raise Exception(f"Dataset {ds} missing band_info definition.")
+            try:
+                band_info = json.loads(band_info_str)
+            except json.JSONDecodeError:
+                raise Exception(f"Corrupted band_info for dataset {ds}.")
+            band_infos[ds] = band_info
+    
+        # All band_info must be identical
+        unique_band_infos = {json.dumps(bi, sort_keys=True) for bi in band_infos.values()}
+        if len(unique_band_infos) != 1:
+            raise Exception("Selected datasets do not share identical band_info definitions.")
+        dataset_band_info = json.loads(list(unique_band_infos)[0])
+    
+        # bands_mapping must match dataset_band_info exactly
+        if bands_mapping != dataset_band_info:
+            raise Exception(f"bands_mapping {bands_mapping} does not match dataset band_info {dataset_band_info}")
+    
+        # --- Prepare job ---
+        job_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat()
+    
+        locked_datasets = set()
+        uploaded_keys = []
+        sent_to_queue = False
+    
+        try:
+            # Lock all datasets up front
+            for ds in dataset_ids:
+                self.lock_dataset(ds, job_id)
+                locked_datasets.add(ds)
+    
+            # Insert job row
+            ddb.put_item(
+                TableName=job_table,
+                Item={
+                    "job_id": {"S": job_id},
+                    "created_at": {"S": created_at},
+                    "event_type": {"S": "IMAGE_UPLOAD"},
+                    "job_summary": {"S": f"Uploading {len(images)} images to {len(dataset_ids)} datasets"},
+                    "job_status": {"S": "PENDING"}
+                }
+            )
+    
+            # Build manifest covering all datasets
+            manifest = {
+                "job_id": job_id,
+                "datasets": dataset_ids,
+                "images": []
+            }
+    
+            # Process each image
+            for path, label in zip(images, labels):
+                phash = api_helpers.compute_phash(path)
+    
+                # Optional duplicate check; skip if already present globally
+                if self.phash_exists(phash):
+                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}); skipping.")
+                    continue
+    
+                ext = os.path.splitext(path)[1].lower()
+                canonical_ext = canonical_ext_map[ext]
+    
+                # Extract band info and sanity-check
+                desired_bands_order = [bands_mapping[str(i)] for i in range(len(bands_mapping))]
+                appears_valid, reason = api_helpers.bands_appear_valid(path, desired_bands_order)
+    
+                if not appears_valid:
+                    logger.info(f"[upload_images_bulk] The image {path} does not appear to have the correct band naming or structure required, reason = {reason}; skipping.")
+                    continue
+                    
+                # Upload original file (no conversion), canonical extension
+                key = f"{root}/temp-images/{phash}{canonical_ext}"
+                with open(path, "rb") as f:
+                    s3.put_object(
+                        Bucket=bucket,
+                        Key=key,
+                        Body=f,
+                        ContentType=api_helpers.extension_to_mime(canonical_ext)
+                    )
+                uploaded_keys.append(key)
+    
+                manifest["images"].append({
+                    "phash": phash,
+                    "original_filename": os.path.basename(path),
+                    "label": label,
+                    "extension": canonical_ext.lstrip("."),
+                    "attributes": attributes or {}
+                })
+    
+            # Upload manifest and enqueue if we have any images
+            if manifest["images"]:
+                manifest_key = f"{root}/temp-images/{job_id}.json"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=manifest_key,
+                    Body=json.dumps(manifest).encode("utf-8"),
+                    ContentType="application/json"
+                )
+                uploaded_keys.append(manifest_key)
+    
+                queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
+                event = {"event_type": "IMAGE_UPLOAD", "datasets": dataset_ids, "job_id": job_id}
+                sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
+                sent_to_queue = True
+    
+            logger.info(f"[upload_images_bulk] Enqueued IMAGE_UPLOAD job {job_id} for datasets {dataset_ids}.")
+            return job_id
+    
+        except Exception as e:
+            logger.error(f"[upload_images_bulk] Error: {e}")
+            # Record job error
+            try:
+                self.job_error(job_id, f"Image upload init failed for datasets {dataset_ids}: {e}")
+            except Exception as job_err:
+                logger.warning(f"[upload_images_bulk] Failed to set job error for {job_id}: {job_err}")
+    
+            # Cleanup uploaded files if enqueue failed
+            if uploaded_keys and not sent_to_queue:
+                for key in uploaded_keys:
+                    try:
+                        s3.delete_object(Bucket=bucket, Key=key)
+                        logger.info(f"[upload_images_bulk] Cleaned up {key} after failure.")
+                    except Exception as cleanup_err:
+                        logger.warning(f"[upload_images_bulk] Failed to cleanup {key}: {cleanup_err}")
+            raise
+    
+        finally:
+            # Unlock all datasets if not sent to queue
+            if locked_datasets and not sent_to_queue:
+                for ds in locked_datasets:
+                    try:
+                        self.unlock_dataset(ds, job_id)
+                    except Exception as unlock_err:
+                        logger.warning(f"[upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
+    
+                     
     def remove_images_from_dataset(self, dataset_id: str, images: list[str]) -> str:
         """
         Remove images from a dataset by uploading a deletion manifest to S3
