@@ -87,6 +87,7 @@ class InfrastructureAPI:
         """
         Check if an image with the given phash already exists in the S3 images/ folder.
         Returns True if found, False otherwise.
+        Note: This ignores extension — any object with this phash prefix counts as existing.
         """
         s3 = self.clients["s3"]
         bucket = self.config["S3_BUCKET_NAME"]
@@ -168,6 +169,39 @@ class InfrastructureAPI:
             logger.info(f"[dataset_locked] Dataset {dataset_id} is not locked.")
             return False
         
+    def dataset_synced(self, dataset_id: str) -> bool:
+        """
+        Return True if the dataset is marked as synced, False otherwise.
+        Logs the status for auditability.
+        """
+        ddb = self.clients["ddb"]
+    
+        try:
+            resp = ddb.get_item(
+                TableName=self.config['DDB_DATASET_TABLE'],
+                Key={'dataset_id': {'S': dataset_id}},
+                ConsistentRead=True
+            )
+        except ClientError as e:
+            logger.error(f"[dataset_synced] Error checking sync status for dataset {dataset_id}: {e}")
+            raise
+    
+        item = resp.get('Item')
+        if not item:
+            logger.info(
+                f"[dataset_synced] Dataset {dataset_id} not found in table {self.config['DDB_DATASET_TABLE']}. "
+                "Treating as not synced."
+            )
+            return False
+    
+        synced = item.get('synced', {}).get('BOOL', False)
+        if synced:
+            logger.info(f"[dataset_synced] Dataset {dataset_id} is marked as synced.")
+            return True
+        else:
+            logger.info(f"[dataset_synced] Dataset {dataset_id} is not synced.")
+            return False
+
     def lock_dataset(self, dataset_id: str, job_id: str):
         """
         Attempt to lock a dataset for a specific job.
@@ -295,6 +329,9 @@ class InfrastructureAPI:
     def register_dataset(self, dataset_id: str, class_to_id_dict: dict[str, int], band_info: dict[str, str]) -> str:
         """Register a new dataset and track the operation as a Job."""
         
+        if dataset_id.strip() == '':
+            raise ValueError('The string all is a reserved key that cannot be used as a dataset id.')
+            
         if dataset_id == 'all':
             raise ValueError('The string all is a reserved key that cannot be used as a dataset id.')
             
@@ -550,6 +587,16 @@ class InfrastructureAPI:
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
             logger.info(f"[remove_class_from_dataset] Sent REMOVE_CLASS for {dataset_id}, class '{class_name}' under job {job_id}.")
+            
+            # Mark dataset as unsynced since a class removal job has been enqueued
+            ddb.update_item(
+                TableName=self.config['DDB_DATASET_TABLE'],
+                Key={'dataset_id': {'S': dataset_id}},
+                UpdateExpression="SET synced = :s",
+                ExpressionAttributeValues={":s": {"BOOL": False}}
+            )
+            logger.info(f"[remove_class_from_dataset] Marked dataset {dataset_id} as unsynced.")
+
             return job_id
 
         except Exception as e:
@@ -751,14 +798,9 @@ class InfrastructureAPI:
             used_phashes = set()
             for path, label in zip(images, labels):
                 phash = api_helpers.compute_phash(path)
-    
-                # Optional duplicate check; skip if already present globally
-                if self.phash_exists(phash):
-                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) already present in database; skipping.")
-                    continue
-    
+        
                 if phash in used_phashes:
-                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) present in same bulk upload set; skipping.")
+                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) present in same bulk upload input set already; skipping.")
                     continue
                 
                 used_phashes.add(phash)
@@ -774,25 +816,38 @@ class InfrastructureAPI:
                     logger.info(f"[upload_images_bulk] The image {path} does not appear to have the correct band naming or structure required, reason = {reason}; skipping.")
                     continue
                     
-                # Upload original file (no conversion), canonical extension
-                key = f"{root}/temp-images/{phash}{canonical_ext}"
-                with open(path, "rb") as f:
-                    s3.put_object(
-                        Bucket=bucket,
-                        Key=key,
-                        Body=f,
-                        ContentType=api_helpers.extension_to_mime(canonical_ext)
-                    )
-                uploaded_keys.append(key)
-    
-                manifest["images"].append({
-                    "phash": phash,
-                    "original_filename": os.path.basename(path),
-                    "label": label,
-                    "extension": canonical_ext.lstrip("."),
-                    "attributes": attributes or {}
-                })
-    
+                if self.phash_exists(phash):
+                    # Already present globally: don’t upload, but include in manifest
+                    logger.info(f"[upload_images_bulk] phash {phash} already present globally; marking as already_exists.")
+                    manifest["images"].append({
+                        "phash": phash,
+                        "original_filename": os.path.basename(path),
+                        "label": label,
+                        "extension": canonical_ext.lstrip("."),
+                        "attributes": attributes or {},
+                        "already_exists": True
+                    })
+                else:
+                    # Upload original file (no conversion), canonical extension
+                    key = f"{root}/temp-images/{phash}{canonical_ext}"
+                    with open(path, "rb") as f:
+                        s3.put_object(
+                            Bucket=bucket,
+                            Key=key,
+                            Body=f,
+                            ContentType=api_helpers.extension_to_mime(canonical_ext)
+                        )
+                    uploaded_keys.append(key)
+                    
+                    manifest["images"].append({
+                        "phash": phash,
+                        "original_filename": os.path.basename(path),
+                        "label": label,
+                        "extension": canonical_ext.lstrip("."),
+                        "attributes": attributes or {},
+                        "already_exists": False
+                    })
+                        
             # Upload manifest and enqueue if we have any images
             if manifest["images"]:
                 manifest_key = f"{root}/temp-images/{job_id}.json"
@@ -808,7 +863,17 @@ class InfrastructureAPI:
                 event = {"event_type": "IMAGE_UPLOAD", "datasets": dataset_ids, "job_id": job_id}
                 sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
                 sent_to_queue = True
-    
+                
+                for ds in dataset_ids:
+                    ddb.update_item(
+                        TableName=self.config['DDB_DATASET_TABLE'],
+                        Key={'dataset_id': {'S': ds}},
+                        UpdateExpression="SET synced = :s",
+                        ExpressionAttributeValues={":s": {"BOOL": False}}
+                    )
+                    logger.info(f"[upload_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
+                
+                    
             logger.info(f"[upload_images_bulk] Enqueued IMAGE_UPLOAD job {job_id} for datasets {dataset_ids}.")
             return job_id
     
@@ -839,7 +904,6 @@ class InfrastructureAPI:
                     except Exception as unlock_err:
                         logger.warning(f"[upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
-    #%% left off here
     def remove_images_bulk(
             self,
             datasets: Union[str, list[str]],
@@ -933,6 +997,15 @@ class InfrastructureAPI:
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
     
+            for ds in dataset_ids:
+                ddb.update_item(
+                    TableName=self.config['DDB_DATASET_TABLE'],
+                    Key={'dataset_id': {'S': ds}},
+                    UpdateExpression="SET synced = :s",
+                    ExpressionAttributeValues={":s": {"BOOL": False}}
+                )
+                logger.info(f"[remove_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
+                
             logger.info(f"[remove_images_bulk] Enqueued IMAGE_DELETE job {job_id}, manifest {manifest_key}.")
             return job_id
     
@@ -957,52 +1030,86 @@ class InfrastructureAPI:
                     except Exception as unlock_err:
                         logger.warning(f"[remove_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
-    #%% left offf here
     def sync_datasets(self, dataset_ids: str | list[str]) -> str:
         """
         Initiate a sync operation for one or more datasets by sending a SYNC event
         to the sync SQS queue. Tracks the operation as a Job in the Job table.
+        Skips datasets that are already marked as synced.
         """
         ddb = self.clients['ddb']
         sqs = self.clients['sqs']
         dataset_table = self.config['DDB_DATASET_TABLE']
         job_table = self.config['DDB_JOB_TABLE']
         sync_queue_name = self.config['SQS_QUEUE_SYNC']
-
+    
         queue_url = sqs.get_queue_url(QueueName=sync_queue_name)["QueueUrl"]
-
+    
         resolved_ids: list[str] = []
+        skipped_ids: list[str] = []
+    
         if dataset_ids == "all":
-            # Scan dataset table for all unlocked datasets
+            # Scan dataset table for all datasets
             resp = ddb.scan(TableName=dataset_table, ConsistentRead=True)
             for item in resp.get("Items", []):
                 dsid = item["dataset_id"]["S"]
                 locked = item.get("locked", {}).get("BOOL", False)
-                if not locked:
-                    resolved_ids.append(dsid)
+                synced = item.get("synced", {}).get("BOOL", False)
+    
+                if locked:
+                    logger.info(f"[sync_datasets] Skipping {dsid} because it is locked.")
+                    skipped_ids.append(dsid)
+                    continue
+                if synced:
+                    logger.info(f"[sync_datasets] Skipping {dsid} because it is already synced.")
+                    skipped_ids.append(dsid)
+                    continue
+    
+                resolved_ids.append(dsid)
+    
             if not resolved_ids:
-                raise Exception("No unlocked datasets available to sync.")
+                raise Exception("No unlocked, unsynced datasets available to sync.")
+    
         elif isinstance(dataset_ids, list) and all(isinstance(d, str) for d in dataset_ids):
             for dsid in dataset_ids:
                 if not self.dataset_exists(dsid):
                     raise Exception(f"Dataset {dsid} does not exist.")
                 if self.dataset_locked(dsid):
                     raise Exception(f"Dataset {dsid} is currently locked.")
+    
+                # Fetch dataset row to check synced flag
+                resp = ddb.get_item(
+                    TableName=dataset_table,
+                    Key={'dataset_id': {'S': dsid}},
+                    ConsistentRead=True
+                )
+                item = resp.get("Item")
+                if not item:
+                    raise Exception(f"Dataset {dsid} not found after existence check.")
+    
+                synced = item.get("synced", {}).get("BOOL", False)
+                if synced:
+                    logger.info(f"[sync_datasets] Skipping {dsid} because it is already synced.")
+                    skipped_ids.append(dsid)
+                    continue
+    
                 resolved_ids.append(dsid)
         else:
             raise Exception("dataset_ids must be 'all' or a list of strings.")
-
+    
         job_id = str(uuid.uuid4())
         created_at = datetime.datetime.utcnow().isoformat()
         locked_ids: list[str] = []
         sent_to_queue = False
+    
+        if len(resolved_ids) == 0:
+            raise Exception("dataset_ids is either an empty list or they are all already synced.")
 
         try:
             # Lock each dataset under this job_id
             for dsid in resolved_ids:
                 self.lock_dataset(dsid, job_id)
                 locked_ids.append(dsid)
-
+    
             # Insert job row
             ddb.put_item(
                 TableName=job_table,
@@ -1014,16 +1121,22 @@ class InfrastructureAPI:
                     "job_status": {"S": "PENDING"}
                 }
             )
-
+    
             # Build event
             event = {"event_type": "SYNC", "job_id": job_id, "dataset_ids": resolved_ids}
-
+    
             # Send to sync queue
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
-            logger.info(f"[sync_datasets] Enqueued SYNC job {job_id} for {len(resolved_ids)} datasets.")
+    
+            # Summary log
+            logger.info(
+                f"[sync_datasets] SYNC job {job_id} summary: "
+                f"included={resolved_ids}, skipped={skipped_ids}"
+            )
+    
             return job_id
-
+    
         except Exception as e:
             logger.error(f"[sync_datasets] Error: {e}")
             self.job_error(job_id, f"Sync init failed: {e}")
@@ -1041,7 +1154,8 @@ class InfrastructureAPI:
                         self.unlock_dataset(dsid, job_id)
                     except Exception as unlock_err:
                         logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
-                        
+
+ #%% left off here
     def query_logs(self,
                    filters: dict,
                    look_back_hours: float = 1.0,

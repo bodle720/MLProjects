@@ -7,7 +7,7 @@ image ops queue.
                   location of the required manifest: f"{root}/temp-images/{job_id}.json"
                   The manifest is of the form {'job_id': '...',
                                                'datasets': ['...', ...],
-                                               'band_mapping': {...}
+                                               'bands_mapping': {...}
                                                'images': [{
                                                            'phash': '...',
                                                            'original_filename': '...',
@@ -152,12 +152,12 @@ def extension_to_mime(ext: str) -> str:
         raise ValueError(f"Unsupported extension: {ext}")
   
 # --- Event Handlers ---
-def handle_image_upload(body: dict):
+def handle_bulk_image_upload(body: dict):
     """
     Handle IMAGE_UPLOAD events:
     - Load manifest from S3
     - Insert imagery rows into DDB_IMAGERY_TABLE for each dataset
-    - Copy each unique image from temp-images/ to images/ once
+    - Copy each unique image from temp-images/ to images/ once (if not already present)
     - Delete temp files and manifest
     - Update job status and unlock datasets
     """
@@ -173,13 +173,12 @@ def handle_image_upload(body: dict):
         manifest = json.loads(resp["Body"].read())
 
         images = manifest.get("images", [])
-        band_mapping = manifest.get("band_mapping", {})
+        band_mapping = manifest.get("bands_mapping", {})  # match API side
         band_count = len(band_mapping)
 
         if not images:
             raise Exception(f"Manifest {manifest_key} contained no images.")
 
-        # Track which phashes we've already copied
         copied = set()
 
         for img in images:
@@ -187,9 +186,10 @@ def handle_image_upload(body: dict):
             ext = img["extension"].lower().lstrip(".")
             original_filename = img.get("original_filename", "")
             attributes = img.get("attributes", {})
+            already_exists = img.get("already_exists", False)
 
-            # Copy image once into permanent location
-            if phash not in copied:
+            # Only copy if not already present globally
+            if not already_exists and phash not in copied:
                 src_key = f"{S3_DATASETS_ROOT}/temp-images/{phash}.{ext}"
                 dest_key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
 
@@ -202,6 +202,8 @@ def handle_image_upload(body: dict):
                 s3.delete_object(Bucket=S3_BUCKET_NAME, Key=src_key)
                 log_event(job_id, f"Moved {src_key} -> {dest_key}")
                 copied.add(phash)
+            elif already_exists:
+                log_event(job_id, f"phash {phash} already existed globally; skipping copy.")
 
             # Build common item fields
             base_item = {
@@ -214,11 +216,10 @@ def handle_image_upload(body: dict):
                 "uploaded_at": {"S": datetime.now(timezone.utc).isoformat()},
             }
 
-            # Expand attributes into top-level columns
             for k, v in attributes.items():
                 base_item[k] = {"S": v}
 
-            # Write one row per dataset
+            # Always insert dataset rows
             for ds in datasets:
                 dataset_phash = f"{ds}#{phash}"
                 item = {
@@ -240,12 +241,12 @@ def handle_image_upload(body: dict):
         for ds in datasets:
             unlock_dataset(ds, job_id)
 
-def handle_remove_images(body: dict):
+def handle_bulk_remove_images(body: dict):
     """
     Handle IMAGE_DELETE events:
     - Load manifest from S3
     - Delete imagery rows from DDB_IMAGERY_TABLE for each dataset/phash
-    - Conditionally delete S3 objects if no other dataset references them
+    - Capture extension before deletion so we can remove S3 object if no references remain
     - Delete manifest file
     - Update job status and unlock datasets
     """
@@ -269,10 +270,22 @@ def handle_remove_images(body: dict):
         deleted_s3 = 0
 
         for phash in phashes:
+            ext = None  # capture extension from one of the rows we delete
+
             # Delete rows for each dataset
             for ds in dataset_ids:
                 dataset_phash = f"{ds}#{phash}"
                 try:
+                    # Fetch extension before deleting (if row exists)
+                    row = ddb.get_item(
+                        TableName=DDB_IMAGERY_TABLE,
+                        Key={"dataset_phash": {"S": dataset_phash}},
+                        ProjectionExpression="extension"
+                    ).get("Item")
+
+                    if row and not ext:
+                        ext = row["extension"]["S"].lower()
+
                     ddb.delete_item(
                         TableName=DDB_IMAGERY_TABLE,
                         Key={"dataset_phash": {"S": dataset_phash}},
@@ -294,16 +307,12 @@ def handle_remove_images(body: dict):
                 IndexName="PhashIndex",
                 KeyConditionExpression="phash = :p",
                 ExpressionAttributeValues={":p": {"S": phash}},
-                ProjectionExpression="extension"
+                ProjectionExpression="dataset_id"
             )
-            items = resp.get("Items", [])
-            still_referenced = bool(items)
+            still_referenced = bool(resp.get("Items"))
 
             if not still_referenced:
-                # No references remain, safe to delete from S3
-                # Use extension from one of the rows we just deleted (if available)
-                if items:
-                    ext = items[0]["extension"]["S"].lower()
+                if ext:
                     key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                     try:
                         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
@@ -313,7 +322,7 @@ def handle_remove_images(body: dict):
                         log_event(job_id, f"Error deleting {key}: {e}", level="ERROR")
                         raise
                 else:
-                    log_event(job_id, f"No extension info found for phash {phash}; cannot delete S3 object", level="WARNING")
+                    log_event(job_id, f"No extension info captured for phash {phash}; cannot delete S3 object", level="WARNING")
             else:
                 log_event(job_id, f"Phash {phash} still referenced by other datasets; not deleting from S3")
 
@@ -345,9 +354,9 @@ def lambda_handler(event, context):
             log_event(job_id, f"Received event: {event_type}")
 
             if event_type == "IMAGE_UPLOAD":
-                handle_image_upload(body)
+                handle_bulk_image_upload(body)
             elif event_type == "IMAGE_DELETE":
-                handle_remove_images(body)
+                handle_bulk_remove_images(body)
             else:
                 log_event(job_id, f"Unknown event_type: {event_type}", level = 'ERROR')
         except Exception as e:
