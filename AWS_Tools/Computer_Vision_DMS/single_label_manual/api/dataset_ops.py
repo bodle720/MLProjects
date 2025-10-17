@@ -4,6 +4,7 @@ Main API functionality.
 """
 
 import os
+import re
 import time
 import datetime
 import uuid
@@ -589,6 +590,32 @@ class InfrastructureAPI:
         bucket = self.config['S3_BUCKET_NAME']
         root = self.config['S3_DATASETS_ROOT']
     
+        # --- Validate attributes ---
+        reserved_keys = {
+            "dataset_phash", "dataset_id", "phash", "label", "extension",
+            "original_filename", "uploaded_at", "band_mapping", "band_count"
+        }
+    
+        if attributes is not None:
+            if not isinstance(attributes, dict):
+                raise ValueError("attributes must be a dict[str,str] or None.")
+    
+            for k, v in attributes.items():
+                # Ensure both key and value are strings
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise ValueError(f"Invalid attribute entry: {k} -> {v}. Keys and values must be strings.")
+    
+                # Reserved name check
+                if k in reserved_keys:
+                    raise ValueError(f"Attribute key '{k}' is reserved and cannot be used.")
+    
+                # Pattern check: no keys ending in _b<digits> or _B<digits>
+                # e.g. mynewattr_b0, thisattr_B100
+                if re.search(r"_[bB]\d+$", k):
+                    raise ValueError(
+                        f"Attribute key '{k}' is not allowed (keys ending with _b<digits> or _B<digits> are reserved)."
+                    )
+
         # --- Resolve datasets ---
         if isinstance(datasets, str):
             if datasets == "all":
@@ -598,12 +625,14 @@ class InfrastructureAPI:
                 if not dataset_ids:
                     raise Exception("No datasets found in dataset table.")
             else:
+                if not datasets.strip():
+                    raise ValueError("dataset string cannot be empty.")
                 dataset_ids = [datasets]
-        elif isinstance(datasets, list) and all(isinstance(ds, str) for ds in datasets):
+        elif isinstance(datasets, list) and all(isinstance(ds, str) and ds.strip() for ds in datasets):
             dataset_ids = datasets
         else:
-            raise ValueError("datasets must be a string, list of strings, or 'all'.")
-    
+            raise ValueError("datasets must be 'all', a non-empty string, or a list of non-empty strings.")
+
         # --- Pre-checks on inputs ---
         
         if bands_mapping is None or not isinstance(bands_mapping, dict) or not bands_mapping:
@@ -714,18 +743,26 @@ class InfrastructureAPI:
             manifest = {
                 "job_id": job_id,
                 "datasets": dataset_ids,
+                'bands_mapping':bands_mapping,
                 "images": []
             }
     
             # Process each image
+            used_phashes = set()
             for path, label in zip(images, labels):
                 phash = api_helpers.compute_phash(path)
     
                 # Optional duplicate check; skip if already present globally
                 if self.phash_exists(phash):
-                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}); skipping.")
+                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) already present in database; skipping.")
                     continue
     
+                if phash in used_phashes:
+                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) present in same bulk upload set; skipping.")
+                    continue
+                
+                used_phashes.add(phash)
+                
                 ext = os.path.splitext(path)[1].lower()
                 canonical_ext = canonical_ext_map[ext]
     
@@ -803,56 +840,85 @@ class InfrastructureAPI:
                         logger.warning(f"[upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
     #%% left off here
-    def remove_images_from_dataset(self, dataset_id: str, images: list[str]) -> str:
+    def remove_images_bulk(
+            self,
+            datasets: Union[str, list[str]],
+            phashes: Union[str, list[str]]
+        ) -> str:
         """
-        Remove images from a dataset by uploading a deletion manifest to S3
-        and sending a IMAGE_DELETE event to the image ops queue.
+        Remove images from one, many, or all datasets by uploading a deletion manifest to S3
+        and sending an IMAGE_DELETE event to the image ops queue.
         """
         ddb = self.clients['ddb']
         s3 = self.clients['s3']
         sqs = self.clients['sqs']
         job_table = self.config['DDB_JOB_TABLE']
+        dataset_table = self.config['DDB_DATASET_TABLE']
         image_ops_queue_name = self.config['SQS_QUEUE_IMAGE_OPS']
         bucket = self.config['S3_BUCKET_NAME']
         root = self.config['S3_DATASETS_ROOT']
-
+    
         queue_url = sqs.get_queue_url(QueueName=image_ops_queue_name)["QueueUrl"]
-
-        # Pre-checks
-        if not self.dataset_exists(dataset_id):
-            raise Exception(f"Dataset {dataset_id} does not exist.")
-        if self.dataset_locked(dataset_id):
-            raise Exception(f"Dataset {dataset_id} is currently locked.")
-        if not isinstance(images, list) or not all(isinstance(ph, str) for ph in images):
-            raise Exception("images must be a list of strings (pHashes).")
-        if len(images) == 0:
-            raise Exception("images list cannot be empty.")
-
+    
+        # --- Normalize phashes ---
+        if isinstance(phashes, str):
+            phashes = [phashes]
+        if not isinstance(phashes, list) or not all(isinstance(ph, str) and ph.strip() for ph in phashes):
+            raise ValueError("phashes must be a non-empty string or a list of non-empty strings.")
+        if not phashes:
+            raise ValueError("phashes list cannot be empty.")
+    
+        # --- Resolve datasets ---
+        if isinstance(datasets, str):
+            if datasets == "all":
+                resp = ddb.scan(TableName=dataset_table, ProjectionExpression="dataset_id")
+                dataset_ids = [item["dataset_id"]["S"] for item in resp.get("Items", [])]
+                if not dataset_ids:
+                    raise Exception("No datasets found in dataset table.")
+            else:
+                if not datasets.strip():
+                    raise ValueError("dataset string cannot be empty.")
+                dataset_ids = [datasets]
+        elif isinstance(datasets, list) and all(isinstance(ds, str) and ds.strip() for ds in datasets):
+            dataset_ids = datasets
+        else:
+            raise ValueError("datasets must be 'all', a non-empty string, or a list of non-empty strings.")
+    
         job_id = str(uuid.uuid4())
-        created_at = datetime.datetime.utcnow().isoformat()
-        locked = False
+        created_at = datetime.utcnow().isoformat()
+        locked_datasets = []
         sent_to_queue = False
         uploaded_keys: list[str] = []
-
+    
         try:
-            # Lock dataset
-            self.lock_dataset(dataset_id, job_id)
-            locked = True
-
+            # Lock all datasets
+            for ds in dataset_ids:
+                if not self.dataset_exists(ds):
+                    raise Exception(f"Dataset {ds} does not exist.")
+                if self.dataset_locked(ds):
+                    raise Exception(f"Dataset {ds} is currently locked.")
+                self.lock_dataset(ds, job_id)
+                locked_datasets.append(ds)
+    
             # Insert job row
+            summary = f"Removing {len(phashes)} images from {len(dataset_ids)} dataset(s)"
             ddb.put_item(
                 TableName=job_table,
                 Item={
                     "job_id": {"S": job_id},
                     "created_at": {"S": created_at},
                     "event_type": {"S": "IMAGE_DELETE"},
-                    "job_summary": {"S": f"Removing {len(images)} images from dataset {dataset_id}"},
+                    "job_summary": {"S": summary},
                     "job_status": {"S": "PENDING"}
                 }
             )
-
+    
             # Write manifest to S3
-            manifest = {"dataset_id": dataset_id, "job_id": job_id, "images": images}
+            manifest = {
+                "datasets": dataset_ids,
+                "job_id": job_id,
+                "phashes": phashes
+            }
             manifest_key = f"{root}/temp-deletions/{job_id}.json"
             s3.put_object(
                 Bucket=bucket,
@@ -861,33 +927,37 @@ class InfrastructureAPI:
                 ContentType="application/json"
             )
             uploaded_keys.append(manifest_key)
-
+    
             # Send lightweight event
-            event = {"event_type": "IMAGE_DELETE", "dataset_id": dataset_id, "job_id": job_id}
+            event = {"event_type": "IMAGE_DELETE", "datasets": dataset_ids, "job_id": job_id}
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
-
-            logger.info(f"[remove_images_from_dataset] Enqueued IMAGE_DELETE job {job_id} "
-                        f"for dataset {dataset_id}, manifest {manifest_key}.")
+    
+            logger.info(f"[remove_images_bulk] Enqueued IMAGE_DELETE job {job_id}, manifest {manifest_key}.")
             return job_id
-
+    
         except Exception as e:
-            logger.error(f"[remove_images_from_dataset] Error: {e}")
-            self.job_error(job_id, f"Removal init failed for dataset {dataset_id}: {e}")
-
+            logger.error(f"[remove_images_bulk] Error: {e}")
+            self.job_error(job_id, f"Removal init failed: {e}")
+    
             # Cleanup manifest if enqueue failed
             if uploaded_keys and not sent_to_queue:
                 for key in uploaded_keys:
                     try:
                         s3.delete_object(Bucket=bucket, Key=key)
-                        logger.info(f"[remove_images_from_dataset] Cleaned up {key} after failure.")
+                        logger.info(f"[remove_images_bulk] Cleaned up {key} after failure.")
                     except Exception as cleanup_err:
-                        logger.warning(f"[remove_images_from_dataset] Failed to cleanup {key}: {cleanup_err}")
+                        logger.warning(f"[remove_images_bulk] Failed to cleanup {key}: {cleanup_err}")
             raise
         finally:
-            if locked and not sent_to_queue:
-                self.unlock_dataset(dataset_id, job_id)
-                                    
+            if locked_datasets and not sent_to_queue:
+                for ds in locked_datasets:
+                    try:
+                        self.unlock_dataset(ds, job_id)
+                    except Exception as unlock_err:
+                        logger.warning(f"[remove_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
+    
+    #%% left offf here
     def sync_datasets(self, dataset_ids: str | list[str]) -> str:
         """
         Initiate a sync operation for one or more datasets by sending a SYNC event

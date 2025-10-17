@@ -7,16 +7,24 @@ image ops queue.
                   location of the required manifest: f"{root}/temp-images/{job_id}.json"
                   The manifest is of the form {'job_id': '...',
                                                'datasets': ['...', ...],
+                                               'band_mapping': {...}
                                                'images': [{
                                                            'phash': '...',
                                                            'original_filename': '...',
                                                            'label': '...',
                                                            'extension': '...', <-- one of 'tiff', 'jpeg' or 'png'
-                                                           'attributes': {...}
+                                                           'attributes': {...} <-- additional user defined attributes to add to the imagery table for each image in the manifest
                                                            },
                                                           ...]
                                                }
-2. IMAGE_DELETE - keys are 'event_type', 'dataset_id', 'job_id'
+2. IMAGE_DELETE - keys are 'event_type', 'datasets', 'job_id'
+                  The manifest is at f"{root}/temp-deletions/{job_id}.json"
+                  The manifest is of the form:
+                      manifest = {
+                          "datasets": dataset_ids, <-- list of dataset ids
+                          "job_id": job_id,
+                          "phashes": phashes <-- list of non-empty string phashes
+                      }
 """
 
 import os
@@ -143,9 +151,16 @@ def extension_to_mime(ext: str) -> str:
     else:
         raise ValueError(f"Unsupported extension: {ext}")
   
-#%%
-# --- Event handlers ---
+# --- Event Handlers ---
 def handle_image_upload(body: dict):
+    """
+    Handle IMAGE_UPLOAD events:
+    - Load manifest from S3
+    - Insert imagery rows into DDB_IMAGERY_TABLE for each dataset
+    - Copy each unique image from temp-images/ to images/ once
+    - Delete temp files and manifest
+    - Update job status and unlock datasets
+    """
     job_id = body["job_id"]
     datasets = body["datasets"]
     manifest_key = f"{S3_DATASETS_ROOT}/temp-images/{job_id}.json"
@@ -157,167 +172,164 @@ def handle_image_upload(body: dict):
         resp = s3.get_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
         manifest = json.loads(resp["Body"].read())
 
-        for ds in datasets:
-            for img in manifest["images"]:
-                # Write imagery row into DDB_IMAGERY_TABLE
-                ddb.put_item(
-                    TableName=DDB_IMAGERY_TABLE,
-                    Item={
-                        "dataset_id": {"S": ds},
-                        "phash": {"S": img["phash"]},
-                        "label": {"S": img["label"]},
-                        "extension": {"S": img["extension"]},
-                        "attributes": {"S": json.dumps(img.get("attributes", {}))}
-                    }
-                )
+        images = manifest.get("images", [])
+        band_mapping = manifest.get("band_mapping", {})
+        band_count = len(band_mapping)
 
-        job_update(job_id, "COMPLETED", f"Uploaded {len(manifest['images'])} images")
+        if not images:
+            raise Exception(f"Manifest {manifest_key} contained no images.")
+
+        # Track which phashes we've already copied
+        copied = set()
+
+        for img in images:
+            phash = img["phash"]
+            ext = img["extension"].lower().lstrip(".")
+            original_filename = img.get("original_filename", "")
+            attributes = img.get("attributes", {})
+
+            # Copy image once into permanent location
+            if phash not in copied:
+                src_key = f"{S3_DATASETS_ROOT}/temp-images/{phash}.{ext}"
+                dest_key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
+
+                s3.copy_object(
+                    Bucket=S3_BUCKET_NAME,
+                    CopySource={"Bucket": S3_BUCKET_NAME, "Key": src_key},
+                    Key=dest_key,
+                    ContentType=extension_to_mime(ext)
+                )
+                s3.delete_object(Bucket=S3_BUCKET_NAME, Key=src_key)
+                log_event(job_id, f"Moved {src_key} -> {dest_key}")
+                copied.add(phash)
+
+            # Build common item fields
+            base_item = {
+                "phash": {"S": phash},
+                "label": {"S": img["label"]},
+                "extension": {"S": ext},
+                "original_filename": {"S": original_filename},
+                "band_mapping": {"S": json.dumps(band_mapping)},
+                "band_count": {"N": str(band_count)},
+                "uploaded_at": {"S": datetime.now(timezone.utc).isoformat()},
+            }
+
+            # Expand attributes into top-level columns
+            for k, v in attributes.items():
+                base_item[k] = {"S": v}
+
+            # Write one row per dataset
+            for ds in datasets:
+                dataset_phash = f"{ds}#{phash}"
+                item = {
+                    "dataset_phash": {"S": dataset_phash},
+                    "dataset_id": {"S": ds},
+                    **base_item
+                }
+                ddb.put_item(TableName=DDB_IMAGERY_TABLE, Item=item)
+
+        # Delete manifest file
+        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
+        log_event(job_id, f"Deleted manifest {manifest_key}")
+
+        job_update(job_id, "COMPLETED", f"Uploaded {len(images)} images across {len(datasets)} datasets")
     except Exception as e:
         job_update(job_id, "FAILED", f"Image upload failed: {e}")
         raise
     finally:
         for ds in datasets:
             unlock_dataset(ds, job_id)
-            
-# def handle_image_upload(event):
-#     dataset_id = event["dataset_id"]
-#     job_id = event["job_id"]
-#     logger.info(f"[ImageOpsLambda] Handling IMAGE_UPLOAD for dataset {dataset_id}, job {job_id}")
 
-#     manifest_key = f"{S3_DATASETS_ROOT}/temp-images/{job_id}.json"
+def handle_remove_images(body: dict):
+    """
+    Handle IMAGE_DELETE events:
+    - Load manifest from S3
+    - Delete imagery rows from DDB_IMAGERY_TABLE for each dataset/phash
+    - Conditionally delete S3 objects if no other dataset references them
+    - Delete manifest file
+    - Update job status and unlock datasets
+    """
+    job_id = body["job_id"]
+    manifest_key = f"{S3_DATASETS_ROOT}/temp-deletions/{job_id}.json"
 
-#     try:
-#         # 1. Load manifest JSON from S3
-#         resp = s3.get_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
-#         manifest = json.loads(resp["Body"].read().decode("utf-8"))
-#         images = manifest.get("images", [])
+    try:
+        job_update(job_id, "IN_PROGRESS", "Processing image deletion manifest")
 
-#         if not images:
-#             raise Exception(f"Manifest {manifest_key} contained no images.")
+        # Load manifest from S3
+        resp = s3.get_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
+        manifest = json.loads(resp["Body"].read())
 
-#         # 2. For each image in manifest
-#         for entry in images:
-#             phash = entry["phash"]
-#             label = entry["label"]
-#             filename = entry["filename"]
-#             ext = entry["extension"] # one of {"jpg", "jpeg", "png", "tif", "tiff"}, lowercase
-            
-#             dataset_phash = f"{dataset_id}#{phash}"
+        dataset_ids = manifest.get("datasets", [])
+        phashes = manifest.get("phashes", [])
 
-#             # Insert imagery row into DDB_IMAGERY_TABLE
-#             ddb.put_item(
-#                 TableName=DDB_IMAGERY_TABLE,
-#                 Item={
-#                     "dataset_phash": {"S": dataset_phash},
-#                     "dataset_id": {"S": dataset_id},
-#                     "phash": {"S": phash},
-#                     "label": {"S": label},
-#                     "extension": {"S": ext},
-#                     "filename": {"S": filename},
-#                     "bands_count": {"N": str(entry["bands_count"])},
-#                     "bands_map": {"S": json.dumps(entry["bands_map"])},
-#                     "bands_source": {"S": entry["bands_source"]},
-#                     "forced_split": {"S": entry["forced_split"]},
-#                     "created_at": {"S": datetime.datetime.utcnow().isoformat()}
-#                 }
-#             )
+        if not dataset_ids or not phashes:
+            raise Exception(f"Manifest {manifest_key} missing datasets or phashes.")
 
-#             # Move image from temp-images/ to images/
-#             src_key = f"{S3_DATASETS_ROOT}/temp-images/{phash}.{ext}"
-#             dest_key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
+        deleted_rows = 0
+        deleted_s3 = 0
 
-#             # Copy to images/
-#             s3.copy_object(
-#                 Bucket=S3_BUCKET_NAME,
-#                 CopySource={"Bucket": S3_BUCKET_NAME, "Key": src_key},
-#                 Key=dest_key,
-#                 ContentType=extension_to_mime(ext)
-#             )
+        for phash in phashes:
+            # Delete rows for each dataset
+            for ds in dataset_ids:
+                dataset_phash = f"{ds}#{phash}"
+                try:
+                    ddb.delete_item(
+                        TableName=DDB_IMAGERY_TABLE,
+                        Key={"dataset_phash": {"S": dataset_phash}},
+                        ConditionExpression="attribute_exists(dataset_phash)"
+                    )
+                    log_event(job_id, f"Deleted imagery row {dataset_phash}")
+                    deleted_rows += 1
+                except ClientError as e:
+                    code = e.response.get("Error", {}).get("Code")
+                    if code == "ConditionalCheckFailedException":
+                        log_event(job_id, f"No imagery row {dataset_phash} found to delete", level="WARNING")
+                    else:
+                        log_event(job_id, f"Error deleting {dataset_phash}: {e}", level="ERROR")
+                        raise
 
-#             # Delete from temp-images/
-#             s3.delete_object(Bucket=S3_BUCKET_NAME, Key=src_key)
-#             logger.info(f"[ImageOpsLambda] Moved {src_key} -> {dest_key}")
+            # Check if phash is still referenced anywhere using PhashIndex
+            resp = ddb.query(
+                TableName=DDB_IMAGERY_TABLE,
+                IndexName="PhashIndex",
+                KeyConditionExpression="phash = :p",
+                ExpressionAttributeValues={":p": {"S": phash}},
+                ProjectionExpression="extension"
+            )
+            items = resp.get("Items", [])
+            still_referenced = bool(items)
 
-#         # 3. Delete manifest file
-#         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
-#         logger.info(f"[ImageOpsLambda] Deleted manifest {manifest_key}")
+            if not still_referenced:
+                # No references remain, safe to delete from S3
+                # Use extension from one of the rows we just deleted (if available)
+                if items:
+                    ext = items[0]["extension"]["S"].lower()
+                    key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
+                    try:
+                        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
+                        log_event(job_id, f"Deleted S3 object {key}")
+                        deleted_s3 += 1
+                    except ClientError as e:
+                        log_event(job_id, f"Error deleting {key}: {e}", level="ERROR")
+                        raise
+                else:
+                    log_event(job_id, f"No extension info found for phash {phash}; cannot delete S3 object", level="WARNING")
+            else:
+                log_event(job_id, f"Phash {phash} still referenced by other datasets; not deleting from S3")
 
-#         # 4. Mark job complete and unlock dataset
-#         job_update(job_id, "COMPLETE", f"Uploaded {len(images)} images to dataset {dataset_id}.")
-#         unlock_dataset(dataset_id, job_id)
-#         logger.info(f"[ImageOpsLambda] IMAGE_UPLOAD job {job_id} completed for dataset {dataset_id}")
+        # Delete manifest file
+        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
+        log_event(job_id, f"Deleted manifest {manifest_key}")
 
-#     except Exception as e:
-#         logger.error(f"[ImageOpsLambda] IMAGE_UPLOAD failed for {dataset_id}: {e}")
-#         job_error(job_id, f"Image upload failed for dataset {dataset_id}: {e}")
-#         try:
-#             unlock_dataset(dataset_id, job_id)
-#         except Exception as unlock_err:
-#             logger.warning(f"[ImageOpsLambda] Failed to unlock {dataset_id} after error: {unlock_err}")
-#         raise
-
-# def handle_remove_images(event):
-#     dataset_id = event["dataset_id"]
-#     job_id = event["job_id"]
-#     logger.info(f"[ImageOpsLambda] Handling REMOVE_IMAGES for {dataset_id}, job {job_id}")
-
-#     manifest_key = f"{S3_DATASETS_ROOT}/temp-deletions/{job_id}.json"
-
-#     try:
-#         # 1. Load manifest JSON from S3
-#         resp = s3.get_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
-#         manifest = json.loads(resp["Body"].read().decode("utf-8"))
-#         images = manifest.get("images", [])
-
-#         if not images:
-#             raise Exception(f"Manifest {manifest_key} contained no images.")
-
-#         # 2. For each phash in the manifest
-#         for phash in images:
-#             dataset_phash = f"{dataset_id}#{phash}"
-
-#             # Delete imagery row
-#             try:
-#                 ddb.delete_item(
-#                     TableName=DDB_IMAGERY_TABLE,
-#                     Key={"dataset_phash": {"S": dataset_phash}}
-#                 )
-#                 logger.info(f"[ImageOpsLambda] Deleted imagery row {dataset_phash}")
-#             except Exception as ddb_err:
-#                 logger.warning(f"[ImageOpsLambda] Failed to delete imagery row {dataset_phash}: {ddb_err}")
-
-#             # 3. Check if this phash is still referenced by any other dataset
-#             resp = ddb.query(
-#                 TableName=DDB_IMAGERY_TABLE,
-#                 IndexName="PhashIndex",
-#                 KeyConditionExpression="phash = :p",
-#                 ExpressionAttributeValues={":p": {"S": phash}}
-#             )
-#             if not resp.get("Items"):
-#                 key = f"{S3_DATASETS_ROOT}/images/{phash}.png"
-#                 try:
-#                     s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-#                     logger.info(f"[ImageOpsLambda] Deleted image {key} from S3")
-#                 except Exception as s3err:
-#                     logger.warning(f"[ImageOpsLambda] Failed to delete {key}: {s3err}")
-
-#         # 4. Delete manifest file
-#         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
-#         logger.info(f"[ImageOpsLambda] Deleted manifest {manifest_key}")
-
-#         # 5. Mark job complete and unlock dataset
-#         job_update(job_id, "COMPLETE", f"Removed {len(images)} images from dataset {dataset_id}.")
-#         unlock_dataset(dataset_id, job_id)
-#         logger.info(f"[ImageOpsLambda] REMOVE_IMAGES job {job_id} completed for dataset {dataset_id}")
-
-#     except Exception as e:
-#         logger.error(f"[ImageOpsLambda] REMOVE_IMAGES failed for {dataset_id}: {e}")
-#         job_error(job_id, f"Image removal failed for dataset {dataset_id}: {e}")
-#         try:
-#             unlock_dataset(dataset_id, job_id)
-#         except Exception as unlock_err:
-#             logger.warning(f"[ImageOpsLambda] Failed to unlock {dataset_id} after error: {unlock_err}")
-#         raise
+        job_update(job_id, "COMPLETED",
+                   f"Deleted {deleted_rows} imagery rows, removed {deleted_s3} S3 objects")
+    except Exception as e:
+        job_update(job_id, "FAILED", f"Image deletion failed: {e}")
+        raise
+    finally:
+        # Unlock all datasets listed in manifest
+        for ds in manifest.get("datasets", []):
+            unlock_dataset(ds, job_id)
 
 # --- Lambda entrypoint ---
 def lambda_handler(event, context):
