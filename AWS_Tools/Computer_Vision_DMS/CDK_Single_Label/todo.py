@@ -7,20 +7,16 @@ Created on Wed Oct 15 17:29:14 2025
 
 # to do
 
-# perhaps change phash existence check in api like in the sync lambda?
+# fix api with new assumptions and lambdas with new architecture
+# add cdk cde for deploy in bootstap builder
 
-# write out sync logic in the lambda and its helpers
-
-# make a api function to query and return the phash of images fitting certain conditions/ttribute values
+# make a api function to query and return the unique_ids of images fitting certain conditions/ttribute values
 
 # make api function to query all logs related to a: dataset, lambda (evn dlq), job id
 
-# make an api call that will accept phashes from a query say, and then assign them to a dataset if not already beloinging to it
+# make an api call that will accept unique_ids from a query say, and then assign them to a dataset if not already beloinging to it
 #       this will let us 'transfer images from one set to another'
 
-# verify lambda execution roles
-
-# verify api role, teardown role and bootstrap role
 
 #%% Notes
 
