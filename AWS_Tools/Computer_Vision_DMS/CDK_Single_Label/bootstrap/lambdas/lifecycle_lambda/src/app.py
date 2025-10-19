@@ -130,7 +130,11 @@ def handle_delete_dataset(event):
     try:
         job_update(job_id, 'IN_PROGRESS', summary='Calling appropriate handler for dataset deletion.')
 
-        # 1. Query imagery table for all images belonging to this dataset
+        imagery_rows_deleted = 0
+        s3_images_deleted = 0
+        manifest_objects_deleted = []
+        
+        # Query imagery table for all images belonging to this dataset
         resp = ddb.query(
             TableName=DDB_IMAGERY_TABLE,
             IndexName="DatasetIndex",
@@ -138,50 +142,54 @@ def handle_delete_dataset(event):
             ExpressionAttributeValues={":d": {"S": dataset_id}}
         )
         imagery_items = resp.get("Items", [])
-
-        phashes_exts_to_check = [(item["phash"]["S"], item["extension"]["S"]) for item in imagery_items]
-
-        # Delete imagery rows for this dataset
+        
+        # check references and delete S3 if safe
         for item in imagery_items:
-            ddb.delete_item(
-                TableName=DDB_IMAGERY_TABLE,
-                Key={"dataset_phash": {"S": item["dataset_phash"]["S"]}}
-            )
-
-        # 2. For each phash, check if any other dataset references it
-        for phash, ext in phashes_exts_to_check:
-            resp = ddb.query(
+            phash = item["phash"]["S"]
+            ext = item["extension"]["S"]
+        
+            ref_resp = ddb.query(
                 TableName=DDB_IMAGERY_TABLE,
                 IndexName="PhashIndex",
                 KeyConditionExpression="phash = :p",
                 ExpressionAttributeValues={":p": {"S": phash}}
             )
-            
-            # when uploading, we guarantee phashes are unique.
-            if not resp.get("Items"):  # no other dataset references this image
+            if len(ref_resp.get("Items", [])) == 1:  # only this dataset references it
                 key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
-                try:
-                    s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-                    log_event(job_id, f"Deleted image {key} from S3")
-                except Exception as s3err:
-                    log_event(job_id, f"Failed to delete {key}: {s3err}", level = 'ERROR')
+                s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
+                s3_images_deleted += 1
+        
+        # delete imagery rows
+        for item in imagery_items:
+            ddb.delete_item(
+                TableName=DDB_IMAGERY_TABLE,
+                Key={"dataset_phash": {"S": item["dataset_phash"]["S"]}}
+            )
+            imagery_rows_deleted += 1
 
-        # 3. Delete manifest folder for this dataset
+        # Delete manifest folder for this dataset
         manifest_prefix = f"{S3_DATASETS_ROOT}/manifests/{dataset_id}/"
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=manifest_prefix):
             for obj in page.get("Contents", []):
                 s3.delete_object(Bucket=S3_BUCKET_NAME, Key=obj["Key"])
-                log_event(job_id, f"Deleted manifest object {obj['Key']}")
+                manifest_objects_deleted.append(obj['Key'])
 
-        # 4. Delete dataset row
+        # log events
+        log_event(job_id, {
+                    "imagery_rows_deleted": imagery_rows_deleted,
+                    "s3_images_deleted": s3_images_deleted,
+                    'deleted_manifest_keys': manifest_objects_deleted
+                })
+        
+        # Delete dataset row
         ddb.delete_item(
             TableName=DDB_DATASET_TABLE,
             Key={"dataset_id": {"S": dataset_id}}
         )
 
-        # 5. Mark job complete
-        job_update(job_id, "COMPLETE", f"Dataset {dataset_id} deleted successfully.")
+        # Mark job complete
+        job_update(job_id, "COMPLETE", f"Dataset and manifest files {dataset_id} deleted successfully.")
         log_event(job_id, f"DELETE_DATASET job {job_id} completed for dataset {dataset_id}")
 
     except Exception as e:
@@ -197,13 +205,16 @@ def handle_remove_class_from_dataset(event):
     dataset_id = event["dataset_id"]
     class_name = event["class_name"]
     job_id = event["job_id"]
-    
-    log_event(job_id, f"Handling REMOVE_CLASS event for class {class_name} in dataset {dataset_id} and job id {job_id}")
-    
-    try:
-        job_update(job_id, 'IN_PROGRESS', summary='Calling appropriate handler for removing a class.')
 
-        # 1. Fetch dataset row
+    log_event(job_id, f"Handling REMOVE_CLASS event for class {class_name} in dataset {dataset_id} and job id {job_id}")
+
+    imagery_rows_deleted = 0
+    s3_images_deleted = 0
+
+    try:
+        job_update(job_id, 'IN_PROGRESS', summary=f"Removing class '{class_name}' from dataset {dataset_id}.")
+
+        # Fetch dataset row
         resp = ddb.get_item(
             TableName=DDB_DATASET_TABLE,
             Key={"dataset_id": {"S": dataset_id}},
@@ -223,7 +234,10 @@ def handle_remove_class_from_dataset(event):
         if class_name not in class_dict:
             raise Exception(f"Class '{class_name}' not found in dataset {dataset_id}.")
 
-        # 2. Build new class_to_id_dict with sequential IDs
+        if len(class_dict) == 1:
+            raise Exception("Cannot remove the only class; call delete_dataset instead.")
+
+        # Build new class_to_id_dict with sequential IDs
         new_classes = [c for c in class_dict.keys() if c != class_name]
         new_class_dict = {c: idx for idx, c in enumerate(new_classes)}
 
@@ -235,7 +249,7 @@ def handle_remove_class_from_dataset(event):
             ExpressionAttributeValues={":c": {"S": json.dumps(new_class_dict)}}
         )
 
-        # 3. Query imagery table for all images in this dataset
+        # Query imagery table for all images in this dataset
         resp = ddb.query(
             TableName=DDB_IMAGERY_TABLE,
             IndexName="DatasetIndex",
@@ -244,16 +258,12 @@ def handle_remove_class_from_dataset(event):
         )
         imagery_items = resp.get("Items", [])
 
-        # 4. For each image in this class, delete imagery row and maybe S3 object
+        # For each image in this class, delete S3 object if safe, then delete imagery row
         for item in imagery_items:
             phash = item["phash"]["S"]
-            label = item["label"]['S']
+            label = item["label"]["S"]
             if label == class_name:
-                # Delete imagery row
-                ddb.delete_item(
-                    TableName=DDB_IMAGERY_TABLE,
-                    Key={"dataset_phash": {"S": item["dataset_phash"]["S"]}}
-                )
+                ext = item["extension"]["S"]
 
                 # Check if phash is used by any other dataset
                 resp2 = ddb.query(
@@ -262,27 +272,41 @@ def handle_remove_class_from_dataset(event):
                     KeyConditionExpression="phash = :p",
                     ExpressionAttributeValues={":p": {"S": phash}}
                 )
-                if not resp2.get("Items"):
-                    ext = item["extension"]["S"]
+                if len(resp2.get("Items", [])) == 1:  # only this dataset references it
                     key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                     try:
                         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-                        log_event(job_id, f"Deleted image {key} from S3")
+                        s3_images_deleted += 1
                     except Exception as s3err:
-                        log_event(job_id, f"Failed to delete {key}: {s3err}", level = 'ERROR')
+                        raise Exception(f"Failed to delete {key}: {s3err}")
 
-        # 5. Mark job complete and unlock dataset
+                # Now delete imagery row
+                ddb.delete_item(
+                    TableName=DDB_IMAGERY_TABLE,
+                    Key={"dataset_phash": {"S": item["dataset_phash"]["S"]}}
+                )
+                imagery_rows_deleted += 1
+
+        # Mark job complete
         job_update(job_id, "COMPLETE", f"Class '{class_name}' removed from dataset {dataset_id}.")
-        unlock_dataset(dataset_id, job_id)
         log_event(job_id, f"REMOVE_CLASS job {job_id} completed for dataset {dataset_id}")
+
+        # Final structured log with counters
+        log_event(job_id, {
+            "imagery_rows_deleted": imagery_rows_deleted,
+            "s3_images_deleted": s3_images_deleted
+        })
+
     except Exception as e:
-        log_event(job_id, f"REMOVE_CLASS failed for {dataset_id}, class {class_name}: {e}", level = 'ERROR')
+        log_event(job_id, f"REMOVE_CLASS failed for {dataset_id}, class {class_name}: {e}", level='ERROR')
         job_update(job_id, "FAILED", f"Class removal failed for dataset {dataset_id}, class '{class_name}': {e}")
+        raise
+    finally:
         try:
             unlock_dataset(dataset_id, job_id)
         except Exception as unlock_err:
-            log_event(job_id, f"Failed to unlock {dataset_id} after error: {unlock_err}", level = 'ERROR')
-        raise
+            log_event(job_id, f"Failed to unlock {dataset_id} after error: {unlock_err}", level='ERROR')
+
 
 # --- Lambda entrypoint ---
 def lambda_handler(event, context):

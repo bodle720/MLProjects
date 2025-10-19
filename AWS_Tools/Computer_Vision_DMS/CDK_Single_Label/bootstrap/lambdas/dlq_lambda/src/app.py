@@ -154,7 +154,7 @@ def lambda_handler(event, context):
             event_type = payload.get("event_type", "unknown")
 
             # Log the full payload
-            log_event(job_id, f"DLQ received event_type={event_type}, payload={json.dumps(payload)}", level="ERROR")
+            log_event(job_id, f"DLQ received event_type={event_type}, payload={json.dumps(payload)}", level="INFO")
 
             # Update job status if we have a job_id
             if job_id != "unknown":

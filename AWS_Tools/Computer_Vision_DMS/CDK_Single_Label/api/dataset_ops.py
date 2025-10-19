@@ -43,28 +43,31 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
         
-class InfrastructureAPI:
-    def __init__(self, infrastructure_name: str, region: str, profile_name: str):
+class SingleLabelAPI:
+    def __init__(self, stack_name: str, region: str, profile_name: str):
         """
-        Connect to a specific infrastructure namespace in SSM.
-        Raises ValueError if the namespace doesn't exist.
+        Connect to a specific CDK stack namespace in CloudFormation.
+        Raises ValueError if the stack doesn't exist.
         """
         
-        self.infrastructure_name = infrastructure_name
+        # User parameters, must match user login credentials.
         self.region = region
         self.profile_name = profile_name
 
+        self.stack_name = stack_name
+
         session = boto3.Session(profile_name=self.profile_name, region_name=self.region)
 
-        # Load config from SSM
-        ssm = session.client("ssm")
-        self.config = api_helpers.load_config_from_ssm(ssm, self.infrastructure_name)
+        # Load config from cloudformation
+        cf = session.client("cloudformation")
+
+        self.config = api_helpers.load_config_from_cf(cf, self.stack_name)
 
         # Validate region
         if self.config["AWS_REGION"] != self.region:
             raise ValueError(
                 f"Region mismatch: user specified {self.region}, "
-                f"but infrastructure {self.infrastructure_name} is in {self.config['AWS_REGION']}."
+                f"but stack {self.stack_name} is in {self.config['AWS_REGION']}."
             )
 
         # Build clients
@@ -76,30 +79,31 @@ class InfrastructureAPI:
                 "lambda": session.client("lambda"),
                 "iam": session.client("iam"),
                 "ecr": session.client("ecr"),
-                "ssm": ssm,
-                'logs': session.client("logs")
+                "ssm": session.client("ssm"),
+                'logs': session.client("logs"),
+                'cf': cf
             }
 
         identity = self.clients["sts"].get_caller_identity()
-        logger.info(f"Connected as {identity['Arn']} to infra {infrastructure_name}")
+        logger.info(f"Connected as {identity['Arn']} to stack {stack_name} for single label CV datasets")
         
-    def phash_exists(self, phash: str) -> bool:
-        """
-        Check if an image with the given phash already exists in the S3 images/ folder.
-        Returns True if found, False otherwise.
-        Note: This ignores extension — any object with this phash prefix counts as existing.
-        """
-        s3 = self.clients["s3"]
-        bucket = self.config["S3_BUCKET_NAME"]
-        root = self.config["S3_DATASETS_ROOT"]
+    # def phash_exists(self, phash: str) -> bool:
+    #     """
+    #     Check if an image with the given phash already exists in the S3 images/ folder.
+    #     Returns True if found, False otherwise.
+    #     Note: This ignores extension — any object with this phash prefix counts as existing.
+    #     """
+    #     s3 = self.clients["s3"]
+    #     bucket = self.config["S3_BUCKET_NAME"]
+    #     root = self.config["S3_DATASETS_ROOT"]
     
-        prefix = f"{root}/images/{phash}"
-        paginator = s3.get_paginator("list_objects_v2")
+    #     prefix = f"{root}/images/{phash}"
+    #     paginator = s3.get_paginator("list_objects_v2")
     
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, MaxKeys=1):
-            if "Contents" in page and page["Contents"]:
-                return True
-        return False
+    #     for page in paginator.paginate(Bucket=bucket, Prefix=prefix, MaxKeys=1):
+    #         if "Contents" in page and page["Contents"]:
+    #             return True
+    #     return False
 
     def dataset_exists(self, dataset_id: str) -> bool:
         ddb = self.clients["ddb"]
@@ -111,7 +115,7 @@ class InfrastructureAPI:
                 ConsistentRead=True
             )
         except ClientError as e:
-            logger.error(f"[dataset_exists] Error checking {dataset_id}: {e}")
+            logger.error(f"[API method:dataset_exists] Error checking {dataset_id}: {e}")
             raise
 
         return 'Item' in resp and bool(resp['Item'])
@@ -126,16 +130,16 @@ class InfrastructureAPI:
                 ConsistentRead=True
             )
         except ClientError as e:
-            logger.error(f"[get_lock_owner] Error retrieving lock owner for dataset {dataset_id}: {e}")
+            logger.error(f"[API method:get_lock_owner] Error retrieving lock owner for dataset {dataset_id}: {e}")
             raise
 
         item = resp.get('Item')
         if item and item.get('locked', {}).get('BOOL'):
             job_id = item.get('locked_by', {}).get('S')
-            logger.info(f"[get_lock_owner] Dataset {dataset_id} is locked by job {job_id}.")
+            logger.info(f"[API method:get_lock_owner] Dataset {dataset_id} is locked by job {job_id}.")
             return job_id
 
-        logger.info(f"[get_lock_owner] Dataset {dataset_id} is not locked or not found.")
+        logger.warning(f"[API method:get_lock_owner] Dataset {dataset_id} is not locked or not found.")
         return None
     
     def dataset_locked(self, dataset_id: str):
@@ -152,21 +156,21 @@ class InfrastructureAPI:
                 ConsistentRead=True
             )
         except ClientError as e:
-            logger.error(f"[dataset_locked] Error checking lock for dataset {dataset_id}: {e}")
+            logger.error(f"[API method:dataset_locked] Error checking lock for dataset {dataset_id}: {e}")
             raise
 
         item = resp.get('Item')
         if not item:
-            logger.info(f"[dataset_locked] Dataset {dataset_id} not found in table {self.config['DDB_DATASET_TABLE']}. Treating as unlocked.")
+            logger.warning(f"[API method:dataset_locked] Dataset {dataset_id} not found in table {self.config['DDB_DATASET_TABLE']}. Treating as unlocked.")
             return False
 
         locked = item.get('locked', {}).get('BOOL', False)
         if locked:
             job_id = item.get('locked_by', {}).get('S')
-            logger.info(f"[dataset_locked] Dataset {dataset_id} is locked by job {job_id}.")
+            logger.info(f"[API method:dataset_locked] Dataset {dataset_id} is locked by job {job_id}.")
             return True
         else:
-            logger.info(f"[dataset_locked] Dataset {dataset_id} is not locked.")
+            logger.info(f"[API method:dataset_locked] Dataset {dataset_id} is not locked.")
             return False
         
     def dataset_synced(self, dataset_id: str) -> bool:
@@ -183,23 +187,23 @@ class InfrastructureAPI:
                 ConsistentRead=True
             )
         except ClientError as e:
-            logger.error(f"[dataset_synced] Error checking sync status for dataset {dataset_id}: {e}")
+            logger.error(f"[API method:dataset_synced] Error checking sync status for dataset {dataset_id}: {e}")
             raise
     
         item = resp.get('Item')
         if not item:
-            logger.info(
-                f"[dataset_synced] Dataset {dataset_id} not found in table {self.config['DDB_DATASET_TABLE']}. "
+            logger.warning(
+                f"[API method:dataset_synced] Dataset {dataset_id} not found in table {self.config['DDB_DATASET_TABLE']}. "
                 "Treating as not synced."
             )
             return False
     
         synced = item.get('synced', {}).get('BOOL', False)
         if synced:
-            logger.info(f"[dataset_synced] Dataset {dataset_id} is marked as synced.")
+            logger.info(f"[API method:dataset_synced] Dataset {dataset_id} is marked as synced.")
             return True
         else:
-            logger.info(f"[dataset_synced] Dataset {dataset_id} is not synced.")
+            logger.info(f"[API method:dataset_synced] Dataset {dataset_id} is not synced.")
             return False
 
     def lock_dataset(self, dataset_id: str, job_id: str):
@@ -235,9 +239,9 @@ class InfrastructureAPI:
                     ":job": {"S": job_id}
                 }
             )
-            logger.info(f"[lock_dataset] Dataset {dataset_id} locked by job {job_id}.")
+            logger.info(f"[API method:lock_dataset] Dataset {dataset_id} locked by job {job_id}.")
         except ClientError as e:
-            logger.error(f"[lock_dataset] Failed to lock dataset {dataset_id}: {e}")
+            logger.error(f"[API method:lock_dataset] Failed to lock dataset {dataset_id}: {e}")
             raise
       
     def unlock_dataset(self, dataset_id: str, job_id: str):
@@ -251,9 +255,9 @@ class InfrastructureAPI:
                   UpdateExpression="SET locked = :val REMOVE locked_by",
                   ExpressionAttributeValues={":val": {"BOOL": False}}
               )
-              logger.info(f"[unlock_dataset] Dataset {dataset_id} unlocked by job {job_id}.")
+              logger.info(f"[API method:unlock_dataset] Dataset {dataset_id} unlocked by job {job_id}.")
           except ClientError as e:
-              logger.warning(f"[unlock_dataset] Could not unlock dataset {dataset_id}: {e}")
+              logger.error(f"[API method:unlock_dataset] Could not unlock dataset {dataset_id}: {e}")
               
     def set_job_status(self, job_id: str, status: str, message: str = None):
         """Update the job_status (and optionally job_summary) of a job."""
@@ -270,7 +274,7 @@ class InfrastructureAPI:
                         ":summary": {"S": message}
                     }
                 )
-                logger.info(f"[set_job_status] Job {job_id} -> {status}. Summary: {message}")
+                logger.info(f"[API method:set_job_status] Job {job_id} -> {status}. Summary: {message}")
             else:
                 ddb.update_item(
                     TableName=self.config['DDB_JOB_TABLE'],
@@ -278,9 +282,9 @@ class InfrastructureAPI:
                     UpdateExpression="SET job_status = :status",
                     ExpressionAttributeValues={":status": {"S": status}}
                 )
-                logger.info(f"[set_job_status] Job {job_id} -> {status}.")
+                logger.info(f"[API method:set_job_status] Job {job_id} -> {status}.")
         except ClientError as e:
-            logger.error(f"[set_job_status] Failed to update job {job_id} to {status}: {e}")
+            logger.error(f"[API method:set_job_status] Failed to update job {job_id} to {status}: {e}")
             raise
 
     def job_success(self, job_id: str, message: str = None):
@@ -302,12 +306,12 @@ class InfrastructureAPI:
                 ConsistentRead=True
             )
         except ClientError as e:
-            logger.error(f"[summarize_job] Error retrieving job {job_id}: {e}")
+            logger.error(f"[API method:summarize_job] Error retrieving job {job_id}: {e}")
             raise
 
         item = resp.get('Item')
         if not item:
-            logger.info(f"[summarize_job] Job {job_id} not found in table {self.config['DDB_JOB_TABLE']}.")
+            logger.warning(f"[API method:summarize_job] Job {job_id} not found in table {self.config['DDB_JOB_TABLE']}.")
             return None
 
         summary = {}
@@ -320,7 +324,7 @@ class InfrastructureAPI:
         if 'job_status' in item:
             summary['job_status'] = item['job_status']['S']
 
-        logger.info(f"[summarize_job] Job {job_id} summary:")
+        logger.info(f"[API method:summarize_job] Job {job_id} summary:")
         for k, v in summary.items():
             logger.info(f"  {k:11s}: {v}")
 
@@ -388,11 +392,11 @@ class InfrastructureAPI:
             locked = True
 
             self.job_success(job_id, f"Successfully registered dataset {dataset_id}.")
-            logger.info(f"[register_dataset] Registered dataset {dataset_id} under job {job_id}.")
+            logger.info(f"[API method:register_dataset] Registered dataset {dataset_id} under job {job_id}.")
             return job_id
 
         except Exception as e:
-            logger.error(f"[register_dataset] Error registering dataset {dataset_id}: {e}")
+            logger.error(f"[API method:register_dataset] Error registering dataset {dataset_id}: {e}")
             self.job_error(job_id, f"Failed to register dataset {dataset_id}: {e}")
             raise
         finally:
@@ -461,11 +465,11 @@ class InfrastructureAPI:
             )
 
             self.job_success(job_id, f"Added class '{class_name}' with id {next_id} to dataset {dataset_id}.")
-            logger.info(f"[add_class_to_dataset] Added class '{class_name}' (id={next_id}) to dataset {dataset_id} under job {job_id}.")
+            logger.info(f"[API method:add_class_to_dataset] Added class '{class_name}' (id={next_id}) to dataset {dataset_id} under job {job_id}.")
             return job_id
 
         except Exception as e:
-            logger.error(f"[add_class_to_dataset] Error adding class to dataset {dataset_id}: {e}")
+            logger.error(f"[API method:add_class_to_dataset] Error adding class to dataset {dataset_id}: {e}")
             self.job_error(job_id, f"Failed to add class '{class_name}' to dataset {dataset_id}: {e}")
             raise
         finally:
@@ -509,11 +513,11 @@ class InfrastructureAPI:
             event = {"event_type": "DELETE_DATASET", "dataset_id": dataset_id, "job_id": job_id}
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
-            logger.info(f"[delete_dataset] Sent DELETE_DATASET event for {dataset_id} under job {job_id}.")
+            logger.info(f"[API method:delete_dataset] Sent DELETE_DATASET event for {dataset_id} under job {job_id}.")
             return job_id
 
         except Exception as e:
-            logger.error(f"[delete_dataset] Error: {e}")
+            logger.error(f"[API method:delete_dataset] Error: {e}")
             self.job_error(job_id, f"Deletion init failed for {dataset_id}: {e}")
             raise
         finally:
@@ -586,7 +590,7 @@ class InfrastructureAPI:
             }
             sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps(event))
             sent_to_queue = True
-            logger.info(f"[remove_class_from_dataset] Sent REMOVE_CLASS for {dataset_id}, class '{class_name}' under job {job_id}.")
+            logger.info(f"[API method:remove_class_from_dataset] Sent REMOVE_CLASS for {dataset_id}, class '{class_name}' under job {job_id}.")
             
             # Mark dataset as unsynced since a class removal job has been enqueued
             ddb.update_item(
@@ -595,12 +599,12 @@ class InfrastructureAPI:
                 UpdateExpression="SET synced = :s",
                 ExpressionAttributeValues={":s": {"BOOL": False}}
             )
-            logger.info(f"[remove_class_from_dataset] Marked dataset {dataset_id} as unsynced.")
+            logger.info(f"[API method:remove_class_from_dataset] Marked dataset {dataset_id} as unsynced.")
 
             return job_id
 
         except Exception as e:
-            logger.error(f"[remove_class_from_dataset] Error: {e}")
+            logger.error(f"[API method:remove_class_from_dataset] Error: {e}")
             self.job_error(job_id, f"Removal init failed for {dataset_id}, class '{class_name}': {e}")
             raise
         finally:
@@ -612,7 +616,7 @@ class InfrastructureAPI:
                         datasets: Union[str, list[str]],
                         images: list[str],
                         labels: list[str],
-                        bands_mapping: dict[str, str],
+                        band_mapping: dict[str, str],
                         attributes: Optional[dict[str, str]] = None
                     ) -> str:
         """
@@ -621,7 +625,7 @@ class InfrastructureAPI:
         - datasets: a dataset id string, a list of dataset ids, or the string "all"
         - images: list of local file paths
         - labels: list of labels (same length as images)
-        - bands_mapping: dict[str(str_index) -> str(band_name)] exactly matching VALID_BANDS, no duplicates
+        - band_mapping: dict[str(str_index) -> str(band_name)] exactly matching VALID_BANDS, no duplicates
         - attributes: optional dict applied to each imagery item in the bulk upload manifest, can be used when
                       querying images from imagery table.
         Returns: job_id (string)
@@ -682,11 +686,11 @@ class InfrastructureAPI:
 
         # --- Pre-checks on inputs ---
         
-        if bands_mapping is None or not isinstance(bands_mapping, dict) or not bands_mapping:
-            raise ValueError("bands_mapping is required and must be a non-empty dict.")
+        if band_mapping is None or not isinstance(band_mapping, dict) or not band_mapping:
+            raise ValueError("input band_mapping is required and must be a non-empty dict.")
     
-        bands_mapping = {str(k): v for k, v in bands_mapping.items()}
-        api_helpers.validate_band_info(bands_mapping)
+        band_mapping = {str(k): v for k, v in band_mapping.items()}
+        api_helpers.validate_band_info(band_mapping)
 
         if not isinstance(images, list) or not all(isinstance(p, str) for p in images):
             raise Exception("images must be a list of local file paths (strings).")
@@ -756,9 +760,9 @@ class InfrastructureAPI:
             raise Exception("Selected datasets do not share identical band_info definitions.")
         dataset_band_info = json.loads(list(unique_band_infos)[0])
     
-        # bands_mapping must match dataset_band_info exactly
-        if bands_mapping != dataset_band_info:
-            raise Exception(f"bands_mapping {bands_mapping} does not match dataset band_info {dataset_band_info}")
+        # band_mapping must match dataset_band_info exactly
+        if band_mapping != dataset_band_info:
+            raise Exception(f"band_mapping {band_mapping} does not match dataset band_info {dataset_band_info}")
     
         # --- Prepare job ---
         job_id = str(uuid.uuid4())
@@ -790,17 +794,19 @@ class InfrastructureAPI:
             manifest = {
                 "job_id": job_id,
                 "datasets": dataset_ids,
-                'bands_mapping':bands_mapping,
+                'band_mapping':band_mapping,
                 "images": []
             }
     
             # Process each image
             used_phashes = set()
+            path_labels_already_exists = []
+            
             for path, label in zip(images, labels):
                 phash = api_helpers.compute_phash(path)
         
                 if phash in used_phashes:
-                    logger.info(f"[upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) present in same bulk upload input set already; skipping.")
+                    logger.warning(f"[API method:upload_images_bulk] Duplicate phash {phash} for {path} (label={label}) present in same bulk upload input set already; skipping.")
                     continue
                 
                 used_phashes.add(phash)
@@ -809,16 +815,17 @@ class InfrastructureAPI:
                 canonical_ext = canonical_ext_map[ext]
     
                 # Extract band info and sanity-check
-                desired_bands_order = [bands_mapping[str(i)] for i in range(len(bands_mapping))]
+                desired_bands_order = [band_mapping[str(i)] for i in range(len(band_mapping))]
                 appears_valid, reason = api_helpers.bands_appear_valid(path, desired_bands_order)
     
                 if not appears_valid:
-                    logger.info(f"[upload_images_bulk] The image {path} does not appear to have the correct band naming or structure required, reason = {reason}; skipping.")
+                    logger.warning(f"[API method:upload_images_bulk] The image {path} does not appear to have the correct band naming or structure required, reason = {reason}; skipping.")
                     continue
                     
                 if self.phash_exists(phash):
                     # Already present globally: don’t upload, but include in manifest
-                    logger.info(f"[upload_images_bulk] phash {phash} already present globally; marking as already_exists.")
+                    path_labels_already_exists.append([path, label])
+                    # logger.info(f"[upload_images_bulk] phash {phash} already present globally; marking as already_exists.")
                     manifest["images"].append({
                         "phash": phash,
                         "original_filename": os.path.basename(path),
@@ -847,7 +854,8 @@ class InfrastructureAPI:
                         "attributes": attributes or {},
                         "already_exists": False
                     })
-                        
+            
+            logging.info(f"[API method:upload_images_bulk] {len(path_labels_already_exists)} images (phashes) already existed in image S3 repo, not re-adding. Paths and labels are: {path_labels_already_exists}")
             # Upload manifest and enqueue if we have any images
             if manifest["images"]:
                 manifest_key = f"{root}/temp-images/{job_id}.json"
@@ -871,28 +879,28 @@ class InfrastructureAPI:
                         UpdateExpression="SET synced = :s",
                         ExpressionAttributeValues={":s": {"BOOL": False}}
                     )
-                    logger.info(f"[upload_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
+                    logger.info(f"[API Method:upload_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
                 
                     
-            logger.info(f"[upload_images_bulk] Enqueued IMAGE_UPLOAD job {job_id} for datasets {dataset_ids}.")
+            logger.info(f"[API Method:upload_images_bulk] Enqueued IMAGE_UPLOAD job {job_id} for datasets {dataset_ids}.")
             return job_id
     
         except Exception as e:
-            logger.error(f"[upload_images_bulk] Error: {e}")
+            logger.error(f"[API Method:upload_images_bulk] Error: {e}")
             # Record job error
             try:
                 self.job_error(job_id, f"Image upload init failed for datasets {dataset_ids}: {e}")
             except Exception as job_err:
-                logger.warning(f"[upload_images_bulk] Failed to set job error for {job_id}: {job_err}")
+                logger.error(f"[API Method:upload_images_bulk] Failed to set job error for {job_id}: {job_err}")
     
             # Cleanup uploaded files if enqueue failed
             if uploaded_keys and not sent_to_queue:
                 for key in uploaded_keys:
                     try:
                         s3.delete_object(Bucket=bucket, Key=key)
-                        logger.info(f"[upload_images_bulk] Cleaned up {key} after failure.")
+                        logger.info(f"[API Method:upload_images_bulk] Cleaned up {key} after failure.")
                     except Exception as cleanup_err:
-                        logger.warning(f"[upload_images_bulk] Failed to cleanup {key}: {cleanup_err}")
+                        logger.error(f"[API Method:upload_images_bulk] Failed to cleanup {key}: {cleanup_err}")
             raise
     
         finally:
@@ -902,7 +910,7 @@ class InfrastructureAPI:
                     try:
                         self.unlock_dataset(ds, job_id)
                     except Exception as unlock_err:
-                        logger.warning(f"[upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
+                        logger.error(f"[API Method:upload_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
     def remove_images_bulk(
             self,
@@ -1004,13 +1012,13 @@ class InfrastructureAPI:
                     UpdateExpression="SET synced = :s",
                     ExpressionAttributeValues={":s": {"BOOL": False}}
                 )
-                logger.info(f"[remove_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
+                logger.info(f"[API Method:remove_images_bulk] Marked dataset {ds} as unsynced after enqueuing job {job_id}.")
                 
-            logger.info(f"[remove_images_bulk] Enqueued IMAGE_DELETE job {job_id}, manifest {manifest_key}.")
+            logger.info(f"[API Method:remove_images_bulk] Enqueued IMAGE_DELETE job {job_id}, manifest {manifest_key}.")
             return job_id
     
         except Exception as e:
-            logger.error(f"[remove_images_bulk] Error: {e}")
+            logger.error(f"[API Method:remove_images_bulk] Error: {e}")
             self.job_error(job_id, f"Removal init failed: {e}")
     
             # Cleanup manifest if enqueue failed
@@ -1018,9 +1026,9 @@ class InfrastructureAPI:
                 for key in uploaded_keys:
                     try:
                         s3.delete_object(Bucket=bucket, Key=key)
-                        logger.info(f"[remove_images_bulk] Cleaned up {key} after failure.")
+                        logger.info(f"[API Method:remove_images_bulk] Cleaned up {key} after failure.")
                     except Exception as cleanup_err:
-                        logger.warning(f"[remove_images_bulk] Failed to cleanup {key}: {cleanup_err}")
+                        logger.error(f"[API Method:remove_images_bulk] Failed to cleanup {key}: {cleanup_err}")
             raise
         finally:
             if locked_datasets and not sent_to_queue:
@@ -1028,7 +1036,7 @@ class InfrastructureAPI:
                     try:
                         self.unlock_dataset(ds, job_id)
                     except Exception as unlock_err:
-                        logger.warning(f"[remove_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
+                        logger.error(f"[API Method:remove_images_bulk] Failed to unlock dataset {ds} for job {job_id}: {unlock_err}")
     
     def sync_datasets(self, dataset_ids: str | list[str]) -> str:
         """
@@ -1056,11 +1064,11 @@ class InfrastructureAPI:
                 synced = item.get("synced", {}).get("BOOL", False)
     
                 if locked:
-                    logger.info(f"[sync_datasets] Skipping {dsid} because it is locked.")
+                    logger.info(f"[API Method:sync_datasets] Skipping {dsid} because it is locked.")
                     skipped_ids.append(dsid)
                     continue
                 if synced:
-                    logger.info(f"[sync_datasets] Skipping {dsid} because it is already synced.")
+                    logger.info(f"[API Method:sync_datasets] Skipping {dsid} because it is already synced.")
                     skipped_ids.append(dsid)
                     continue
     
@@ -1088,7 +1096,7 @@ class InfrastructureAPI:
     
                 synced = item.get("synced", {}).get("BOOL", False)
                 if synced:
-                    logger.info(f"[sync_datasets] Skipping {dsid} because it is already synced.")
+                    logger.info(f"[API Method:sync_datasets] Skipping {dsid} because it is already synced.")
                     skipped_ids.append(dsid)
                     continue
     
@@ -1130,22 +1138,19 @@ class InfrastructureAPI:
             sent_to_queue = True
     
             # Summary log
-            logger.info(
-                f"[sync_datasets] SYNC job {job_id} summary: "
-                f"included={resolved_ids}, skipped={skipped_ids}"
-            )
-    
+            logger.info(f"[API Method:sync_datasets] SYNC job {job_id} summary: included={resolved_ids}, skipped={skipped_ids}")
+            
             return job_id
     
         except Exception as e:
-            logger.error(f"[sync_datasets] Error: {e}")
+            logger.error(f"[API Method:sync_datasets] Error: {e}")
             self.job_error(job_id, f"Sync init failed: {e}")
             # Unlock any datasets we locked
             for dsid in locked_ids:
                 try:
                     self.unlock_dataset(dsid, job_id)
                 except Exception as unlock_err:
-                    logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
+                    logger.eror(f"[API Method:sync_datasets] Failed to unlock {dsid}: {unlock_err}")
             raise
         finally:
             if not sent_to_queue:
@@ -1153,7 +1158,7 @@ class InfrastructureAPI:
                     try:
                         self.unlock_dataset(dsid, job_id)
                     except Exception as unlock_err:
-                        logger.warning(f"[sync_datasets] Failed to unlock {dsid}: {unlock_err}")
+                        logger.error(f"[API Method:sync_datasets] Failed to unlock {dsid}: {unlock_err}")
 
  #%% left off here
     def query_logs(self,
@@ -1216,15 +1221,15 @@ class InfrastructureAPI:
             resp = logs.get_query_results(queryId=query_id)
             
             if resp["status"] == "Failed":
-                logger.error(f"Query {query_id} failed: {resp}")
+                logger.error(f"[API Method:query_logs] Query {query_id} failed: {resp}")
                 return {"status": "Failed", "results": None, "raw": resp}
             
             elif resp["status"] == "Cancelled":
-                logger.error(f"Query {query_id} cancelled: {resp}")
+                logger.error(f"[API Method:query_logs] Query {query_id} cancelled: {resp}")
                 return {"status": "Cancelled", "results": None, "raw": resp}
             
             elif resp["status"] == "Complete":
-                logger.info(f"Query {query_id} completed successfully.")
+                logger.info(f"[API Method:query_logs] Query {query_id} completed successfully.")
                 parsed = [
                     {col["field"]: col["value"] for col in row}
                     for row in resp["results"]
@@ -1233,5 +1238,5 @@ class InfrastructureAPI:
                               
             time.sleep(poll_interval)
     
-        logger.warning(f"Query {query_id} timed out after {timeout_seconds}s")
+        logger.error(f"[API Method:query_logs] Query {query_id} timed out after {timeout_seconds}s")
         raise TimeoutError(f"Logs Insights query did not complete within {timeout_seconds} seconds")

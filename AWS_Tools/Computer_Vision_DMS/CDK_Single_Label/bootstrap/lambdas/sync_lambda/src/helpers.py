@@ -4,9 +4,7 @@ Sync helpers
 """
 
 import os
-import io
 import json
-import csv
 import boto3
 import numpy as np
 import pandas as pd
@@ -86,22 +84,6 @@ def assign_splits(enriched, splits={"train":0.7, "validation":0.15, "test":0.15}
 
     df['split'] = df.index.map(assignment)
     return df.to_dict(orient="records")
-
-def build_csv(enriched):
-    """Convert enriched list of dicts into CSV string."""
-    if not enriched:
-        return ""
-
-    # Collect all keys across all dicts to ensure wide schema
-    fieldnames = sorted({k for row in enriched for k in row.keys()})
-
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in enriched:
-        writer.writerow(row)
-
-    return output.getvalue()
 
 def calculate_and_store_features(phash, dataset_id):
     """Download image, compute features, update imagery row, return features dict."""

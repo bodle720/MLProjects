@@ -7,6 +7,8 @@ SYNC - keys are 'event_type', 'dataset_ids', 'job_id'
 """
 
 import os
+import io
+import csv
 import time
 import uuid
 import json
@@ -14,7 +16,8 @@ from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
-from helpers import assign_splits, build_csv
+
+from helpers import assign_splits
 
 # --- Environment variables ---
 AWS_REGION = os.environ["AWS_REGION"]
@@ -39,6 +42,37 @@ _sequence_token = None
 _stream_initialized = False
 
 # --- Helpers---
+def build_csv(enriched):
+    """Convert enriched list of dicts into CSV string."""
+    if not enriched:
+        return ""
+
+    # Collect all keys across all dicts to ensure wide schema
+    fieldnames = sorted({k for row in enriched for k in row.keys()})
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in enriched:
+        writer.writerow(row)
+
+    return output.getvalue()
+
+def phash_exists(phash: str, extension: str) -> bool:
+    """
+    Check if an image with the given phash already exists in the S3 images/ folder.
+    Returns True if found, False otherwise.
+    """
+
+    try:
+        s3.head_object(Bucket=S3_BUCKET_NAME, Key=f"{S3_DATASETS_ROOT}/images/{phash}.{extension}")
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] in ("404", "NoSuchKey"):
+            return False
+        else:
+            raise Exception(f"Error checking phash {phash}.{extension} in S3: {e}")
+    
 def init_log_stream():
     global _stream_initialized
     if _stream_initialized:
@@ -129,7 +163,12 @@ def handle_sync(event):
     try:
         job_update(job_id, 'IN_PROGRESS', summary=f"Starting sync for {len(dataset_ids)} datasets")
 
+        synced_datasets = []
+        missing_s3_imgs = dict()
+        
         for dataset_id in dataset_ids:
+            missing_in_s3 = []
+                        
             # Fetch dataset metadata
             ds_resp = ddb.get_item(
                 TableName=DDB_DATASET_TABLE,
@@ -153,8 +192,31 @@ def handle_sync(event):
 
             enriched = []
             for item in imagery_items:
+
                 phash = item["phash"]["S"]
+                dataset_phash = f"{dataset_id}#{phash}"
+
                 label = item["label"]["S"]
+                original_filename = item["original_filename"]["S"]
+                extension = item["extension"]["S"]
+
+                if not phash_exists(phash, extension):
+                    
+                    # Record inconsistency
+                    missing_in_s3.append({'original_filename':original_filename,
+                                              'phash':phash,
+                                              'label':label,
+                                              'extension': extension})
+                    
+                    # Delete non-existent image from imagery table
+                    ddb.delete_item(
+                        TableName=DDB_IMAGERY_TABLE,
+                        Key={"dataset_phash": {"S": dataset_phash}},
+                        ConditionExpression="attribute_exists(dataset_phash)"
+                    )
+                    
+                    continue
+                                    
                 class_id = class_dict[label]
                 
                 enriched.append({"phash": phash,
@@ -190,9 +252,29 @@ def handle_sync(event):
                 UpdateExpression="SET synced = :s",
                 ExpressionAttributeValues={":s": {"BOOL": True}}
             )
-            log_event(job_id, f"Wrote manifests and marked {dataset_id} as synced")
+            synced_datasets.append(dataset_id)
+            
+            missing_s3_imgs[dataset_id] = missing_in_s3
+        
+        log_event(job_id, {
+                    "successfully_synced_datasets": synced_datasets,
+                    "total": len(synced_datasets),
+                    "missing_s3_files_summary": {
+                        dsid: {
+                            "count": len(rows),
+                            "sample": rows[:10]
+                        }
+                        for dsid, rows in missing_s3_imgs.items()
+                    }
+                })
 
-        job_update(job_id, 'COMPLETE', summary=f"Synced {len(dataset_ids)} datasets successfully.")
+        if any(missing_s3_imgs.values()):
+            job_update(job_id, 'COMPLETE',
+                       summary=f"Synced {len(dataset_ids)} datasets with inconsistencies pruned.")
+        else:
+            job_update(job_id, 'COMPLETE',
+                       summary=f"Synced {len(dataset_ids)} datasets successfully with no S3 inconsistencies.")
+        
 
     except Exception as e:
         log_event(job_id, f"SYNC job failed: {e}", level='ERROR')

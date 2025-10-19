@@ -7,7 +7,7 @@ image ops queue.
                   location of the required manifest: f"{root}/temp-images/{job_id}.json"
                   The manifest is of the form {'job_id': '...',
                                                'datasets': ['...', ...],
-                                               'bands_mapping': {...}
+                                               'band_mapping': {...}
                                                'images': [{
                                                            'phash': '...',
                                                            'original_filename': '...',
@@ -173,14 +173,15 @@ def handle_bulk_image_upload(body: dict):
         manifest = json.loads(resp["Body"].read())
 
         images = manifest.get("images", [])
-        band_mapping = manifest.get("bands_mapping", {})  # match API side
+        band_mapping = manifest.get("band_mapping", {})  # match API side
         band_count = len(band_mapping)
 
         if not images:
             raise Exception(f"Manifest {manifest_key} contained no images.")
 
         copied = set()
-
+        copied_count = 0
+        already_existed_count = 0
         for img in images:
             phash = img["phash"]
             ext = img["extension"].lower().lstrip(".")
@@ -200,10 +201,10 @@ def handle_bulk_image_upload(body: dict):
                     ContentType=extension_to_mime(ext)
                 )
                 s3.delete_object(Bucket=S3_BUCKET_NAME, Key=src_key)
-                log_event(job_id, f"Moved {src_key} -> {dest_key}")
                 copied.add(phash)
-            elif already_exists:
-                log_event(job_id, f"phash {phash} already existed globally; skipping copy.")
+                copied_count += 1
+            else:
+                already_existed_count += 1
 
             # Build common item fields
             base_item = {
@@ -227,15 +228,24 @@ def handle_bulk_image_upload(body: dict):
                     "dataset_id": {"S": ds},
                     **base_item
                 }
+                # If already exists, silently replaces with new row.
                 ddb.put_item(TableName=DDB_IMAGERY_TABLE, Item=item)
+
+        # Log all successful copies        
+        log_event(job_id, {
+                    "copied_count": copied_count,
+                    "already_existed_count": already_existed_count
+                })
 
         # Delete manifest file
         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
         log_event(job_id, f"Deleted manifest {manifest_key}")
+        job_update(job_id, "COMPLETED",
+           f"Registered {len(images)} images ({copied_count} new, {already_existed_count} existing) across {len(datasets)} datasets")
 
-        job_update(job_id, "COMPLETED", f"Uploaded {len(images)} images across {len(datasets)} datasets")
     except Exception as e:
         job_update(job_id, "FAILED", f"Image upload failed: {e}")
+        log_event(job_id, f"Image upload failed: {e}", level = 'ERROR')
         raise
     finally:
         for ds in datasets:
@@ -267,8 +277,11 @@ def handle_bulk_remove_images(body: dict):
             raise Exception(f"Manifest {manifest_key} missing datasets or phashes.")
 
         deleted_rows = 0
+        nonexistent_imagery_rows_to_delete = 0
         deleted_s3 = 0
-
+        number_phashes_used_by_other_datasets = 0
+        not_referenced_but_no_extension_keys = []
+        
         for phash in phashes:
             ext = None  # capture extension from one of the rows we delete
 
@@ -291,15 +304,13 @@ def handle_bulk_remove_images(body: dict):
                         Key={"dataset_phash": {"S": dataset_phash}},
                         ConditionExpression="attribute_exists(dataset_phash)"
                     )
-                    log_event(job_id, f"Deleted imagery row {dataset_phash}")
                     deleted_rows += 1
                 except ClientError as e:
                     code = e.response.get("Error", {}).get("Code")
                     if code == "ConditionalCheckFailedException":
-                        log_event(job_id, f"No imagery row {dataset_phash} found to delete", level="WARNING")
+                        nonexistent_imagery_rows_to_delete += 1
                     else:
-                        log_event(job_id, f"Error deleting {dataset_phash}: {e}", level="ERROR")
-                        raise
+                        raise Exception(f"Error deleting {dataset_phash}: {e}")
 
             # Check if phash is still referenced anywhere using PhashIndex
             resp = ddb.query(
@@ -316,24 +327,42 @@ def handle_bulk_remove_images(body: dict):
                     key = f"{S3_DATASETS_ROOT}/images/{phash}.{ext}"
                     try:
                         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
-                        log_event(job_id, f"Deleted S3 object {key}")
                         deleted_s3 += 1
                     except ClientError as e:
-                        log_event(job_id, f"Error deleting {key}: {e}", level="ERROR")
-                        raise
+                        raise Exception(f"Error deleting {key}: {e}")
                 else:
-                    log_event(job_id, f"No extension info captured for phash {phash}; cannot delete S3 object", level="WARNING")
+                    not_referenced_but_no_extension_keys.append(key)
             else:
-                log_event(job_id, f"Phash {phash} still referenced by other datasets; not deleting from S3")
+                number_phashes_used_by_other_datasets += 1
+
+        # Make logs
+        if not_referenced_but_no_extension_keys:
+            log_event(job_id, {
+                "warning": "Unreferenced phashes with no extension",
+                "sample_keys": not_referenced_but_no_extension_keys[:10],  # sample
+                "count": len(not_referenced_but_no_extension_keys)
+            }, level="WARNING")
+
+        log_event(job_id, {
+            "deleted_imagery_table_rows": deleted_rows,
+            "nonexistent_rows_tried_to_delete": nonexistent_imagery_rows_to_delete,
+            "deleted_from_s3_count": deleted_s3,
+            "still_referenced": number_phashes_used_by_other_datasets
+        })
 
         # Delete manifest file
         s3.delete_object(Bucket=S3_BUCKET_NAME, Key=manifest_key)
         log_event(job_id, f"Deleted manifest {manifest_key}")
 
         job_update(job_id, "COMPLETED",
-                   f"Deleted {deleted_rows} imagery rows, removed {deleted_s3} S3 objects")
+                   f"Deleted {deleted_rows} imagery rows "
+                   f"({nonexistent_imagery_rows_to_delete} nonexistent), "
+                   f"removed {deleted_s3} S3 objects, "
+                   f"{number_phashes_used_by_other_datasets} still referenced")
+        
     except Exception as e:
         job_update(job_id, "FAILED", f"Image deletion failed: {e}")
+        log_event(job_id, f"Image deletion failed: {e}", level = 'ERROR')
         raise
     finally:
         # Unlock all datasets listed in manifest

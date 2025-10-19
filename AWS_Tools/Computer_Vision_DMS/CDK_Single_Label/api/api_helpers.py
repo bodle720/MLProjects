@@ -108,7 +108,6 @@ def bands_appear_valid(path: str, desired_bands_order: list[str]) -> tuple[bool,
 
     return True, ""
 
-
 def compute_phash(path: str) -> str:
     """Compute perceptual hash (phash) of an image file."""
     with Image.open(path) as img:
@@ -116,27 +115,37 @@ def compute_phash(path: str) -> str:
         img = img.convert("L")
         return str(imagehash.phash(img))
     
-def load_config_from_ssm(ssm_client, infrastructure_name: str) -> dict:
+
+
+def load_config_from_cf(cf_client, stack_name: str) -> dict:
     """
-    Loads all parameters for a given infrastructure_name from SSM Parameter Store
-    and returns them as a dict.
+    Loads all CloudFormation outputs for a given stack into a dict,
+    enforcing uniqueness (exactly one stack with that name must exist).
+
+    Args:
+        cf_client: boto3 CloudFormation client
+        stack_name: the exact name of the deployed CDK stack
+
+    Returns:
+        dict mapping OutputKey -> OutputValue
 
     Raises:
-        ValueError: if no parameters are found for the given infrastructure_name.
+        ValueError: if no stack or more than one stack is found,
+                    or if the stack has no outputs.
     """
-    prefix = f"/cv-datasets/single-label/{infrastructure_name}/infrastructure/"
-    config = {}
+    resp = cf_client.describe_stacks(StackName=stack_name)
 
-    paginator = ssm_client.get_paginator("get_parameters_by_path")
-    for page in paginator.paginate(Path=prefix, Recursive=True, WithDecryption=True):
-        for param in page.get("Parameters", []):
-            key = param["Name"].split("/")[-1]  # last segment is the config key
-            config[key] = param["Value"]
+    stacks = resp.get("Stacks", [])
+    if len(stacks) == 0:
+        raise ValueError(f"No stack found with name '{stack_name}'")
+    if len(stacks) > 1:
+        raise ValueError(f"Multiple stacks found with name '{stack_name}', expected exactly one")
 
-    if not config:
-        raise ValueError(
-            f"No parameters found under {prefix}. "
-            f"Did you run part 2 to register this infrastructure?"
-        )
+    outputs = stacks[0].get("Outputs", [])
+    if not outputs:
+        raise ValueError(f"Stack '{stack_name}' has no outputs")
 
+    config = {o["OutputKey"]: o["OutputValue"] for o in outputs}
     return config
+
+
