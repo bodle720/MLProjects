@@ -4,16 +4,21 @@ from aws_cdk import (
     CfnOutput,
     aws_iam as iam,
     aws_s3 as s3,
+    aws_sqs as sqs,
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     custom_resources as cr
 )
 from constructs import Construct
+import re
 
 class StorageStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # Derive a unique database name from the stack name
+        db_name = re.sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
 
         # 1. File bucket (d3 file bucket)
         file_bucket = s3.Bucket(
@@ -28,6 +33,10 @@ class StorageStack(Stack):
                 s3.LifecycleRule(
                     prefix="athena-results/",
                     expiration=Duration.days(15)
+                ),
+                s3.LifecycleRule(
+                    prefix="temp/image-upload/",
+                    expiration=Duration.days(30)
                 )
             ]
         )
@@ -97,7 +106,7 @@ class StorageStack(Stack):
             timeout=Duration.minutes(5),
             environment={
                 "ICEBERG_BUCKET": iceberg_bucket.bucket_name,
-                "ICEBERG_DATABASE": "imagery_db",
+                "ICEBERG_DATABASE": db_name,
                 "ATHENA_OUTPUT": f"s3://{file_bucket.bucket_name}/athena-results/"
             }
         )
@@ -118,6 +127,10 @@ class StorageStack(Stack):
             )
         )
 
+        # The Athena SQL commands translates them into Glue API calls under the hood,
+        # which will store the schema in the Glue Data Catalog, a component of AWS Glue.
+        # GLue will store the catalog/schema that allows queries to "understand" the
+        # tables' schemas (it is a schema registry).
         ddl_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
@@ -128,13 +141,15 @@ class StorageStack(Stack):
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                    f"arn:aws:glue:{self.region}:{self.account}:database/imagery_db",
-                    f"arn:aws:glue:{self.region}:{self.account}:table/imagery_db/*"
+                    f"arn:aws:glue:{self.region}:{self.account}:database/{db_name}",
+                    f"arn:aws:glue:{self.region}:{self.account}:table/{db_name}/*"
                 ]
             )
         )
 
-        # Custom resource to invoke the DDL Lambda at deploy time
+        # Custom resource to invoke the DDL Lambda at deploy time, after a destroy
+        # it will reinvoke the lambda. So, iceberg table creation happens once, not
+        # for an update, however.
         cr.AwsCustomResource(
             self, "RunIcebergDDL",
             on_create=cr.AwsSdkCall(
@@ -143,26 +158,27 @@ class StorageStack(Stack):
                 parameters={"FunctionName": ddl_lambda.function_name},
                 physical_resource_id=cr.PhysicalResourceId.of("IcebergDDLRun")
             ),
-            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
-            )
+            policy=cr.AwsCustomResourcePolicy.from_statements([
+                iam.PolicyStatement(
+                    actions=["lambda:InvokeFunction"],
+                    resources=[ddl_lambda.function_arn]
+                )
+            ])
         )
 
-        # Outputs (for cross-stack references)
-        CfnOutput(self, "FileBucketName", value=file_bucket.bucket_name, export_name="FileBucketName")
-        CfnOutput(self, "FileBucketArn", value=file_bucket.bucket_arn, export_name="FileBucketArn")
+        # Global DLQ for async failures (S3→Lambda, Lambda async invokes, etc.)
+        dlq = sqs.Queue(
+            self, "GlobalDeadLetterQueue",
+            retention_period=Duration.days(14),
+            visibility_timeout=Duration.minutes(5)
+        )
 
-        CfnOutput(self, "IcebergBucketName", value=iceberg_bucket.bucket_name, export_name="IcebergBucketName")
-        CfnOutput(self, "IcebergBucketArn", value=iceberg_bucket.bucket_arn, export_name="IcebergBucketArn")
-
-        CfnOutput(self, "LockTableName", value=lock_table.table_name, export_name="LockTableName")
-        CfnOutput(self, "DatasetsTableName", value=datasets_table.table_name, export_name="DatasetsTableName")
-        CfnOutput(self, "JobTableName", value=job_table.table_name, export_name="JobTableName")
-        CfnOutput(self, "Sha256TableName", value=sha256_table.table_name, export_name="Sha256TableName")
-
-        CfnOutput(self, "IcebergDDLFunctionName", value=ddl_lambda.function_name, export_name="IcebergDDLFunctionName")
-        CfnOutput(self, "IcebergDDLFunctionArn", value=ddl_lambda.function_arn, export_name="IcebergDDLFunctionArn")
-
-        CfnOutput(self, "AthenaDatabase", value="imagery_db", export_name="AthenaDatabase")
-        CfnOutput(self, "AthenaOutputLocation", value=f"s3://{file_bucket.bucket_name}/athena-results/",
-                  export_name="AthenaOutputLocation")
+        # Expose constructs for cross-stack wiring
+        self.file_bucket = file_bucket
+        self.iceberg_bucket = iceberg_bucket
+        self.lock_table = lock_table
+        self.datasets_table = datasets_table
+        self.job_table = job_table
+        self.sha256_table = sha256_table
+        self.global_dlq = dlq
+        self.athena_database = db_name
