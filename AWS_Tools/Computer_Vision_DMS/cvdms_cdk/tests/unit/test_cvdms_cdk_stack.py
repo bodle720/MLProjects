@@ -1,10 +1,10 @@
 import aws_cdk as core
 import aws_cdk.assertions as assertions
 
-from cvdms_cdk.cvdms_cdk_stack import CvdmsCdkStack
+from stacks.storage_stack import CvdmsCdkStack
 
 # example tests. To run these tests, uncomment this file along with the example
-# resource in cvdms_cdk/cvdms_cdk_stack.py
+# resource in stacks/storage_stack.py
 def test_sqs_queue_created():
     app = core.App()
     stack = CvdmsCdkStack(app, "cvdms-cdk")
