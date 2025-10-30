@@ -1,5 +1,6 @@
 from aws_cdk import (
-    Stack, Duration,
+    Stack,
+    Duration,
     aws_s3 as s3,
     aws_lambda as _lambda,
     aws_s3_notifications as s3n,
@@ -9,59 +10,114 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_iam as iam,
     aws_sqs as sqs,
+    aws_logs as logs,
+    aws_dynamodb as dynamodb,
 )
 from constructs import Construct
 
 
 class ImageUploadStack(Stack):
-
-    def __init__(self, scope: Construct, id: str, *,
+    def __init__(self,
+                 scope: Construct,
+                 construct_id: str,
+                 app_name: str,
                  file_bucket: s3.Bucket,
                  iceberg_bucket: s3.Bucket,
-                 job_table,
-                 sha256_table,
-                 lock_table,
-                 global_dlq,
-                 athena_database,
-                 **kw):
-        super().__init__(scope, id, **kw)
+                 job_table: dynamodb.Table,
+                 sha256_table: dynamodb.Table,
+                 lock_table: dynamodb.Table,
+                 global_dlq: sqs.Queue,
+                 athena_database: str,
+                 app_log_group: logs.LogGroup,
+                 **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
 
-        # ------------------------------
-        # Isolated VPC for Batch
-        # ------------------------------
         # Use the default VPC (public subnets included)
         vpc = ec2.Vpc.from_lookup(self, "DefaultVpc", is_default=True)
 
-
-        # batch_sg = ec2.SecurityGroup(
-        #     self, "BatchSG",
-        #     vpc=vpc,
-        #     allow_all_outbound=True,
-        #     description="Security group for Batch compute"
-        # )
-
-        # ------------------------------
-        # Lambdas (outside VPC)
-        # ------------------------------
-        def mk_lambda(name, handler, env, timeout=5):
-            return _lambda.Function(
-                self, name,
-                runtime=_lambda.Runtime.PYTHON_3_12,
-                handler=f"{handler}.handler",
-                code=_lambda.Code.from_asset(f"lambdas/{handler}"),
-                timeout=Duration.minutes(timeout),
-                environment=env
-            )
-
-        validation_lambda = mk_lambda(
-            "ValidationLambda", "validation",
-            {
-                "FILES_BUCKET": file_bucket.bucket_name,
-                "SHA256_TABLE": sha256_table.table_name,
-                "JOB_TABLE": job_table.table_name,
-                "ICEBERG_BUCKET": iceberg_bucket.bucket_name,
-            }
+        # Create a security group for Batch instances
+        batch_sg = ec2.SecurityGroup(
+            self, "BatchSecurityGroup",
+            vpc=vpc,
+            description="Security group for Batch compute environment",
+            allow_all_outbound=True  # needed so jobs can reach S3/ECR
         )
+        # An IAM Role assumes by AWS Batch itself (not the jobs)
+        # The purpose is to let Batch manage the compute environment: creating, scaling, managing clusters
+        batch_service_role = iam.Role(
+            self, "BatchServiceRole",
+            assumed_by=iam.ServicePrincipal("batch.amazonaws.com"),
+            managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSBatchServiceRole")]
+        )
+
+        # The role the EC2 nodes take on, needed to register with clusters, pull containers, etc
+        # Things for the node to do, not necessarily the job running on it.
+        instance_role = iam.Role(
+            self, "BatchInstanceRole",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonEC2ContainerServiceforEC2Role")
+            ]
+        )
+
+        # The mechanism that attaches the instance role to EC2 at launch.
+        instance_profile = iam.CfnInstanceProfile(self, "BatchInstanceProfile", roles=[instance_role.role_name])
+
+        # Make the compute environment
+        compute_env = batch.ComputeEnvironment(
+            self, "ComputeEnv",
+            service_role=batch_service_role,
+            compute_resources=batch.ComputeResources(
+                type=batch.ComputeResourceType.SPOT,
+                allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
+                vpc=vpc,
+                minv_cpus=0,
+                desiredv_cpus=0,
+                maxv_cpus=64,
+                instance_role=instance_profile.attr_arn,  # attach instance profile
+                instance_types=[ec2.InstanceType("m5.large"), ec2.InstanceType("m5.xlarge")],
+                vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),  # or PRIVATE_WITH_EGRESS for prod
+                security_groups=[batch_sg]
+            )
+        )
+
+        # The job queue for the above compute environment.
+        job_queue = batch.JobQueue(
+                                self,
+                            "JobQueue",
+                                priority=1, # If multiple queues share the compute env, this queue takes first priority.
+                                compute_environments=[
+                                    batch.JobQueueComputeEnvironment(
+                                        compute_environment=compute_env,
+                                        order=1 # Ensures this is the first and only compute environment batch will try.
+                                    )
+                                ]
+                            )
+
+        # Make the validation lambda
+        validation_lambda = _lambda.DockerImageFunction(
+            self,
+            "ValidationLambda",
+            code=_lambda.DockerImageCode.from_image_asset("lambdas/upload/validation"),
+            memory_size=1024,
+            timeout=cdk.Duration.minutes(15),
+            log_group=app_log_group  # 👈 force logs into the shared group
+        )
+
+        validation_lambda = _lambda.Function(
+                                            self,
+                                            "ValidationLambda",
+                                            runtime=_lambda.Runtime.PYTHON_3_12,
+                                            handler="validation.handler",
+                                            code=_lambda.Code.from_asset(f"lambdas/upload/validation"),
+                                            timeout=Duration.minutes(15),
+                                            environment={
+                                                    "FILES_BUCKET": file_bucket.bucket_name,
+                                                    "SHA256_TABLE_NAME": sha256_table.table_name,
+                                                    "JOB_TABLE_NAME": job_table.table_name,
+                                                    "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
+                                                     }
+                                            )
 
         label_lambda = mk_lambda(
             "LabelEnrichmentLambda", "label_enrichment",
@@ -88,58 +144,19 @@ class ImageUploadStack(Stack):
             timeout=2
         )
 
-        # S3 event → Validation Lambda
+        # S3 event -> Validation Lambda
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
             s3n.LambdaDestination(validation_lambda),
             s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
         )
 
-        # ------------------------------
-        # Batch: compute environment, queue, roles
-        # ------------------------------
-        inst_role = iam.Role(
-            self, "BatchInstanceRole",
-            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AmazonEC2ContainerServiceforEC2Role"
-                )
-            ]
-        )
 
-        inst_profile = iam.CfnInstanceProfile(
-            self, "BatchInstProf",
-            roles=[inst_role.role_name]
-        )
+
 
         # Use the default ECS instance role (already has AmazonEC2ContainerServiceforEC2Role)
         # CDK will automatically create an instance profile for you if you don't specify one.
 
-        compute_env = batch.ComputeEnvironment(
-            self, "CheapComputeEnv",
-            compute_resources=batch.ComputeResources(
-                type=batch.ComputeResourceType.SPOT,
-                allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
-                vpc=vpc,
-                minv_cpus=0,
-                desiredv_cpus=0,
-                maxv_cpus=32,
-                instance_types=[ec2.InstanceType("m5.large")],
-                vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-                # no explicit instance_role → Batch uses the default ECS instance role
-            )
-        )
-
-        job_queue = batch.JobQueue(
-            self, "CheapJobQueue",
-            compute_environments=[
-                batch.JobQueueComputeEnvironment(
-                    compute_environment=compute_env,
-                    order=1
-                )
-            ]
-        )
 
         # Example job definition
         job_role = iam.Role(

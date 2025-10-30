@@ -5,35 +5,37 @@ from pathlib import Path
 
 athena = boto3.client("athena")
 
-DATABASE = os.environ.get("ICEBERG_DATABASE")
-OUTPUT_LOCATION = os.environ.get("ATHENA_OUTPUT")
-ICEBERG_BUCKET = os.environ["ICEBERG_BUCKET"]
+ICEBERG_DATABASE_NAME = os.environ.get("ICEBERG_DATABASE_NAME")
+S3_ATHENA_OUTPUT_URI = os.environ.get("S3_ATHENA_OUTPUT_URI")
+ICEBERG_BUCKET_NAME = os.environ["ICEBERG_BUCKET_NAME"]
 
-def run_query(query: str):
+def run_query(query: str, context):
     """Submit a query to Athena and wait for completion."""
     response = athena.start_query_execution(
         QueryString=query,
-        QueryExecutionContext={"Database": DATABASE},
-        ResultConfiguration={"OutputLocation": OUTPUT_LOCATION},
+        QueryExecutionContext={"Database": ICEBERG_DATABASE_NAME},
+        ResultConfiguration={"OutputLocation": S3_ATHENA_OUTPUT_URI},
     )
     qid = response["QueryExecutionId"]
 
-    while True:
+    st_time = time.time()
+    max_wait_time = max(0, (context.get_remaining_time_in_millis() // 1000) - 5)
+    while True and (time.time() - st_time) < max_wait_time:
         status = athena.get_query_execution(QueryExecutionId=qid)
         state = status["QueryExecution"]["Status"]["State"]
         if state in ["SUCCEEDED", "FAILED", "CANCELLED"]:
             break
         time.sleep(2)
+    else:
+        raise TimeoutError(f"Query execution failed due to timeout: waited {max_wait_time} seconds, perhaps raise the time limit?")
 
-    if state != "SUCCEEDED":
-        raise RuntimeError(f"Query failed: {query}")
-
-    return qid
-
+    if state in ["FAILED", "CANCELLED"]:
+        reason = status["QueryExecution"]["Status"].get("StateChangeReason", "")
+        raise RuntimeError(f"Query failed: {query}\nReason: {reason}")
 
 def handler(event, context):
     # Ensure database exists
-    run_query(f"CREATE DATABASE IF NOT EXISTS {DATABASE}")
+    run_query(f"CREATE DATABASE IF NOT EXISTS {ICEBERG_DATABASE_NAME}", context)
 
     # Load SQL file from the same directory
     sql_path = Path(__file__).parent / "tables.sql"
@@ -45,11 +47,12 @@ def handler(event, context):
 
     # Replace placeholders with environment variables
     statements = [
-        stmt.replace("${ICEBERG_BUCKET}", ICEBERG_BUCKET).replace("${DATABASE}", DATABASE)
+        stmt.replace("${ICEBERG_BUCKET_NAME}", ICEBERG_BUCKET_NAME).replace("${ICEBERG_DATABASE_NAME}", ICEBERG_DATABASE_NAME)
         for stmt in statements
     ]
 
     for stmt in statements:
-        run_query(stmt)
+        print(f"Running: {stmt}")
+        run_query(stmt, context)
 
     return {"status": "ok"}

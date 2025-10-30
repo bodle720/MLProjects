@@ -1,30 +1,43 @@
+from re import sub
+
 from aws_cdk import (
     Stack,
     Duration,
     CfnOutput,
+    RemovalPolicy,
     aws_iam as iam,
     aws_s3 as s3,
     aws_sqs as sqs,
+    aws_logs as logs,
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
-    custom_resources as cr
+    custom_resources as cr,
+    aws_ssm as ssm
 )
 from constructs import Construct
-import re
 
 class StorageStack(Stack):
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self,
+                 scope: Construct,
+                 construct_id: str,
+                 app_name: str,
+                 **kwargs) -> None:
+
+        # The super call accepts env and initializes the self.account and self.region values
+        # inside the base Stack class. So e can call them in this subclass.
         super().__init__(scope, construct_id, **kwargs)
 
-        # Derive a unique database name from the stack name
-        db_name = re.sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
+        # Derive a unique iceberg database name from the stack name
+        db_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
 
-        # 1. File bucket (d3 file bucket)
+        # 1. File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
-            self, "FileBucket",
+            self, "S3FileBucket",
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.RETAIN,
+            auto_delete_objects=False,
             lifecycle_rules=[
                 s3.LifecycleRule(
                     prefix="temp/",
@@ -33,82 +46,87 @@ class StorageStack(Stack):
                 s3.LifecycleRule(
                     prefix="athena-results/",
                     expiration=Duration.days(15)
-                ),
-                s3.LifecycleRule(
-                    prefix="temp/image-upload/",
-                    expiration=Duration.days(30)
                 )
             ]
         )
 
         # 2. Iceberg bucket
         iceberg_bucket = s3.Bucket(
-            self, "IcebergBucket",
+            self, "S3IcebergTablesBucket",
             versioned=True,
-            encryption=s3.BucketEncryption.S3_MANAGED
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.RETAIN,
+            auto_delete_objects=False
         )
 
         # 3. DynamoDB tables
-
         # Lock table
         lock_table = dynamodb.Table(
             self, "LockTable",
             partition_key=dynamodb.Attribute(name="lock_id", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN
         )
 
         # Datasets table
         datasets_table = dynamodb.Table(
             self, "DatasetsTable",
             partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN
         )
 
         # Job table
         job_table = dynamodb.Table(
-            self, "JobTable",
+            self, "JobsTable",
             partition_key=dynamodb.Attribute(name="job_id", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN
         )
 
         # GSIs for job_table
         job_table.add_global_secondary_index(
             index_name="status-createdAt-index",
             partition_key=dynamodb.Attribute(name="status", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING)
+            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL
         )
 
         job_table.add_global_secondary_index(
             index_name="jobType-createdAt-index",
             partition_key=dynamodb.Attribute(name="job_type", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING)
+            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL
         )
 
         job_table.add_global_secondary_index(
             index_name="datasetId-createdAt-index",
             partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING)
+            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL
         )
 
         # SHA256 lookup table
         sha256_table = dynamodb.Table(
             self, "Sha256LookupTable",
             partition_key=dynamodb.Attribute(name="sha256", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN
         )
 
-        # 4. Lambda for Iceberg DDL
+        # 4. Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
+        # DDL = Data Definition Language, defines the database schema, a subset language of SQL.
         ddl_lambda = _lambda.Function(
-            self, "IcebergDDL",
+            self, "LambdaIcebergDDL",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="index.handler",
             code=_lambda.Code.from_asset("lambdas/storage/iceberg_ddl"),
-            timeout=Duration.minutes(5),
+            timeout=Duration.minutes(10),
             environment={
-                "ICEBERG_BUCKET": iceberg_bucket.bucket_name,
-                "ICEBERG_DATABASE": db_name,
-                "ATHENA_OUTPUT": f"s3://{file_bucket.bucket_name}/athena-results/"
-            }
+                    "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
+                    "ICEBERG_DATABASE_NAME": db_name,
+                    "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
+                }
         )
 
         file_bucket.grant_read_write(ddl_lambda)
@@ -166,19 +184,34 @@ class StorageStack(Stack):
             ])
         )
 
-        # Global DLQ for async failures (S3→Lambda, Lambda async invokes, etc.)
+        # Global DLQ for async failures (S3->Lambda, Lambda async invokes, etc.)
         dlq = sqs.Queue(
             self, "GlobalDeadLetterQueue",
             retention_period=Duration.days(14),
-            visibility_timeout=Duration.minutes(5)
+            visibility_timeout=Duration.minutes(5),
+            removal_policy=RemovalPolicy.DESTROY
         )
 
+        # A common log group the app will share.
+        app_log_group = logs.LogGroup(
+                            self,
+                            "AppLogGroup",
+                            retention=logs.RetentionDays.ONE_YEAR,
+                            removal_policy=RemovalPolicy.DESTROY  # careful in prod!
+                        )
+        # Allow users to discover the name to query the logs
+        ssm.StringParameter(
+            self, "AppLogGroupParam",
+            parameter_name=f"/{app_name}/log-group",
+            string_value=app_log_group.log_group_name
+        )
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
-        self.lock_table = lock_table
-        self.datasets_table = datasets_table
         self.job_table = job_table
         self.sha256_table = sha256_table
+        self.lock_table = lock_table
         self.global_dlq = dlq
+        self.datasets_table = datasets_table
         self.athena_database = db_name
+        self.app_log_group = app_log_group
