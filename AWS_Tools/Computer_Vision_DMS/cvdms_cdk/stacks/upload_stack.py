@@ -94,6 +94,54 @@ class ImageUploadStack(Stack):
                                 ]
                             )
 
+        # Make the workflow for deduplication and registration
+        workflow_definition = None
+
+        upload_state_machine = sfn.StateMachine(
+                                        self,
+                                        "UploadStateMachine",
+                                        definition=workflow_definition,
+                                        timeout=Duration.hours(2)
+                                    )
+
+        # Make Kickoff lambda
+        kickoff_lambda = _lambda.Function(
+                                        self,
+                                        "KickoffLambda",
+                                        runtime=_lambda.Runtime.PYTHON_3_11,
+                                        handler="kickoff.handler",
+                                        code=_lambda.Code.from_asset("lambdas/upload/kickoff"),
+                                        dead_letter_queue=global_dlq,
+                                        log_group=app_log_group,
+                                        memory_size=512,
+                                        timeout=Duration.seconds(30),
+                                        environment={
+                                            "JOB_TABLE_NAME": job_table.table_name,
+                                            "FILE_BUCKET_NAME": file_bucket.bucket_name,
+                                            "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn
+                                        }
+                                    )
+
+        upload_state_machine.grant_start_execution(kickoff_lambda)
+
+        # Permissions for the kickoff lambda
+        job_table.grant_read_write_data(kickoff_lambda)
+        app_log_group.grant_write(kickoff_lambda)
+        file_bucket.grant_read(kickoff_lambda)
+
+        # Trigger: S3 event for job.json
+        file_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.LambdaDestination(kickoff_lambda),
+            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
+        )
+
+
+
+
+
+
+
         # Make the validation lambda
         validation_lambda = _lambda.DockerImageFunction(
             self,
@@ -143,16 +191,6 @@ class ImageUploadStack(Stack):
             {"FILES_BUCKET": file_bucket.bucket_name},
             timeout=2
         )
-
-        # S3 event -> Validation Lambda
-        file_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.LambdaDestination(validation_lambda),
-            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
-        )
-
-
-
 
         # Use the default ECS instance role (already has AmazonEC2ContainerServiceforEC2Role)
         # CDK will automatically create an instance profile for you if you don't specify one.

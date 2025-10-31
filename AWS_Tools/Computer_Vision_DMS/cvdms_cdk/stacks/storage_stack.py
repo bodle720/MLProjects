@@ -197,12 +197,12 @@ class StorageStack(Stack):
                             self,
                             "AppLogGroup",
                             retention=logs.RetentionDays.ONE_YEAR,
-                            removal_policy=RemovalPolicy.DESTROY  # careful in prod!
+                            removal_policy=RemovalPolicy.RETAIN  # best for prod
                         )
         # Allow users to discover the name to query the logs
         ssm.StringParameter(
             self, "AppLogGroupParam",
-            parameter_name=f"/{app_name}/log-group",
+            parameter_name=f"apps/{app_name}/log-group",
             string_value=app_log_group.log_group_name
         )
         # Expose constructs for cross-stack wiring
