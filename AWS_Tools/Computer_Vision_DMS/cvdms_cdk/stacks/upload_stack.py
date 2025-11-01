@@ -15,7 +15,6 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-
 class ImageUploadStack(Stack):
     def __init__(self,
                  scope: Construct,
@@ -30,6 +29,7 @@ class ImageUploadStack(Stack):
                  athena_database: str,
                  app_log_group: logs.LogGroup,
                  **kwargs) -> None:
+
         super().__init__(scope, construct_id, **kwargs)
 
         # Use the default VPC (public subnets included)
@@ -95,32 +95,121 @@ class ImageUploadStack(Stack):
                             )
 
         # Make the workflow for deduplication and registration
-        workflow_definition = None
+######################################################################
+        # --- Batching Lambda placeholder ---
+        batching_lambda = _lambda.Function(
+            self,
+            "BatchingLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="batch_images.handler",
+            code=_lambda.Code.from_asset("lambdas/upload/batching"),
+            dead_letter_queue=global_dlq,
+            log_group=app_log_group,
+            memory_size=512,
+            timeout=Duration.minutes(5),
+            environment={
+                "FILE_BUCKET_NAME": file_bucket.bucket_name,
+                "JOB_TABLE_NAME": job_table.table_name,
+            }
+        )
+
+        # Permissions for batching lambda
+        file_bucket.grant_read_write(batching_lambda)  # needs to list/write manifests
+        job_table.grant_read_write_data(batching_lambda)
+        app_log_group.grant_write(batching_lambda)
+
+        #################################################################
+
+        # Step 1: Invoke batching lambda
+        batching_task = tasks.LambdaInvoke(
+            self,
+            "CreateManifests",
+            lambda_function=batching_lambda,
+            output_path="$.Payload"
+        )
+
+        # Step 2: Map over manifests
+        map_state = sfn.Map(
+            self,
+            "ProcessBatches",
+            items_path="$.manifests",
+            parameters={
+                # $$MAP_ITEM is the current array element (the manifest string)
+                "manifest.$": "$$MAP_ITEM", # assign manifest key in the iteration to the s3 uri pointing to the manifest.
+                # pull job_id from the parent scope and assign to job_id an iteration
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "job_type.$": "$.job_type",
+                "label_type.$": "$.label_type"
+            }
+        )
+
+        # Batch job definition (you’ll flesh this out)
+        validation_job_role = iam.Role(
+                    self, "ValidationJobRole",
+                    assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
+                )
+
+        file_bucket.grant_read(validation_job_role)
+        job_table.grant_read_write_data(validation_job_role)
+        app_log_group.grant_write(validation_job_role)
+
+        batch_job_def = batch.JobDefinition(
+            self, "ValidationJobDef",
+            container=batch.JobDefinitionContainer(
+                image=batch.EcrImage.from_asset("lambdas/upload/validation"),
+                vcpus=1,
+                memory_limit_mib=2048,
+                job_role=validation_job_role
+            )
+        )
+
+        batch_task = tasks.BatchSubmitJob(
+            self,
+            "ValidateBatch",
+            job_definition=batch_job_def,
+            job_queue=job_queue,
+            job_name="validate-batch",
+            container_overrides=tasks.BatchContainerOverrides(
+                environment={
+                    "MANIFEST_S3_KEY": sfn.JsonPath.string_at("$.manifest"),
+                    "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
+                    "USER": sfn.JsonPath.string_at("$.user"),
+                    "JOB_TYPE": sfn.JsonPath.string_at("$.job_type"),
+                    "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type")
+                }
+            )
+        )
+
+        map_state.iterator(batch_task)
+
+        # Chain them together
+        workflow_definition = batching_task.next(map_state)
 
         upload_state_machine = sfn.StateMachine(
-                                        self,
-                                        "UploadStateMachine",
-                                        definition=workflow_definition,
-                                        timeout=Duration.hours(2)
-                                    )
+            self,
+            "UploadStateMachine",
+            definition=workflow_definition,
+            timeout=Duration.hours(2)
+        )
 
         # Make Kickoff lambda
         kickoff_lambda = _lambda.Function(
-                                        self,
-                                        "KickoffLambda",
-                                        runtime=_lambda.Runtime.PYTHON_3_11,
-                                        handler="kickoff.handler",
-                                        code=_lambda.Code.from_asset("lambdas/upload/kickoff"),
-                                        dead_letter_queue=global_dlq,
-                                        log_group=app_log_group,
-                                        memory_size=512,
-                                        timeout=Duration.seconds(30),
-                                        environment={
-                                            "JOB_TABLE_NAME": job_table.table_name,
-                                            "FILE_BUCKET_NAME": file_bucket.bucket_name,
-                                            "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn
-                                        }
-                                    )
+            self,
+            "KickoffLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="kickoff.handler",
+            code=_lambda.Code.from_asset("lambdas/upload/kickoff"),
+            dead_letter_queue=global_dlq,
+            log_group=app_log_group,
+            memory_size=512,
+            timeout=Duration.seconds(30),
+            environment={
+                "JOB_TABLE_NAME": job_table.table_name,
+                "FILE_BUCKET_NAME": file_bucket.bucket_name,
+                "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn
+            }
+        )
 
         upload_state_machine.grant_start_execution(kickoff_lambda)
 
@@ -132,65 +221,40 @@ class ImageUploadStack(Stack):
         # Trigger: S3 event for job.json
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
-            s3n.LambdaDestination(kickoff_lambda),
+            s3n.LambdaDestination(kickoff_lambda,
+                                  dead_letter_queue=global_dlq),
             s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
         )
 
+        ######################################################################################################
 
 
 
 
 
 
-        # Make the validation lambda
-        validation_lambda = _lambda.DockerImageFunction(
-            self,
-            "ValidationLambda",
-            code=_lambda.DockerImageCode.from_image_asset("lambdas/upload/validation"),
-            memory_size=1024,
-            timeout=cdk.Duration.minutes(15),
-            log_group=app_log_group  # 👈 force logs into the shared group
-        )
 
-        validation_lambda = _lambda.Function(
-                                            self,
-                                            "ValidationLambda",
-                                            runtime=_lambda.Runtime.PYTHON_3_12,
-                                            handler="validation.handler",
-                                            code=_lambda.Code.from_asset(f"lambdas/upload/validation"),
-                                            timeout=Duration.minutes(15),
-                                            environment={
-                                                    "FILES_BUCKET": file_bucket.bucket_name,
-                                                    "SHA256_TABLE_NAME": sha256_table.table_name,
-                                                    "JOB_TABLE_NAME": job_table.table_name,
-                                                    "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
-                                                     }
-                                            )
 
-        label_lambda = mk_lambda(
-            "LabelEnrichmentLambda", "label_enrichment",
-            {
-                "FILES_BUCKET": file_bucket.bucket_name,
-                "SHA256_TABLE": sha256_table.table_name,
-                "JOB_TABLE": job_table.table_name,
-            }
-        )
 
-        reg_lambda = mk_lambda(
-            "RegistrationLambda", "registration",
-            {
-                "FILES_BUCKET": file_bucket.bucket_name,
-                "SHA256_TABLE": sha256_table.table_name,
-                "LOCK_TABLE": lock_table.table_name,
-                "JOB_TABLE": job_table.table_name,
-            }
-        )
 
-        cleanup_lambda = mk_lambda(
-            "CleanupLambda", "cleanup",
-            {"FILES_BUCKET": file_bucket.bucket_name},
-            timeout=2
-        )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         # Use the default ECS instance role (already has AmazonEC2ContainerServiceforEC2Role)
         # CDK will automatically create an instance profile for you if you don't specify one.
