@@ -114,6 +114,14 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.RETAIN
         )
 
+        # phash lookup table
+        phash_table = dynamodb.Table(
+            self, "PhashLookupTable",
+            partition_key=dynamodb.Attribute(name="phash", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN
+        )
+
         # 4. Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
         # DDL = Data Definition Language, defines the database schema, a subset language of SQL.
         ddl_lambda = _lambda.Function(
@@ -210,6 +218,7 @@ class StorageStack(Stack):
         self.iceberg_bucket = iceberg_bucket
         self.job_table = job_table
         self.sha256_table = sha256_table
+        self.phash_table = phash_table
         self.lock_table = lock_table
         self.global_dlq = dlq
         self.datasets_table = datasets_table

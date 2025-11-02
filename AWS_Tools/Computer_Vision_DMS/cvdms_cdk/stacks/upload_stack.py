@@ -15,6 +15,27 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+CONFIG = {'compute_env': {'minv_cpus': 0,
+                          'desiredv_cpus': 0,
+                          'maxv_cpus': 64,
+                          'instance_types': ['m5.large', 'm5.xlarge']},
+          'upload_state_machine': {'duration_hours': 2},
+          'validation': {'file_batching':{'path':'lambdas/upload/batching',
+                                          'handler': 'file_batching_validation.handler',
+                                          'memory_size': 512,
+                                          'timeout_min': 5},
+                         'batch_task_job_def': {'vcpus': 1,
+                                                'memory_limit_mib': 2048}},
+          'internal_dedup':{},
+          'external_dedup':{},
+          'registration':{},
+          'kickoff_lambda':{'path':'lambdas/upload/kickoff',
+                            'handler': 'kickoff.handler',
+                            'memory_size': 512,
+                            'timeout_sec': 30}
+          }
+
+
 class ImageUploadStack(Stack):
     def __init__(self,
                  scope: Construct,
@@ -24,6 +45,7 @@ class ImageUploadStack(Stack):
                  iceberg_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
                  sha256_table: dynamodb.Table,
+                 phash_table: dynamodb.Table,
                  lock_table: dynamodb.Table,
                  global_dlq: sqs.Queue,
                  athena_database: str,
@@ -32,6 +54,55 @@ class ImageUploadStack(Stack):
 
         super().__init__(scope, construct_id, **kwargs)
 
+        # Variables from Storage stack and app name.
+        self.app_name = app_name
+        self.file_bucket = file_bucket
+        self.iceberg_bucket = iceberg_bucket
+        self.job_table = job_table
+        self.sha256_table = sha256_table
+        self.phash_table = phash_table
+        self.lock_table = lock_table
+        self.global_dlq = global_dlq
+        self.athena_database = athena_database
+        self.app_log_group = app_log_group
+
+        ##############################################################
+        # Make the validation workflow
+        ##############################################################
+
+        # Gives job_queue pointing to the compute environment
+        job_queue = self._make_compute_env()
+
+        # Gives file_batching_lambda_validation, a lambda function to batch up files for validation
+        file_batching_lambda_validation = self._make_file_batching_lambda_validation()
+
+        # Gives file_batching_task_validation, a task that invokes file_batching_lambda_validation
+        file_batching_task_validation = self._make_file_batching_task_validation(file_batching_lambda_validation)
+
+        # Gives validation_job_role, an IAM role assumed by ECS that the validation task needs
+        validation_job_role = self._make_validation_job_role()
+
+        # Gives batch_task_validation, a task for submitting Batch jobs.
+        batch_task_validation = self._make_batch_task_validation(validation_job_role,
+                                                                 job_queue)
+
+        # Gives map_state_validation, the initial map state that iterates over the batch jobs
+        map_state_validation = self._make_map_state_validation()
+
+        # Add extra steps here.
+
+        # Gives workflow_definition, the definition to feed into the state machin construction next.
+        workflow_definition = self._make_workflow_definition(map_state_validation,
+                                                              batch_task_validation,
+                                                              file_batching_task_validation)
+
+        # Gives upload_state_machine using self.workflow_definition
+        upload_state_machine = self._make_upload_state_machine(workflow_definition)
+
+        # Last step: Kickoff lambda starts the state machine via an S3 event.
+        kickoff_lambda = self._make_kickoff_lambda(upload_state_machine)
+
+    def _make_compute_env(self):
         # Use the default VPC (public subnets included)
         vpc = ec2.Vpc.from_lookup(self, "DefaultVpc", is_default=True)
 
@@ -71,11 +142,11 @@ class ImageUploadStack(Stack):
                 type=batch.ComputeResourceType.SPOT,
                 allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
                 vpc=vpc,
-                minv_cpus=0,
-                desiredv_cpus=0,
-                maxv_cpus=64,
+                minv_cpus=CONFIG['compute_env']['minv_cpus'],
+                desiredv_cpus=CONFIG['compute_env']['desiredv_cpus'],
+                maxv_cpus=CONFIG['compute_env']['maxv_cpus'],
                 instance_role=instance_profile.attr_arn,  # attach instance profile
-                instance_types=[ec2.InstanceType("m5.large"), ec2.InstanceType("m5.xlarge")],
+                instance_types=[ec2.InstanceType(i) for i in CONFIG['compute_env']['instance_types']],
                 vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),  # or PRIVATE_WITH_EGRESS for prod
                 security_groups=[batch_sg]
             )
@@ -93,78 +164,68 @@ class ImageUploadStack(Stack):
                                     )
                                 ]
                             )
+        return job_queue
 
-        # Make the workflow for deduplication and registration
-######################################################################
-        # --- Batching Lambda placeholder ---
-        batching_lambda = _lambda.Function(
+    def _make_file_batching_lambda_validation(self):
+        file_batching_lambda_validation = _lambda.Function(
             self,
-            "BatchingLambda",
+            "FileBatchingLambdaValidation",
             runtime=_lambda.Runtime.PYTHON_3_11,
-            handler="batch_images.handler",
-            code=_lambda.Code.from_asset("lambdas/upload/batching"),
-            dead_letter_queue=global_dlq,
-            log_group=app_log_group,
-            memory_size=512,
-            timeout=Duration.minutes(5),
+            handler=CONFIG['validation']['file_batching']['handler'],
+            code=_lambda.Code.from_asset(CONFIG['validation']['file_batching']['path']),
+            dead_letter_queue=self.global_dlq,
+            log_group=self.app_log_group,
+            memory_size=CONFIG['validation']['file_batching']['memory_size'],
+            timeout=Duration.minutes(CONFIG['validation']['file_batching']['timeout_min']),
             environment={
-                "FILE_BUCKET_NAME": file_bucket.bucket_name,
-                "JOB_TABLE_NAME": job_table.table_name,
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+                "JOB_TABLE_NAME": self.job_table.table_name,
             }
         )
 
         # Permissions for batching lambda
-        file_bucket.grant_read_write(batching_lambda)  # needs to list/write manifests
-        job_table.grant_read_write_data(batching_lambda)
-        app_log_group.grant_write(batching_lambda)
+        self.file_bucket.grant_read_write(file_batching_lambda_validation)
+        self.job_table.grant_read_write_data(file_batching_lambda_validation)
+        self.app_log_group.grant_write(file_batching_lambda_validation)
 
-        #################################################################
+        return file_batching_lambda_validation
 
-        # Step 1: Invoke batching lambda
-        batching_task = tasks.LambdaInvoke(
+    def _make_file_batching_task_validation(self, file_batching_lambda_validation):
+        file_batching_task_validation = tasks.LambdaInvoke(
             self,
             "CreateManifests",
-            lambda_function=batching_lambda,
+            lambda_function=file_batching_lambda_validation,
             output_path="$.Payload"
         )
 
-        # Step 2: Map over manifests
-        map_state = sfn.Map(
-            self,
-            "ProcessBatches",
-            items_path="$.manifests",
-            parameters={
-                # $$MAP_ITEM is the current array element (the manifest string)
-                "manifest.$": "$$MAP_ITEM", # assign manifest key in the iteration to the s3 uri pointing to the manifest.
-                # pull job_id from the parent scope and assign to job_id an iteration
-                "job_id.$": "$.job_id",
-                "user.$": "$.user",
-                "job_type.$": "$.job_type",
-                "label_type.$": "$.label_type"
-            }
+        return file_batching_task_validation
+
+    def _make_validation_job_role(self):
+        validation_job_role = iam.Role(
+            self, "ValidationJobRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
         )
 
-        # Batch job definition (you’ll flesh this out)
-        validation_job_role = iam.Role(
-                    self, "ValidationJobRole",
-                    assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
-                )
+        self.file_bucket.grant_read(validation_job_role)
+        self.job_table.grant_read_write_data(validation_job_role)
+        self.app_log_group.grant_write(validation_job_role)
 
-        file_bucket.grant_read(validation_job_role)
-        job_table.grant_read_write_data(validation_job_role)
-        app_log_group.grant_write(validation_job_role)
+        return validation_job_role
 
+    def _make_batch_task_validation(self,
+                                    validation_job_role,
+                                    job_queue):
         batch_job_def = batch.JobDefinition(
             self, "ValidationJobDef",
             container=batch.JobDefinitionContainer(
                 image=batch.EcrImage.from_asset("lambdas/upload/validation"),
-                vcpus=1,
-                memory_limit_mib=2048,
+                vcpus=CONFIG['validation']['batch_task_job_def']['vcpus'],
+                memory_limit_mib=CONFIG['validation']['batch_task_job_def']['memory_limit_mib'],
                 job_role=validation_job_role
             )
         )
 
-        batch_task = tasks.BatchSubmitJob(
+        batch_task_validation = tasks.BatchSubmitJob(
             self,
             "ValidateBatch",
             job_definition=batch_job_def,
@@ -181,32 +242,62 @@ class ImageUploadStack(Stack):
             )
         )
 
-        map_state.iterator(batch_task)
+        return batch_task_validation
 
-        # Chain them together
-        workflow_definition = batching_task.next(map_state)
+    def _make_map_state_validation(self):
+        map_state_validation = sfn.Map(
+            self,
+            "ProcessBatches",
+            items_path="$.manifests",
+            parameters={
+                # $$MAP_ITEM is the current array element (the manifest string)
+                "manifest.$": "$$MAP_ITEM",
+                # assign manifest key in the iteration to the s3 uri pointing to the manifest.
+                # pull job_id from the parent scope and assign to job_id an iteration
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "job_type.$": "$.job_type",
+                "label_type.$": "$.label_type"
+            }
+        )
 
+        return map_state_validation
+
+    def _make_workflow_definition(self,
+                                  map_state_validation,
+                                  batch_task_validation,
+                                  file_batching_task_validation):
+
+        map_state_validation.iterator(batch_task_validation)
+        workflow_definition = file_batching_task_validation.next(map_state_validation)
+        return workflow_definition
+
+    def _make_upload_state_machine(self, workflow_definition):
         upload_state_machine = sfn.StateMachine(
             self,
             "UploadStateMachine",
             definition=workflow_definition,
-            timeout=Duration.hours(2)
+            timeout=Duration.hours(CONFIG['upload_state_machine']['duration_hours'])
         )
 
+        return upload_state_machine
+
+    def _make_kickoff_lambda(self,
+                             upload_state_machine):
         # Make Kickoff lambda
         kickoff_lambda = _lambda.Function(
             self,
             "KickoffLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
-            handler="kickoff.handler",
-            code=_lambda.Code.from_asset("lambdas/upload/kickoff"),
-            dead_letter_queue=global_dlq,
-            log_group=app_log_group,
-            memory_size=512,
-            timeout=Duration.seconds(30),
+            handler=CONFIG['kickoff_lambda']['handler'],
+            code=_lambda.Code.from_asset(CONFIG['kickoff_lambda']['path']),
+            dead_letter_queue=self.global_dlq,
+            log_group=self.app_log_group,
+            memory_size=CONFIG['kickoff_lambda']['memory_size'],
+            timeout=Duration.seconds(CONFIG['kickoff_lambda']['timeout_sec']),
             environment={
-                "JOB_TABLE_NAME": job_table.table_name,
-                "FILE_BUCKET_NAME": file_bucket.bucket_name,
+                "JOB_TABLE_NAME": self.job_table.table_name,
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
                 "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn
             }
         )
@@ -214,190 +305,16 @@ class ImageUploadStack(Stack):
         upload_state_machine.grant_start_execution(kickoff_lambda)
 
         # Permissions for the kickoff lambda
-        job_table.grant_read_write_data(kickoff_lambda)
-        app_log_group.grant_write(kickoff_lambda)
-        file_bucket.grant_read(kickoff_lambda)
+        self.job_table.grant_read_write_data(kickoff_lambda)
+        self.app_log_group.grant_write(kickoff_lambda)
+        self.file_bucket.grant_read(kickoff_lambda)
 
         # Trigger: S3 event for job.json
-        file_bucket.add_event_notification(
+        self.file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
             s3n.LambdaDestination(kickoff_lambda,
-                                  dead_letter_queue=global_dlq),
+                                  dead_letter_queue=self.global_dlq),
             s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
         )
 
-        ######################################################################################################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        # Use the default ECS instance role (already has AmazonEC2ContainerServiceforEC2Role)
-        # CDK will automatically create an instance profile for you if you don't specify one.
-
-
-        # Example job definition
-        job_role = iam.Role(
-            self, "BatchJobRole",
-            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
-        )
-
-        # Grants for job role
-        file_bucket.grant_read_write(job_role)
-        iceberg_bucket.grant_read_write(job_role)
-        sha256_table.grant_read_write_data(job_role)
-        job_table.grant_read_write_data(job_role)
-        lock_table.grant_read_write_data(job_role)
-
-        job_role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "glue:GetDatabase",
-                "glue:GetTables",
-                "glue:GetTable",
-                "glue:UpdateTable",
-                "glue:CreateTable",
-                "glue:GetPartitions",
-            ],
-            resources=[
-                f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database}",
-                f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database}/*",
-            ],
-        ))
-
-        job_role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "athena:StartQueryExecution",
-                "athena:GetQueryExecution",
-                "athena:GetQueryResults",
-                "athena:GetWorkGroup",
-            ],
-            resources=[
-                f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"
-            ],
-        ))
-
-        internal_job = batch.JobDefinition(
-            self, "InternalDedupJob",
-            container=batch.JobDefinitionContainer(
-                image=batch.EcrImage.from_registry("ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/internal-dedup:latest"),
-                vcpus=2,
-                memory_limit_mib=4096,
-                job_role=job_role
-            )
-        )
-
-        external_job = batch.JobDefinition(
-            self, "ExternalDedupJob",
-            container=batch.JobDefinitionContainer(
-                image=batch.EcrImage.from_registry("ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/external-dedup:latest"),
-                vcpus=2,
-                memory_limit_mib=4096,
-                job_role=job_role
-            )
-        )
-
-        # ------------------------------
-        # Step Functions workflow + DLQ
-        # ------------------------------
-        def catch(task):
-            return task.add_catch(
-                tasks.SqsSendMessage(
-                    self, "SendToDLQ",
-                    queue=global_dlq,
-                    message_body=sfn.TaskInput.from_json_path_at("$.Error")
-                ),
-                result_path="$.Error"
-            )
-
-        definition = (
-            catch(tasks.LambdaInvoke(self,"RunValidation",lambda_function=validation_lambda,output_path="$.Payload"))
-            .next(catch(tasks.BatchSubmitJob(self,"RunInternalDedup",job_definition=internal_job,job_name="internal",job_queue=job_queue)))
-            .next(catch(tasks.BatchSubmitJob(self,"RunExternalDedup",job_definition=external_job,job_name="external",job_queue=job_queue)))
-            .next(catch(tasks.LambdaInvoke(self,"RunLabel",lambda_function=label_lambda,output_path="$.Payload")))
-            .next(catch(tasks.LambdaInvoke(self,"RunRegistration",lambda_function=reg_lambda,output_path="$.Payload")))
-            .next(catch(tasks.LambdaInvoke(self,"RunCleanup",lambda_function=cleanup_lambda,output_path="$.Payload")))
-        )
-
-        sfn.StateMachine(
-            self, "ImageUploadWorkflow",
-            definition=definition,
-            timeout=Duration.hours(2)
-        )
-
-        # ------------------------------
-        # IAM grants for Lambdas
-        # ------------------------------
-        sha256_table.grant_read_write_data(validation_lambda)
-        sha256_table.grant_read_write_data(reg_lambda)
-        job_table.grant_read_write_data(validation_lambda)
-        lock_table.grant_read_write_data(reg_lambda)
-
-        file_bucket.grant_read(validation_lambda)
-        file_bucket.grant_read_write(label_lambda)
-        file_bucket.grant_read_write(reg_lambda)
-        file_bucket.grant_read_write(cleanup_lambda)
-
-        for fn in [validation_lambda, label_lambda, reg_lambda]:
-            # Glue: restrict to your catalog + specific database + its tables
-            fn.add_to_role_policy(iam.PolicyStatement(
-                actions=[
-                    "glue:GetDatabase",
-                    "glue:GetTables",
-                    "glue:GetTable",
-                    "glue:GetPartitions",
-                ],
-                resources=[
-                    f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                    f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database}",
-                    f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database}/*",
-                ],
-            ))
-
-            # Athena: restrict to the workgroup you actually use
-            fn.add_to_role_policy(iam.PolicyStatement(
-                actions=[
-                    "athena:StartQueryExecution",
-                    "athena:GetQueryExecution",
-                    "athena:GetQueryResults",
-                    "athena:GetWorkGroup",
-                ],
-                resources=[
-                    f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"
-                ],
-            ))
-
-            # S3: restrict to your file and iceberg buckets
-            fn.add_to_role_policy(iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-                resources=[
-                    file_bucket.bucket_arn,
-                    f"{file_bucket.bucket_arn}/*",
-                    iceberg_bucket.bucket_arn,
-                    f"{iceberg_bucket.bucket_arn}/*",
-                ],
-            ))
+        return kickoff_lambda
