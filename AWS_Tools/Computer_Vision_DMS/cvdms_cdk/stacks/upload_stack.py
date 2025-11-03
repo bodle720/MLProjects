@@ -25,8 +25,16 @@ CONFIG = {'compute_env': {'minv_cpus': 0,
                                           'memory_size': 512,
                                           'timeout_min': 5},
                          'batch_task_job_def': {'vcpus': 1,
-                                                'memory_limit_mib': 2048}},
-          'internal_dedup':{},
+                                                'memory_limit_mib': 2048,
+                                                'path':'lambdas/upload/validation'}},
+          'internal_dedup':{'file_batching':{'path':'lambdas/upload/batching',
+                                              'handler': 'file_batching_internal_dedup.handler',
+                                              'memory_size': 512,
+                                              'timeout_min': 5},
+                            'batch_task_job_def': {'vcpus': 1,
+                                                   'memory_limit_mib': 2048,
+                                                   'path': 'lambdas/upload/internal_dedup'}
+                            },
           'external_dedup':{},
           'registration':{},
           'kickoff_lambda':{'path':'lambdas/upload/kickoff',
@@ -89,12 +97,26 @@ class ImageUploadStack(Stack):
         # Gives map_state_validation, the initial map state that iterates over the batch jobs
         map_state_validation = self._make_map_state_validation()
 
-        # Add extra steps here.
+        # Gives file_batching_lambda_internal_dedup, a lambda function to batch up files for internal deduplication
+        file_batching_lambda_internal_dedup = self._make_file_batching_lambda_internal_dedup()
+
+        # Gives file_batching_task_internal_dedup, a task that invokes file_batching_lambda_internal_dedup
+        file_batching_task_internal_dedup = self._make_file_batching_task_internal_dedup(file_batching_lambda_internal_dedup)
+
+        internal_dedup_job_role = self._make_internal_dedup_job_role()
+
+        batch_task_internal_dedup = self._make_batch_task_internal_dedup(internal_dedup_job_role,
+                                                                          job_queue)
+
+        map_state_internal_dedup = self._make_map_state_internal_dedup()
 
         # Gives workflow_definition, the definition to feed into the state machin construction next.
         workflow_definition = self._make_workflow_definition(map_state_validation,
                                                               batch_task_validation,
-                                                              file_batching_task_validation)
+                                                              file_batching_task_validation,
+                                                              file_batching_task_internal_dedup,
+                                                             map_state_internal_dedup,
+                                                             batch_task_internal_dedup)
 
         # Gives upload_state_machine using self.workflow_definition
         upload_state_machine = self._make_upload_state_machine(workflow_definition)
@@ -178,15 +200,20 @@ class ImageUploadStack(Stack):
             memory_size=CONFIG['validation']['file_batching']['memory_size'],
             timeout=Duration.minutes(CONFIG['validation']['file_batching']['timeout_min']),
             environment={
-                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
-                "JOB_TABLE_NAME": self.job_table.table_name,
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name
             }
         )
 
         # Permissions for batching lambda
         self.file_bucket.grant_read_write(file_batching_lambda_validation)
-        self.job_table.grant_read_write_data(file_batching_lambda_validation)
         self.app_log_group.grant_write(file_batching_lambda_validation)
+
+        file_batching_lambda_validation.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket", "s3:GetBucketLocation"],
+                resources=[self.file_bucket.bucket_arn]
+            )
+        )
 
         return file_batching_lambda_validation
 
@@ -218,7 +245,7 @@ class ImageUploadStack(Stack):
         batch_job_def = batch.JobDefinition(
             self, "ValidationJobDef",
             container=batch.JobDefinitionContainer(
-                image=batch.EcrImage.from_asset("lambdas/upload/validation"),
+                image=batch.EcrImage.from_asset(CONFIG['validation']['batch_task_job_def']['path']),
                 vcpus=CONFIG['validation']['batch_task_job_def']['vcpus'],
                 memory_limit_mib=CONFIG['validation']['batch_task_job_def']['memory_limit_mib'],
                 job_role=validation_job_role
@@ -237,9 +264,15 @@ class ImageUploadStack(Stack):
                     "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
                     "USER": sfn.JsonPath.string_at("$.user"),
                     "JOB_TYPE": sfn.JsonPath.string_at("$.job_type"),
-                    "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type")
+                    "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
+                    'FILE_BUCKET_NAME': self.file_bucket.bucket_name,
+                    'ATHENA_OUTPUT_S3':f"s3://{self.file_bucket.bucket_name}/athena-results/",
+                    'ATHENA_WORKGROUP':"primary",
+                    'ICEBERG_DB': self.athena_database,
+                    'UPLOAD_STAGING_TABLE':"upload_staging"
                 }
-            )
+            ),
+            integration_pattern=sfn.IntegrationPattern.RUN_JOB
         )
 
         return batch_task_validation
@@ -266,11 +299,20 @@ class ImageUploadStack(Stack):
     def _make_workflow_definition(self,
                                   map_state_validation,
                                   batch_task_validation,
-                                  file_batching_task_validation):
+                                  file_batching_task_validation,
+                                  file_batching_task_internal_dedup,
+                                  map_state_internal_dedup,
+                                  batch_task_internal_dedup):
 
         map_state_validation.iterator(batch_task_validation)
-        workflow_definition = file_batching_task_validation.next(map_state_validation)
-        return workflow_definition
+        map_state_internal_dedup.iterator(batch_task_internal_dedup)
+
+        return (
+            file_batching_task_validation
+            .next(map_state_validation)
+            .next(file_batching_task_internal_dedup)
+            .next(map_state_internal_dedup)
+        )
 
     def _make_upload_state_machine(self, workflow_definition):
         upload_state_machine = sfn.StateMachine(
@@ -281,6 +323,157 @@ class ImageUploadStack(Stack):
         )
 
         return upload_state_machine
+
+    def _make_file_batching_lambda_internal_dedup(self):
+        file_batching_lambda_internal_dedup = _lambda.Function(
+            self,
+            "FileBatchingLambdaInternalDedup",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler=CONFIG['internal_dedup']['file_batching']['handler'],
+            code=_lambda.Code.from_asset(CONFIG['internal_dedup']['file_batching']['path']),
+            dead_letter_queue=self.global_dlq,
+            log_group=self.app_log_group,
+            memory_size=CONFIG['internal_dedup']['file_batching']['memory_size'],
+            timeout=Duration.minutes(CONFIG['internal_dedup']['file_batching']['timeout_min']),
+            environment={
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+                "ATHENA_OUTPUT_S3":f"s3://{self.file_bucket.bucket_name}/athena-results/",
+                "ATHENA_WORKGROUP": "primary",
+                "ICEBERG_DB":self.athena_database,
+                "UPLOAD_STAGING_TABLE":"upload_staging"
+            }
+        )
+
+        # Permissions for batching lambda
+        self.file_bucket.grant_read_write(file_batching_lambda_internal_dedup)
+        self.app_log_group.grant_write(file_batching_lambda_internal_dedup)
+
+        file_batching_lambda_internal_dedup.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket", "s3:GetBucketLocation"],
+                resources=[self.file_bucket.bucket_arn]
+            )
+        )
+
+        file_batching_lambda_internal_dedup.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "athena:StartQueryExecution",
+                    "athena:GetQueryExecution",
+                    "athena:GetQueryResults"
+                ],
+                resources=[
+                    f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
+            )
+        )
+
+        return file_batching_lambda_internal_dedup
+
+    def _make_file_batching_task_internal_dedup(self,
+                                               file_batching_lambda_internal_dedup):
+        file_batching_task_internal_dedup = tasks.LambdaInvoke(
+            self,
+            "CreateManifestsInternalDedup",
+            lambda_function=file_batching_lambda_internal_dedup,
+            output_path="$.Payload"
+        )
+
+        return file_batching_task_internal_dedup
+
+    def _make_internal_dedup_job_role(self):
+        internal_dedup_job_role = iam.Role(
+            self, "InternalDedupJobRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
+        )
+
+        self.file_bucket.grant_read_write(internal_dedup_job_role)
+        self.job_table.grant_read_write_data(internal_dedup_job_role)
+        self.app_log_group.grant_write(internal_dedup_job_role)
+
+        internal_dedup_job_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "athena:StartQueryExecution",
+                    "athena:GetQueryExecution",
+                    "athena:GetQueryResults"
+                ],
+                resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
+            )
+        )
+
+        return internal_dedup_job_role
+
+    def _make_batch_task_internal_dedup(self,
+                                    internal_dedup_job_role,
+                                    job_queue):
+        batch_job_def = batch.JobDefinition(
+            self, "InternalDedupJobDef",
+            container=batch.JobDefinitionContainer(
+                image=batch.EcrImage.from_asset(CONFIG['internal_dedup']['batch_task_job_def']['path']),
+                vcpus=CONFIG['internal_dedup']['batch_task_job_def']['vcpus'],
+                memory_limit_mib=CONFIG['internal_dedup']['batch_task_job_def']['memory_limit_mib'],
+                job_role=internal_dedup_job_role
+            )
+        )
+
+        batch_task_internal_dedup = tasks.BatchSubmitJob(
+            self,
+            "InternalDedupBatch",
+            job_definition=batch_job_def,
+            job_queue=job_queue,
+            job_name="internal-dedup-batch",
+            container_overrides=tasks.BatchContainerOverrides(
+                environment={
+                    "MANIFEST_S3_KEY": sfn.JsonPath.string_at("$.manifest"),
+                    "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
+                    "USER": sfn.JsonPath.string_at("$.user"),
+                    "JOB_TYPE": sfn.JsonPath.string_at("$.job_type"),
+                    "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
+                    'FILE_BUCKET_NAME': self.file_bucket.bucket_name,
+                    'ATHENA_OUTPUT_S3':f"s3://{self.file_bucket.bucket_name}/athena-results/",
+                    'ATHENA_WORKGROUP':"primary",
+                    'ICEBERG_DB': self.athena_database,
+                    'UPLOAD_STAGING_TABLE':"upload_staging"
+                }
+            ),
+            integration_pattern=sfn.IntegrationPattern.RUN_JOB
+        )
+
+        return batch_task_internal_dedup
+
+    def _make_map_state_internal_dedup(self):
+        map_state_internal_dedup = sfn.Map(
+            self,
+            "ProcessBatchesInternalDedup",
+            items_path="$.manifests",
+            parameters={
+                "manifest.$": "$$MAP_ITEM",
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "job_type.$": "$.job_type",
+                "label_type.$": "$.label_type"
+            }
+        )
+
+        return map_state_internal_dedup
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def _make_kickoff_lambda(self,
                              upload_state_machine):
@@ -308,6 +501,32 @@ class ImageUploadStack(Stack):
         self.job_table.grant_read_write_data(kickoff_lambda)
         self.app_log_group.grant_write(kickoff_lambda)
         self.file_bucket.grant_read(kickoff_lambda)
+
+        # ensure S3 bucket-level list and get-location are permitted
+        kickoff_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation"
+                ],
+                resources=[
+                    f"arn:aws:s3:::{self.file_bucket.bucket_name}"
+                ]
+            )
+        )
+
+        # explicitly allow GetObject on the athena-results prefix only if you will read it;
+        # otherwise GetObject on whole bucket is already covered by grant_read above.
+        kickoff_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:GetObject"
+                ],
+                resources=[
+                    f"arn:aws:s3:::{self.file_bucket.bucket_name}/*"
+                ]
+            )
+        )
 
         # Trigger: S3 event for job.json
         self.file_bucket.add_event_notification(

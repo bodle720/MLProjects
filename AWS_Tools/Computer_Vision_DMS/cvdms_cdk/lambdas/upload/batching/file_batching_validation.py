@@ -77,7 +77,7 @@ def handler(event, context):
     manifest_keys = []
     for idx, batch in enumerate(batches, start=1):
         manifest = {"images": batch}
-        manifest_key = f"temp/image-upload/{job_id}/batches/batch-{idx:03d}.json"
+        manifest_key = f"temp/image-upload/{job_id}/batches/validation-step/batch-{idx:03d}.json"
 
         s3.put_object(
             Bucket=BUCKET,

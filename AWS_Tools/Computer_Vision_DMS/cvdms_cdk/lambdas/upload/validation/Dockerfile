@@ -1,8 +1,18 @@
-# Use the AWS Lambda Python 3.12 base image
-FROM public.ecr.aws/lambda/python:3.12
+# Use a lightweight Python base image
+FROM python:3.12-slim
 
 # Set working directory inside the container
-WORKDIR /var/task
+WORKDIR /app
+
+# Install system dependencies needed by Pillow and scientific libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libjpeg-dev \
+        zlib1g-dev \
+        libpng-dev \
+        libtiff5-dev \
+        libopenjp2-7-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker layer caching
 COPY requirements.txt .
@@ -14,5 +24,6 @@ RUN pip install --upgrade pip \
 # Copy source code
 COPY src/ .
 
-# Set the CMD to your handler (module.function)
-CMD ["main.lambda_handler"]
+# Set the default command to run your validation job
+CMD ["python", "main.py"]
+

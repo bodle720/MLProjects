@@ -146,6 +146,8 @@ class StorageStack(Stack):
                 actions=[
                     "athena:StartQueryExecution",
                     "athena:GetQueryExecution",
+                    "athena:GetQueryResults",
+                    "athena:StopQueryExecution"
                 ],
                 resources=[
                     f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"
@@ -163,12 +165,44 @@ class StorageStack(Stack):
                     "glue:GetDatabase",
                     "glue:CreateDatabase",
                     "glue:GetTable",
-                    "glue:CreateTable"
+                    "glue:CreateTable",
+                    "glue:UpdateTable",
+                    "glue:GetPartition",
+                    "glue:CreatePartition"
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
                     f"arn:aws:glue:{self.region}:{self.account}:database/{db_name}",
                     f"arn:aws:glue:{self.region}:{self.account}:table/{db_name}/*"
+                ]
+            )
+        )
+
+        # ensure bucket-level list and get-location plus prefix object access
+        ddl_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation"
+                ],
+                resources=[
+                    f"arn:aws:s3:::{file_bucket.bucket_name}",
+                    f"arn:aws:s3:::{iceberg_bucket.bucket_name}"
+                ]
+            )
+        )
+
+        ddl_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                ],
+                resources=[
+                    f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*",
+                    f"arn:aws:s3:::{file_bucket.bucket_name}/*",
+                    f"arn:aws:s3:::{iceberg_bucket.bucket_name}/*"
                 ]
             )
         )
