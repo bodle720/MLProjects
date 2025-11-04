@@ -93,7 +93,6 @@ def handler(event, context):
     return {
         "job_id": job_id,
         "user": user,
-        "job_type": job_type,
         "label_type": label_type,
         "manifests": manifest_keys
     }

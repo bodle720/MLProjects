@@ -17,7 +17,6 @@ UPLOAD_STAGING_TABLE = os.environ["UPLOAD_STAGING_TABLE"]
 MANIFEST_S3_KEY = os.environ["MANIFEST_S3_KEY"]
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
-JOB_TYPE = os.environ["JOB_TYPE"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 
 s3 = boto3.client("s3")

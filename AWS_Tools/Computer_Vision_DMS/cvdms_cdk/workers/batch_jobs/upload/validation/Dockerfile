@@ -22,7 +22,7 @@ RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY src/ .
+COPY src .
 
 # Set the default command to run your validation job
 CMD ["python", "main.py"]

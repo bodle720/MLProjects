@@ -198,10 +198,22 @@ def _make_bins_iterative(rows, img_type, max_size, start_prefix_len):
                 new_bins[prefix] = items
         bins = new_bins
         prefix_len += 1
-        if not too_big or prefix_len > 64:  # safeguard: stop if prefix too long
+        if not too_big or prefix_len > 64:  # safeguard
             break
 
-    return {k: v for k, v in bins.items() if len(v) >= 2}
+    # Drop bins smaller than 2
+    bins = {k: v for k, v in bins.items() if len(v) >= 2}
+
+    # Fallback: chunk any bins still too large
+    final_bins = {}
+    for prefix, items in bins.items():
+        if len(items) > max_size:
+            for i in range(0, len(items), max_size):
+                final_bins[f"{prefix}_part{i//max_size+1}"] = items[i:i+max_size]
+        else:
+            final_bins[prefix] = items
+
+    return final_bins
 
 def _emit_manifests(job_id, bins):
     manifest_s3_uris = []
