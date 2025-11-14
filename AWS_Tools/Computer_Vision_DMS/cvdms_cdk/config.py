@@ -1,20 +1,32 @@
 from config_models import (
     AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
     StageConfig, FileBatchingConfig, BatchTaskJobDefConfig,
-    KickoffLambdaConfig
+    KickoffLambdaConfig, CleanupLambdaConfig, StorageConfig,
+    LoggingConfig
 )
 
 CONFIG = AppConfig(
+    app_name="cvdmsv1",
+    logging=LoggingConfig(
+        transform_lambda_path="workers/lambdas/logging",
+        interval_in_seconds=60,
+        size_in_m_bs=5
+    ),
+    storage=StorageConfig(
+        ddl_lambda_path="workers/lambdas/storage/iceberg_ddl",
+        delete_db_lambda_path="workers/lambdas/storage/delete_db",
+        provider_ddl_lambda_path="workers/lambdas/storage",
+        provider_cleanup_lambda_path = "workers/lambdas/storage"
+),
     compute_env=ComputeEnvConfig(
         minv_cpus=0,
-        desiredv_cpus=0,
         maxv_cpus=64,
         instance_types=["m5.large", "m5.xlarge"]
     ),
     upload_state_machine=UploadStateMachineConfig(duration_hours=2),
     validation=StageConfig(
         file_batching=FileBatchingConfig(
-            path="lambdas/upload/file_batching",
+            path="workers/lambdas/upload/file_batching",
             handler="file_batching_validation.handler",
             memory_size=512,
             timeout_min=5
@@ -22,12 +34,12 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="lambdas/upload/validation"
+            path="workers/batch_jobs/upload/validation"
         )
     ),
     internal_dedup=StageConfig(
         file_batching=FileBatchingConfig(
-            path="lambdas/upload/file_batching",
+            path="workers/lambdas/upload/file_batching",
             handler="file_batching_internal_dedup.handler",
             memory_size=512,
             timeout_min=5
@@ -35,12 +47,12 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="lambdas/upload/internal_dedup"
+            path="workers/batch_jobs/upload/internal_dedup"
         )
     ),
     external_dedup=StageConfig(
         file_batching=FileBatchingConfig(
-            path="lambdas/upload/file_batching",
+            path="workers/lambdas/upload/file_batching",
             handler="file_batching_external_dedup.handler",
             memory_size=512,
             timeout_min=5
@@ -48,12 +60,44 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=4096,
-            path="lambdas/upload/external_dedup"
+            path="workers/batch_jobs/upload/external_dedup"
+        )
+    ),
+    faiss_registration=StageConfig(
+        file_batching=FileBatchingConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="file_batching_faiss_registration.handler",
+            memory_size=512,
+            timeout_min=5
+        ),
+        batch_task_job_def=BatchTaskJobDefConfig(
+            vcpus=1,
+            memory_limit_mib=2048,
+            path="workers/batch_jobs/upload/faiss_registration"
+        )
+    ),
+    label_enrichment=StageConfig(
+        file_batching=FileBatchingConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="file_batching_label_enrichment.handler",
+            memory_size=512,
+            timeout_min=5
+        ),
+        batch_task_job_def=BatchTaskJobDefConfig(
+            vcpus=1,
+            memory_limit_mib=2048,
+            path="workers/batch_jobs/upload/label_enrichment"
         )
     ),
     kickoff_lambda=KickoffLambdaConfig(
-        path="lambdas/upload/kickoff",
+        path="workers/lambdas/upload/kickoff",
         handler="kickoff.handler",
+        memory_size=512,
+        timeout_sec=30
+    ),
+    cleanup_lambda=CleanupLambdaConfig(
+        path="workers/lambdas/upload/cleanup",
+        handler="cleanup.handler",
         memory_size=512,
         timeout_sec=30
     )

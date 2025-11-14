@@ -193,4 +193,5 @@ def handler(event,context):
     return {"job_id":job_id,
             "user":user,
             "manifests":manifests,
-            "img_type":img_type}
+            "img_type":img_type,
+            "label_type": }

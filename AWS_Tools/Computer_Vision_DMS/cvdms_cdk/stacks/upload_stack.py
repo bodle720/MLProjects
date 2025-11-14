@@ -1,21 +1,23 @@
 from config import CONFIG
-from config_models import ComputeEnvConfig
+from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig
 from stacks.upload_stack_utils import BatchingStage
 
 from aws_cdk import (
     Stack,
+    RemovalPolicy,
     Duration,
     aws_s3 as s3,
     aws_lambda as _lambda,
     aws_s3_notifications as s3n,
     aws_stepfunctions as sfn,
     aws_stepfunctions_tasks as tasks,
+    aws_lambda_event_sources as event_sources,
     aws_batch as batch,
     aws_ec2 as ec2,
     aws_iam as iam,
     aws_sqs as sqs,
     aws_logs as logs,
-    aws_dynamodb as dynamodb,
+    aws_dynamodb as dynamodb
 )
 from constructs import Construct
 
@@ -33,12 +35,10 @@ class ImageUploadStack(Stack):
                  global_dlq: sqs.Queue,
                  athena_database_name: str,
                  app_log_group: logs.LogGroup,
+                 upload_events_queue: sqs.Queue,
                  **kwargs) -> None:
 
         super().__init__(scope, construct_id, **kwargs)
-
-        # Creates Batch compute environment and job queue pointing to the compute environment.
-        job_queue = self._make_compute_env(CONFIG.compute_env)
 
         # Variables from Storage stack and app name.
         self.app_name = app_name
@@ -51,6 +51,10 @@ class ImageUploadStack(Stack):
         self.global_dlq = global_dlq
         self.athena_database_name = athena_database_name
         self.app_log_group = app_log_group
+        self.upload_events_queue = upload_events_queue
+
+        # Creates Batch compute environment and job queue pointing to the compute environment.
+        job_queue = self._make_compute_env(CONFIG.compute_env)
 
         validation_stage = BatchingStage(
             self, "validationStage",
@@ -63,91 +67,88 @@ class ImageUploadStack(Stack):
             phash_table=self.phash_table,
             job_queue=job_queue,
             athena_database_name=self.athena_database_name,
+            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             global_dlq=self.global_dlq
         )
 
         internal_dedup_stage = BatchingStage(
-            self, "ExternalDedup",
-            stage_name="ExternalDedup",
-            config=CONFIG['external_dedup'],
+            self, "internalDedupStage",
+            stage_name="internalDedupStage",
+            config=CONFIG.internal_dedup,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
             log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
-            athena_database=self.athena_database,
+            athena_database_name=self.athena_database_name,
+            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             global_dlq=self.global_dlq
         )
+
 
         external_dedup_stage = BatchingStage(
-            self, "ExternalDedup",
-            stage_name="ExternalDedup",
-            config=CONFIG['external_dedup'],
+            self, "externalDedupStage",
+            stage_name="externalDedupStage",
+            config=CONFIG.external_dedup,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
             log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
-            athena_database=self.athena_database,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq
-        )
-
-        faiss_registration_stage = BatchingStage(
-            self, "ExternalDedup",
-            stage_name="ExternalDedup",
-            config=CONFIG['external_dedup'],
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            log_group=self.app_log_group,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database=self.athena_database,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq
-        )
-
-        label_enrichment_stage = BatchingStage(
-            self, "LabelEnrichment",
-            stage_name="LabelEnrichment",
-            config=CONFIG['label_enrichment'],
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            log_group=self.app_log_group,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database=self.athena_database,
+            athena_database_name=self.athena_database_name,
+            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             global_dlq=self.global_dlq,
-            extra_env={
-                "CANONICAL_LABELS_TABLE": self.canonical_labels_table.table_name
-            },
-            extra_permissions=[
-                iam.PolicyStatement(
-                    actions=["dynamodb:PutItem", "dynamodb:UpdateItem"],
-                    resources=[self.canonical_labels_table.table_arn]
-                )
-            ],
-            extra_container_env={
-                "CANONICAL_LABELS_TABLE": self.canonical_labels_table.table_name
-            }
+            extra_container_env={'IMG_TYPE':sfn.JsonPath.string_at("$.img_type")},
+            extra_map_state_params={"img_type.$": "$.img_type"}
+        )
+
+        faiss_registration_stage = BatchingStage(
+            self, "faissRegistrationStage",
+            stage_name="faissRegistrationStage",
+            config=CONFIG.faiss_registration,
+            file_bucket=self.file_bucket,
+            job_table=self.job_table,
+            log_group=self.app_log_group,
+            sha256_table=self.sha256_table,
+            phash_table=self.phash_table,
+            job_queue=job_queue,
+            athena_database_name=self.athena_database_name,
+            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+            region=self.region,
+            account=self.account,
+            global_dlq=self.global_dlq,
+        )
+
+        label_enrichment_stage = BatchingStage(
+            self, "labelEnrichmentStage",
+            stage_name="labelEnrichmentStage",
+            config=CONFIG.label_enrichment,
+            file_bucket=self.file_bucket,
+            job_table=self.job_table,
+            log_group=self.app_log_group,
+            sha256_table=self.sha256_table,
+            phash_table=self.phash_table,
+            job_queue=job_queue,
+            athena_database_name=self.athena_database_name,
+            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+            region=self.region,
+            account=self.account,
+            global_dlq=self.global_dlq,
         )
 
         # Make cleanup lambda
-        cleanup_task = self._make_cleanup_task()
+        cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
-        workflow_definition = validation_stage.batching_task
+        workflow_definition = (
+            validation_stage.batching_task
                 .next(validation_stage.map_state)
                 .next(internal_dedup_stage.batching_task)
                 .next(internal_dedup_stage.map_state)
@@ -158,16 +159,24 @@ class ImageUploadStack(Stack):
                 .next(label_enrichment_stage.batching_task)
                 .next(label_enrichment_stage.map_state)
                 .next(cleanup_task)
-
-        upload_state_machine = sfn.StateMachine(
-            self,
-            "UploadStateMachine",
-            definition=workflow_definition,
-            timeout=Duration.hours(CONFIG.upload_state_machine.duration_hours)
         )
 
+        upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
+                              definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
+                              timeout=Duration.hours(CONFIG.upload_state_machine.duration_hours)
+                              )
+
+        upload_state_machine.apply_removal_policy(RemovalPolicy.DESTROY)
+
+        # after upload_state_machine is created
+        for stage in (validation_stage, internal_dedup_stage, external_dedup_stage, faiss_registration_stage,
+                      label_enrichment_stage):
+            # grant the state machine's role permission to submit this stage's job
+            stage.job_def.grant_submit_job(upload_state_machine.role, job_queue)
+
         # Make kickoff lambda to trigger on job.json upload
-        self._make_kickoff_lambda(upload_state_machine)
+        self._make_kickoff_lambda(upload_state_machine,
+                                  CONFIG.kickoff_lambda)
 
     def _make_compute_env(self,
                           ce_config: ComputeEnvConfig):
@@ -196,29 +205,32 @@ class ImageUploadStack(Stack):
             self, "BatchInstanceRole",
             assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
             managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonEC2ContainerServiceforEC2Role")
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonEC2ContainerServiceforEC2Role"),
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonEC2ContainerRegistryReadOnly"),
             ]
         )
 
-        # The mechanism that attaches the instance role to EC2 at launch.
-        instance_profile = iam.CfnInstanceProfile(self, "BatchInstanceProfile", roles=[instance_role.role_name])
+        self.app_log_group.grant_write(instance_role)
 
         # Make the compute environment
-        compute_env = batch.ComputeEnvironment(
+        compute_env = batch.ManagedEc2EcsComputeEnvironment(
             self, "ComputeEnv",
-            service_role=batch_service_role,
-            compute_resources=batch.ComputeResources(
-                type=batch.ComputeResourceType.SPOT,
-                allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
-                vpc=vpc,
-                minv_cpus=ce_config.minv_cpus,
-                desiredv_cpus=ce_config.desiredv_cpus,
-                maxv_cpus=ce_config.maxv_cpus,
-                instance_role=instance_profile.attr_arn,  # attach instance profile
-                instance_types=[ec2.InstanceType(i) for i in ce_config.instance_types],
-                vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),  # or PRIVATE_WITH_EGRESS for prod
-                security_groups=[batch_sg]
-            )
+            vpc=vpc,
+            # Spot configuration
+            spot=True,
+            allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
+            spot_bid_percentage=100,
+            # Scaling limits
+            minv_cpus=ce_config.minv_cpus,
+            maxv_cpus=ce_config.maxv_cpus,
+            # Instances
+            instance_types=[ec2.InstanceType(i) for i in ce_config.instance_types],
+            security_groups=[batch_sg],
+            # Optional: restrict subnets
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC), # ec2.SubnetType.PRIVATE_WITH_EGRESS for prod
+            # Roles
+            service_role=batch_service_role,  # IAM Role for the compute environment
+            instance_role=instance_role
         )
 
         # The job queue for the above compute environment.
@@ -227,7 +239,7 @@ class ImageUploadStack(Stack):
                             "JobQueue",
                                 priority=1, # If multiple queues share the compute env, this queue takes first priority.
                                 compute_environments=[
-                                    batch.JobQueueComputeEnvironment(
+                                    batch.OrderedComputeEnvironment(
                                         compute_environment=compute_env,
                                         order=1 # Ensures this is the first and only compute environment batch will try.
                                     )
@@ -235,8 +247,41 @@ class ImageUploadStack(Stack):
                             )
         return job_queue
 
-    def _make_cleanup_task(self):
-        cleanup_lambda = None
+    def _make_cleanup_task(self,
+                           cleanup_config: CleanupLambdaConfig):
+        cleanup_lambda = _lambda.Function(
+            self,
+            "CleanupLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler=cleanup_config.handler,
+            code=_lambda.Code.from_asset(cleanup_config.path),
+            dead_letter_queue=self.global_dlq,
+            log_group=self.app_log_group,
+            memory_size=cleanup_config.memory_size,
+            timeout=Duration.seconds(cleanup_config.timeout_sec),
+            environment={
+                "JOB_TABLE_NAME": self.job_table.table_name,
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name
+            }
+        )
+
+        # Permissions for the kickoff lambda
+        self.job_table.grant_read_write_data(cleanup_lambda)
+        self.app_log_group.grant_write(cleanup_lambda)
+        self.file_bucket.grant_read(cleanup_lambda)
+
+        # ensure S3 bucket-level list and get-location are permitted
+        cleanup_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation"
+                ],
+                resources=[
+                    f"arn:aws:s3:::{self.file_bucket.bucket_name}"
+                ]
+            )
+        )
 
         cleanup_task = tasks.LambdaInvoke(
             self, "CleanupTask",
@@ -247,18 +292,19 @@ class ImageUploadStack(Stack):
         return cleanup_task
 
     def _make_kickoff_lambda(self,
-                            upload_state_machine):
+                            upload_state_machine,
+                            kickoff_config: KickoffLambdaConfig):
             # Make Kickoff lambda
             kickoff_lambda = _lambda.Function(
                 self,
                 "KickoffLambda",
                 runtime=_lambda.Runtime.PYTHON_3_11,
-                handler=CONFIG.kickoff_lambda.handler,
-                code=_lambda.Code.from_asset(CONFIG.kickoff_lambda.path),
+                handler=kickoff_config.handler,
+                code=_lambda.Code.from_asset(kickoff_config.path),
                 dead_letter_queue=self.global_dlq,
                 log_group=self.app_log_group,
-                memory_size=CONFIG.kickoff_lambda.memory_size,
-                timeout=Duration.seconds(CONFIG.kickoff_lambda.timeout_sec),
+                memory_size=kickoff_config.memory_size,
+                timeout=Duration.seconds(kickoff_config.timeout_sec),
                 environment={
                     "JOB_TABLE_NAME": self.job_table.table_name,
                     "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
@@ -299,10 +345,7 @@ class ImageUploadStack(Stack):
                 )
             )
 
-            # Trigger: S3 event for job.json
-            self.file_bucket.add_event_notification(
-                s3.EventType.OBJECT_CREATED,
-                s3n.LambdaDestination(kickoff_lambda,
-                                      dead_letter_queue=self.global_dlq),
-                s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
-            )
+            # Trigger: S3 event for job.json, add the queue as an event source
+            kickoff_lambda.add_event_source(event_sources.SqsEventSource(self.upload_events_queue,
+                                                                         batch_size=1))
+            self.upload_events_queue.grant_consume_messages(kickoff_lambda)

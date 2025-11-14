@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     uploaded_at timestamp COMMENT 'UTC upload time in ISO8601',
     source string,
     sha256_hash string COMMENT '64-char hex',
-    phash string COMMENT 'grayscale = 64‑bit hex/base64; rgb = 192‑bit concat.',
+    phash string COMMENT 'grayscale = 64‑bit hex/base64, rgb = 192‑bit concat.',
     string_labels array<string>,
     bboxes array<string>,
     semantic_masks array<string>,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
 )
 PARTITIONED BY (days(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/imagery/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 -- canonical bounding boxes
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_bounding_boxes (
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_bounding_boxes (
 )
 PARTITIONED BY (days(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/bounding-boxes/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 -- canonical semantic masks
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_semantic_masks (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_semantic_masks (
 )
 PARTITIONED BY (days(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/semantic-masks/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 -- canonical instance annotations
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_instance_annotations (
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_instance_annotatio
 )
 PARTITIONED BY (days(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/instance-annotations/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 -- upload staging
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
 )
 PARTITIONED BY (job_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/upload_staging/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 -- task-specific tables
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
 )
 PARTITIONED BY (dataset_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/single_label/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
     dataset_id string,
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
 )
 PARTITIONED BY (dataset_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/multi_label/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     dataset_id string,
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
 )
 PARTITIONED BY (dataset_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/object_detection/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     dataset_id string,
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
 )
 PARTITIONED BY (dataset_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/semantic_segmentation/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     dataset_id string,
@@ -143,4 +143,4 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
 )
 PARTITIONED BY (dataset_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/instance_segmentation/'
-TBLPROPERTIES ('table_type'='ICEBERG','write.format.default'='parquet');
+TBLPROPERTIES ('table_type'='ICEBERG');

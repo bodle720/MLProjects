@@ -1,10 +1,12 @@
 from re import sub
+from config import CONFIG
 
 from aws_cdk import (
     Stack,
     Duration,
     CfnOutput,
     RemovalPolicy,
+    CustomResource,
     aws_iam as iam,
     aws_s3 as s3,
     aws_sqs as sqs,
@@ -12,7 +14,8 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     custom_resources as cr,
-    aws_ssm as ssm
+    aws_ssm as ssm,
+    aws_s3_notifications as s3n
 )
 from constructs import Construct
 
@@ -29,15 +32,23 @@ class StorageStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Derive a unique iceberg database name from the stack name
-        db_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
+        athena_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
+
+        # A common log group the app will share.
+        app_log_group = logs.LogGroup(
+                            self,
+                            f"AppLogGroup={app_name}",
+                            retention=logs.RetentionDays.ONE_YEAR,
+                            removal_policy=RemovalPolicy.DESTROY
+                        )
 
         # 1. File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
             self, "S3FileBucket",
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
-            auto_delete_objects=False,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
             lifecycle_rules=[
                 s3.LifecycleRule(
                     prefix="temp/",
@@ -55,8 +66,8 @@ class StorageStack(Stack):
             self, "S3IcebergTablesBucket",
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
-            auto_delete_objects=False
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True
         )
 
         # 3. DynamoDB tables
@@ -65,7 +76,7 @@ class StorageStack(Stack):
             self, "LockTable",
             partition_key=dynamodb.Attribute(name="lock_id", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY
         )
 
         # Datasets table
@@ -73,7 +84,7 @@ class StorageStack(Stack):
             self, "DatasetsTable",
             partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY
         )
 
         # Job table
@@ -81,7 +92,7 @@ class StorageStack(Stack):
             self, "JobsTable",
             partition_key=dynamodb.Attribute(name="job_id", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY
         )
 
         # GSIs for job_table
@@ -111,7 +122,7 @@ class StorageStack(Stack):
             self, "Sha256LookupTable",
             partition_key=dynamodb.Attribute(name="sha256", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY
         )
 
         # phash lookup table
@@ -119,7 +130,7 @@ class StorageStack(Stack):
             self, "PhashLookupTable",
             partition_key=dynamodb.Attribute(name="phash", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY
         )
 
         # 4. Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
@@ -128,14 +139,22 @@ class StorageStack(Stack):
             self, "LambdaIcebergDDL",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="index.handler",
-            code=_lambda.Code.from_asset("lambdas/storage/iceberg_ddl"),
+            code=_lambda.Code.from_asset(CONFIG.storage.ddl_lambda_path),
             timeout=Duration.minutes(10),
             environment={
                     "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
-                    "ICEBERG_DATABASE_NAME": db_name,
+                    "ICEBERG_DATABASE_NAME": athena_database_name,
                     "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
                 }
         )
+
+        # Ensure explicit log group for the DDL lambda so we can destroy it
+        logs.LogGroup(self,
+                     f"{ddl_lambda.node.id}LogGroup",
+                     log_group_name=f"/aws/lambda/{ddl_lambda.function_name}",
+                     removal_policy=RemovalPolicy.DESTROY,
+                     retention=logs.RetentionDays.THREE_DAYS
+                     )
 
         file_bucket.grant_read_write(ddl_lambda)
         iceberg_bucket.grant_read_write(ddl_lambda)
@@ -172,8 +191,8 @@ class StorageStack(Stack):
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                    f"arn:aws:glue:{self.region}:{self.account}:database/{db_name}",
-                    f"arn:aws:glue:{self.region}:{self.account}:table/{db_name}/*"
+                    f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
+                    f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*"
                 ]
             )
         )
@@ -207,24 +226,47 @@ class StorageStack(Stack):
             )
         )
 
-        # Custom resource to invoke the DDL Lambda at deploy time, after a destroy
-        # it will reinvoke the lambda. So, iceberg table creation happens once, not
-        # for an update, however.
-        cr.AwsCustomResource(
-            self, "RunIcebergDDL",
-            on_create=cr.AwsSdkCall(
-                service="Lambda",
-                action="invoke",
-                parameters={"FunctionName": ddl_lambda.function_name},
-                physical_resource_id=cr.PhysicalResourceId.of("IcebergDDLRun")
-            ),
-            policy=cr.AwsCustomResourcePolicy.from_statements([
-                iam.PolicyStatement(
-                    actions=["lambda:InvokeFunction"],
-                    resources=[ddl_lambda.function_arn]
-                )
-            ])
-        )
+        # -------------------------------------------------------------------
+        # Create a provider Lambda that we control. This Lambda will be invoked
+        # as the custom resource provider and can in turn invoke the ddl_lambda.
+        # -------------------------------------------------------------------
+        provider_ddl_fn = _lambda.Function(self, "IcebergDDLProviderFn",
+                                       runtime=_lambda.Runtime.PYTHON_3_11,
+                                       handler="custom_resource_provider_ddl.handler",
+                                       code=_lambda.Code.from_asset(CONFIG.storage.provider_ddl_lambda_path),
+                                       timeout=Duration.minutes(14),
+                                       memory_size=256,
+                                       environment={
+                                           "DDL_FUNCTION_NAME": ddl_lambda.function_name,
+                                       }
+                                       )
+        # Explicit log group for provider lambda so it can be destroyed
+        logs.LogGroup(self,
+                   f"{provider_ddl_fn.node.id}LogGroup",
+                   log_group_name=f"/aws/lambda/{provider_ddl_fn.function_name}",
+                   removal_policy=RemovalPolicy.DESTROY,
+                   retention=logs.RetentionDays.ONE_DAY
+                   )
+
+        provider_ddl_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[ddl_lambda.function_arn]
+        ))
+
+        # -------------------------------------------------------------------
+        # Create the custom resource provider and the custom resource.
+        # Using cr.Provider gives you a CloudFormation CustomResource backed by
+        # a Lambda function (provider_ddl_fn) that you control.
+        # -------------------------------------------------------------------
+        provider_ddl = cr.Provider(self, "IcebergDDLProvider",
+                               on_event_handler=provider_ddl_fn
+                               )
+
+        # The custom resource that triggers provider to run on create/update/delete as you define in provider logic
+        CustomResource(self, "RunIcebergDDL",
+                       service_token=provider_ddl.service_token,
+                       removal_policy=RemovalPolicy.DESTROY
+                       )
 
         # Global DLQ for async failures (S3->Lambda, Lambda async invokes, etc.)
         dlq = sqs.Queue(
@@ -234,18 +276,97 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # A common log group the app will share.
-        app_log_group = logs.LogGroup(
-                            self,
-                            "AppLogGroup",
-                            retention=logs.RetentionDays.ONE_YEAR,
-                            removal_policy=RemovalPolicy.RETAIN  # best for prod
-                        )
         # Allow users to discover the name to query the logs
-        ssm.StringParameter(
+        log_group_param = ssm.StringParameter(
             self, "AppLogGroupParam",
-            parameter_name=f"apps/{app_name}/log-group",
+            parameter_name=f"/apps/{app_name}/log-group",
             string_value=app_log_group.log_group_name
+        )
+
+        log_group_param.apply_removal_policy(RemovalPolicy.DESTROY)
+
+        cleanup_fn = _lambda.Function(
+            self, "DatabaseCleanupLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="delete_database.handler",
+            code=_lambda.Code.from_asset(CONFIG.storage.delete_db_lambda_path),
+            timeout=Duration.minutes(10),
+            environment={
+                "GLUE_DATABASE_NAME": athena_database_name
+            }
+        )
+
+        logs.LogGroup(self,
+                      f"{cleanup_fn.node.id}LogGroup",
+                      log_group_name=f"/aws/lambda/{cleanup_fn.function_name}",
+                      removal_policy=RemovalPolicy.DESTROY,
+                      retention=logs.RetentionDays.THREE_DAYS
+                      )
+
+        cleanup_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "glue:GetDatabases",
+                    "glue:GetDatabase",
+                    "glue:DeleteDatabase",
+                    "glue:GetTables",
+                    "glue:GetTable",
+                    "glue:DeleteTable",
+                    "glue:GetUserDefinedFunctions",
+                    "glue:DeleteUserDefinedFunction"
+                ],
+                resources=[
+                    f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                    f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
+                    f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*",
+                    f"arn:aws:glue:{self.region}:{self.account}:userDefinedFunction/{athena_database_name}/*"
+                ]
+            )
+        )
+
+        # Provider Lambda that will invoke the cleanup lambda on Delete
+        provider_cleanup_fn = _lambda.Function(self, "GlueCleanupProviderFn",
+                                       runtime=_lambda.Runtime.PYTHON_3_11,
+                                       handler="custom_resource_provider_cleanup.handler",  # see provider example below
+                                       code=_lambda.Code.from_asset(CONFIG.storage.provider_cleanup_lambda_path),
+                                       timeout=Duration.minutes(14),
+                                       memory_size=256,
+                                       environment={
+                                           "CLEANUP_FUNCTION_NAME": cleanup_fn.function_name
+                                       }
+                                       )
+
+        logs.LogGroup(self,
+                   f"{provider_cleanup_fn.node.id}LogGroup",
+                   log_group_name=f"/aws/lambda/{provider_cleanup_fn.function_name}",
+                   removal_policy=RemovalPolicy.DESTROY,
+                   retention=logs.RetentionDays.ONE_DAY
+                   )
+
+        # grant provider permission to invoke the cleanup lambda
+        provider_cleanup_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[cleanup_fn.function_arn]
+        ))
+
+        # Create a provider backed by our provider lambda
+        provider_cleanup = cr.Provider(self, "GlueCleanupProvider",
+                               on_event_handler=provider_cleanup_fn
+                               )
+
+        CustomResource(self, "DropGlueDatabaseOnDelete",
+                       service_token=provider_cleanup.service_token,
+                       removal_policy=RemovalPolicy.DESTROY
+                       )
+
+        upload_events_queue = sqs.Queue(self, "UploadEventsQueue",
+                                        visibility_timeout=Duration.minutes(5),
+                                        retention_period=Duration.days(4))
+
+        file_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.SqsDestination(upload_events_queue),
+            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
         )
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
@@ -256,5 +377,6 @@ class StorageStack(Stack):
         self.lock_table = lock_table
         self.global_dlq = dlq
         self.datasets_table = datasets_table
-        self.athena_database = db_name
+        self.athena_database_name = athena_database_name
         self.app_log_group = app_log_group
+        self.upload_events_queue = upload_events_queue
