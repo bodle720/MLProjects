@@ -135,7 +135,6 @@ def handler(event, context):
 
     sql_text = sql_path.read_text()
     statements = safe_split_sql(sql_text)
-
     # 2. Replace placeholders
     statements = [
         stmt.replace("${ICEBERG_BUCKET_NAME}", ICEBERG_BUCKET_NAME).replace("${ICEBERG_DATABASE_NAME}", ICEBERG_DATABASE_NAME)

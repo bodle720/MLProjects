@@ -9,8 +9,9 @@ CONFIG = AppConfig(
     app_name="cvdmsv1",
     logging=LoggingConfig(
         transform_lambda_path="workers/lambdas/logging",
-        interval_in_seconds=60,
-        size_in_m_bs=5
+        transform_lambda_duration_sec=60,
+        firehose_interval_in_seconds=60,
+        firehose_size_in_m_bs=64
     ),
     storage=StorageConfig(
         ddl_lambda_path="workers/lambdas/storage/iceberg_ddl",

@@ -1,3 +1,4 @@
+import uuid
 from re import sub
 from config import CONFIG
 
@@ -33,14 +34,6 @@ class StorageStack(Stack):
 
         # Derive a unique iceberg database name from the stack name
         athena_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
-
-        # A common log group the app will share.
-        app_log_group = logs.LogGroup(
-                            self,
-                            f"AppLogGroup={app_name}",
-                            retention=logs.RetentionDays.ONE_YEAR,
-                            removal_policy=RemovalPolicy.DESTROY
-                        )
 
         # 1. File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
@@ -149,12 +142,11 @@ class StorageStack(Stack):
         )
 
         # Ensure explicit log group for the DDL lambda so we can destroy it
-        logs.LogGroup(self,
-                     f"{ddl_lambda.node.id}LogGroup",
-                     log_group_name=f"/aws/lambda/{ddl_lambda.function_name}",
-                     removal_policy=RemovalPolicy.DESTROY,
-                     retention=logs.RetentionDays.THREE_DAYS
-                     )
+        logs.LogRetention(self, f"{ddl_lambda.node.id}LogGroup",
+                          log_group_name=f"/aws/lambda/{ddl_lambda.function_name}",
+                          retention=logs.RetentionDays.THREE_DAYS,
+                          removal_policy=RemovalPolicy.DESTROY
+                          )
 
         file_bucket.grant_read_write(ddl_lambda)
         iceberg_bucket.grant_read_write(ddl_lambda)
@@ -230,7 +222,8 @@ class StorageStack(Stack):
         # Create a provider Lambda that we control. This Lambda will be invoked
         # as the custom resource provider and can in turn invoke the ddl_lambda.
         # -------------------------------------------------------------------
-        provider_ddl_fn = _lambda.Function(self, "IcebergDDLProviderFn",
+        provider_ddl_fn = _lambda.SingletonFunction(self, "IcebergDDLProviderFn",
+                                       uuid="6f1a8f2e-1c9b-4a2a-9f6b-0d5b7e4f1234",
                                        runtime=_lambda.Runtime.PYTHON_3_11,
                                        handler="custom_resource_provider_ddl.handler",
                                        code=_lambda.Code.from_asset(CONFIG.storage.provider_ddl_lambda_path),
@@ -240,13 +233,12 @@ class StorageStack(Stack):
                                            "DDL_FUNCTION_NAME": ddl_lambda.function_name,
                                        }
                                        )
-        # Explicit log group for provider lambda so it can be destroyed
-        logs.LogGroup(self,
-                   f"{provider_ddl_fn.node.id}LogGroup",
-                   log_group_name=f"/aws/lambda/{provider_ddl_fn.function_name}",
-                   removal_policy=RemovalPolicy.DESTROY,
-                   retention=logs.RetentionDays.ONE_DAY
-                   )
+
+        logs.LogRetention(self, f"{provider_ddl_fn.node.id}LogGroup",
+                          log_group_name=f"/aws/lambda/{provider_ddl_fn.function_name}",
+                          retention=logs.RetentionDays.ONE_DAY,
+                          removal_policy=RemovalPolicy.DESTROY
+                          )
 
         provider_ddl_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["lambda:InvokeFunction"],
@@ -276,15 +268,6 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # Allow users to discover the name to query the logs
-        log_group_param = ssm.StringParameter(
-            self, "AppLogGroupParam",
-            parameter_name=f"/apps/{app_name}/log-group",
-            string_value=app_log_group.log_group_name
-        )
-
-        log_group_param.apply_removal_policy(RemovalPolicy.DESTROY)
-
         cleanup_fn = _lambda.Function(
             self, "DatabaseCleanupLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
@@ -296,12 +279,11 @@ class StorageStack(Stack):
             }
         )
 
-        logs.LogGroup(self,
-                      f"{cleanup_fn.node.id}LogGroup",
-                      log_group_name=f"/aws/lambda/{cleanup_fn.function_name}",
-                      removal_policy=RemovalPolicy.DESTROY,
-                      retention=logs.RetentionDays.THREE_DAYS
-                      )
+        logs.LogRetention(self, f"{cleanup_fn.node.id}LogGroup",
+                          log_group_name=f"/aws/lambda/{cleanup_fn.function_name}",
+                          retention=logs.RetentionDays.THREE_DAYS,
+                          removal_policy=RemovalPolicy.DESTROY
+                          )
 
         cleanup_fn.add_to_role_policy(
             iam.PolicyStatement(
@@ -325,7 +307,8 @@ class StorageStack(Stack):
         )
 
         # Provider Lambda that will invoke the cleanup lambda on Delete
-        provider_cleanup_fn = _lambda.Function(self, "GlueCleanupProviderFn",
+        provider_cleanup_fn = _lambda.SingletonFunction(self, "GlueCleanupProviderFn",
+                                       uuid="6f1a8f2e-1b9b-4a2a-9f6b-0d5b7e4f4321",
                                        runtime=_lambda.Runtime.PYTHON_3_11,
                                        handler="custom_resource_provider_cleanup.handler",  # see provider example below
                                        code=_lambda.Code.from_asset(CONFIG.storage.provider_cleanup_lambda_path),
@@ -336,12 +319,11 @@ class StorageStack(Stack):
                                        }
                                        )
 
-        logs.LogGroup(self,
-                   f"{provider_cleanup_fn.node.id}LogGroup",
-                   log_group_name=f"/aws/lambda/{provider_cleanup_fn.function_name}",
-                   removal_policy=RemovalPolicy.DESTROY,
-                   retention=logs.RetentionDays.ONE_DAY
-                   )
+        logs.LogRetention(self, f"{provider_cleanup_fn.node.id}LogGroup",
+                          log_group_name=f"/aws/lambda/{provider_cleanup_fn.function_name}",
+                          retention=logs.RetentionDays.ONE_DAY,
+                          removal_policy=RemovalPolicy.DESTROY
+                          )
 
         # grant provider permission to invoke the cleanup lambda
         provider_cleanup_fn.add_to_role_policy(iam.PolicyStatement(
@@ -378,5 +360,4 @@ class StorageStack(Stack):
         self.global_dlq = dlq
         self.datasets_table = datasets_table
         self.athena_database_name = athena_database_name
-        self.app_log_group = app_log_group
         self.upload_events_queue = upload_events_queue

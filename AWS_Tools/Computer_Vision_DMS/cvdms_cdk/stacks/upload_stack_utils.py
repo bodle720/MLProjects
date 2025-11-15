@@ -24,7 +24,6 @@ class BatchingStage(Construct):
                  config: StageConfig,
                  file_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
-                 log_group: logs.LogGroup,
                  sha256_table: dynamodb.Table,
                  phash_table: dynamodb.Table,
                  job_queue: batch.JobQueue,
@@ -61,7 +60,6 @@ class BatchingStage(Construct):
             handler=config.file_batching.handler,
             code=_lambda.Code.from_asset(config.file_batching.path),
             dead_letter_queue=global_dlq,
-            log_group=log_group,
             memory_size=config.file_batching.memory_size,
             timeout=Duration.minutes(config.file_batching.timeout_min),
             environment=lambda_env
@@ -71,7 +69,6 @@ class BatchingStage(Construct):
         sha256_table.grant_read_data(batching_fn)
         phash_table.grant_read_data(batching_fn)
         file_bucket.grant_read_write(batching_fn)
-        log_group.grant_write(batching_fn)
 
         # baseline policies
         batching_fn.add_to_role_policy(iam.PolicyStatement(
@@ -101,7 +98,6 @@ class BatchingStage(Construct):
         )
         file_bucket.grant_read_write(job_role)
         job_table.grant_read_write_data(job_role)
-        log_group.grant_write(job_role)
         phash_table.grant_read_data(job_role)
         sha256_table.grant_read_data(job_role)
         job_role.add_to_policy(iam.PolicyStatement(
@@ -130,8 +126,7 @@ class BatchingStage(Construct):
                 image=container_image,
                 memory=Size.mebibytes(config.batch_task_job_def.memory_limit_mib),
                 cpu=int(config.batch_task_job_def.vcpus * 1024),
-                job_role=job_role,
-                logging=ecs.LogDrivers.aws_logs(stream_prefix="batch", log_group=log_group)
+                job_role=job_role
             )
         )
 

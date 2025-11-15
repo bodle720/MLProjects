@@ -11,7 +11,7 @@ from aws_cdk import (
     aws_logs as logs,
     aws_lambda as _lambda,
     aws_kinesisfirehose as firehose,
-    aws_glue as glue,
+    aws_glue as glue
 )
 
 from config import CONFIG
@@ -37,18 +37,15 @@ class LoggingStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="log_transformer.handler",
             code=_lambda.Code.from_asset(CONFIG.logging.transform_lambda_path),
-            timeout=Duration.seconds(30),
+            timeout=Duration.seconds(CONFIG.logging.transform_lambda_duration_sec),
             memory_size=256
         )
 
-        # Create explicit LogGroup for the transform Lambda so we can destroy it on stack delete
-        # Lambda auto-creates /aws/lambda/<name>, but creating a LogGroup with the exact name
-        # and DESTROY removal policy ensures the logs are removed with the stack.
-        transform_log_group = logs.LogGroup(self, "TransformLogGroup",
-            log_group_name=f"/aws/lambda/{transform_fn.function_name}",
-            removal_policy=RemovalPolicy.DESTROY,
-            retention=logs.RetentionDays.ONE_DAY,  # short retention for transform lambda logs
-        )
+        logs.LogRetention(self, "TransformLogRetention",
+                          log_group_name=f"/aws/lambda/{transform_fn.function_name}",
+                          retention=logs.RetentionDays.THREE_DAYS,
+                          removal_policy=RemovalPolicy.DESTROY
+                          )
 
         # Allow Firehose to invoke the transform lambda
         transform_fn.grant_invoke(iam.ServicePrincipal("firehose.amazonaws.com"))
@@ -142,9 +139,10 @@ class LoggingStack(Stack):
                                  bucket_arn=log_bucket.bucket_arn,
                                  role_arn=firehose_role.role_arn,
                                  prefix="logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/",
+                                 error_output_prefix="errors/",
                                  buffering_hints=firehose.CfnDeliveryStream.BufferingHintsProperty(
-                                     interval_in_seconds=60,
-                                     size_in_m_bs=5
+                                     interval_in_seconds=CONFIG.logging.firehose_interval_in_seconds,
+                                     size_in_m_bs=CONFIG.logging.firehose_size_in_m_bs
                                  ),
                                  compression_format="UNCOMPRESSED",
                                  processing_configuration=firehose.CfnDeliveryStream.ProcessingConfigurationProperty(
@@ -185,8 +183,8 @@ class LoggingStack(Stack):
                                          )
                                      ),
                                      schema_configuration=firehose.CfnDeliveryStream.SchemaConfigurationProperty(
-                                         database_name=glue_db.ref,
-                                         table_name=glue_table.table_input.name,
+                                         database_name=f"{app_name.lower()}_logs_db",
+                                         table_name=f"{app_name.lower()}_logs_table",
                                          region=self.region,
                                          role_arn=firehose_role.role_arn,
                                          version_id="LATEST"
@@ -195,15 +193,14 @@ class LoggingStack(Stack):
                              )
                         )
 
-        # Allow Firehose to read the Lambda source mapping permission explicitly (AWS requires permission for lambda:InvokeFunction)
-        # transform_fn.grant_invoke(...) done above
-
         # Glue table depends on bucket and delivery stream indirectly; ensure correct creation order
-        glue_table.add_depends_on(glue_db)
+        glue_table.add_dependency(glue_db)
+        glue_table.add_dependency(log_bucket.node.default_child)
+        delivery_stream.add_dependency(glue_table)
+        delivery_stream.add_dependency(glue_db)
 
         # Outputs
         self.log_bucket = log_bucket
         self.firehose_delivery_stream_name = delivery_stream.ref
         self.glue_db_name = glue_db.ref
         self.glue_table_name = glue_table.table_input.name
-

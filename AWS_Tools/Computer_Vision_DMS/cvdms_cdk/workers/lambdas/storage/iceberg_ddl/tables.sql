@@ -1,4 +1,3 @@
--- canonical imagery
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     image_id string COMMENT 'UUID primary key for the image',
     source_ref string COMMENT 'S3 URI to file in file bucket',
@@ -9,6 +8,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     dtype string,
     file_size_mb double,
     uploaded_at timestamp COMMENT 'UTC upload time in ISO8601',
+    uploaded_day date,
     source string,
     sha256_hash string COMMENT '64-char hex',
     phash string COMMENT 'grayscale = 64‑bit hex/base64, rgb = 192‑bit concat.',
@@ -17,49 +17,48 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     semantic_masks array<string>,
     instance_annotations array<string>
 )
-PARTITIONED BY (days(uploaded_at))
+PARTITIONED BY (uploaded_day)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/imagery/'
 TBLPROPERTIES ('table_type'='ICEBERG');
 
--- canonical bounding boxes
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_bounding_boxes (
     bbox_annotation_id string,
     image_id string,
     source_ref string,
     classes_present array<string>,
-    uploaded_at timestamp
+    uploaded_at timestamp,
+    uploaded_day date
 )
-PARTITIONED BY (days(uploaded_at))
+PARTITIONED BY (uploaded_day)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/bounding-boxes/'
 TBLPROPERTIES ('table_type'='ICEBERG');
 
--- canonical semantic masks
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_semantic_masks (
     semantic_mask_id string,
     image_id string,
     source_ref string,
     mask_map map<int,string>,
     classes_present array<string>,
-    uploaded_at timestamp
+    uploaded_at timestamp,
+    uploaded_day date
 )
-PARTITIONED BY (days(uploaded_at))
+PARTITIONED BY (uploaded_day)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/semantic-masks/'
 TBLPROPERTIES ('table_type'='ICEBERG');
 
--- canonical instance annotations
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_instance_annotations (
     instance_annotation_id string,
     image_id string,
     source_ref string,
     classes_present array<string>,
     annotation_format string,
-    uploaded_at timestamp
+    uploaded_at timestamp,
+    uploaded_day date
 )
-PARTITIONED BY (days(uploaded_at))
+PARTITIONED BY (uploaded_day)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/instance-annotations/'
 TBLPROPERTIES ('table_type'='ICEBERG');
 
--- upload staging
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     job_id string,
     image_id string,
@@ -89,7 +88,6 @@ PARTITIONED BY (job_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/upload_staging/'
 TBLPROPERTIES ('table_type'='ICEBERG');
 
--- task-specific tables
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
     dataset_id string,
     job_id string,

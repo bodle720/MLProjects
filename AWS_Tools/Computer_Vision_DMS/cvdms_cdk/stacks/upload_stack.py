@@ -34,7 +34,6 @@ class ImageUploadStack(Stack):
                  lock_table: dynamodb.Table,
                  global_dlq: sqs.Queue,
                  athena_database_name: str,
-                 app_log_group: logs.LogGroup,
                  upload_events_queue: sqs.Queue,
                  **kwargs) -> None:
 
@@ -50,7 +49,6 @@ class ImageUploadStack(Stack):
         self.lock_table = lock_table
         self.global_dlq = global_dlq
         self.athena_database_name = athena_database_name
-        self.app_log_group = app_log_group
         self.upload_events_queue = upload_events_queue
 
         # Creates Batch compute environment and job queue pointing to the compute environment.
@@ -62,7 +60,6 @@ class ImageUploadStack(Stack):
             config=CONFIG.validation,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
-            log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
@@ -79,7 +76,6 @@ class ImageUploadStack(Stack):
             config=CONFIG.internal_dedup,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
-            log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
@@ -97,7 +93,6 @@ class ImageUploadStack(Stack):
             config=CONFIG.external_dedup,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
-            log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
@@ -116,7 +111,6 @@ class ImageUploadStack(Stack):
             config=CONFIG.faiss_registration,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
-            log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
@@ -133,7 +127,6 @@ class ImageUploadStack(Stack):
             config=CONFIG.label_enrichment,
             file_bucket=self.file_bucket,
             job_table=self.job_table,
-            log_group=self.app_log_group,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
             job_queue=job_queue,
@@ -210,8 +203,6 @@ class ImageUploadStack(Stack):
             ]
         )
 
-        self.app_log_group.grant_write(instance_role)
-
         # Make the compute environment
         compute_env = batch.ManagedEc2EcsComputeEnvironment(
             self, "ComputeEnv",
@@ -256,7 +247,6 @@ class ImageUploadStack(Stack):
             handler=cleanup_config.handler,
             code=_lambda.Code.from_asset(cleanup_config.path),
             dead_letter_queue=self.global_dlq,
-            log_group=self.app_log_group,
             memory_size=cleanup_config.memory_size,
             timeout=Duration.seconds(cleanup_config.timeout_sec),
             environment={
@@ -267,7 +257,6 @@ class ImageUploadStack(Stack):
 
         # Permissions for the kickoff lambda
         self.job_table.grant_read_write_data(cleanup_lambda)
-        self.app_log_group.grant_write(cleanup_lambda)
         self.file_bucket.grant_read(cleanup_lambda)
 
         # ensure S3 bucket-level list and get-location are permitted
@@ -302,7 +291,6 @@ class ImageUploadStack(Stack):
                 handler=kickoff_config.handler,
                 code=_lambda.Code.from_asset(kickoff_config.path),
                 dead_letter_queue=self.global_dlq,
-                log_group=self.app_log_group,
                 memory_size=kickoff_config.memory_size,
                 timeout=Duration.seconds(kickoff_config.timeout_sec),
                 environment={
@@ -316,7 +304,6 @@ class ImageUploadStack(Stack):
 
             # Permissions for the kickoff lambda
             self.job_table.grant_read_write_data(kickoff_lambda)
-            self.app_log_group.grant_write(kickoff_lambda)
             self.file_bucket.grant_read(kickoff_lambda)
 
             # ensure S3 bucket-level list and get-location are permitted

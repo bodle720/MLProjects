@@ -6,8 +6,9 @@ from aws_cdk.aws_sns import LoggingConfig
 @dataclass
 class LoggingConfig:
     transform_lambda_path: str
-    interval_in_seconds: int
-    size_in_m_bs: int
+    firehose_interval_in_seconds: int
+    firehose_size_in_m_bs: int
+    transform_lambda_duration_sec: int
 
 @dataclass
 class StorageConfig:
