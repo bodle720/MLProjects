@@ -1,7 +1,3 @@
-import uuid
-from re import sub
-from config import CONFIG
-
 from aws_cdk import (
     Stack,
     Duration,
@@ -20,6 +16,11 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+import uuid
+from re import sub
+
+from config import CONFIG
+
 class StorageStack(Stack):
 
     def __init__(self,
@@ -35,7 +36,7 @@ class StorageStack(Stack):
         # Derive a unique iceberg database name from the stack name
         athena_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
 
-        # 1. File bucket (S3 file bucket to hold files)
+        # File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
             self, "S3FileBucket",
             versioned=True,
@@ -54,7 +55,7 @@ class StorageStack(Stack):
             ]
         )
 
-        # 2. Iceberg bucket
+        # Iceberg bucket
         iceberg_bucket = s3.Bucket(
             self, "S3IcebergTablesBucket",
             versioned=True,
@@ -63,7 +64,7 @@ class StorageStack(Stack):
             auto_delete_objects=True
         )
 
-        # 3. DynamoDB tables
+        # DynamoDB tables
         # Lock table
         lock_table = dynamodb.Table(
             self, "LockTable",
@@ -126,7 +127,7 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # 4. Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
+        # Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
         # DDL = Data Definition Language, defines the database schema, a subset language of SQL.
         ddl_lambda = _lambda.Function(
             self, "LambdaIcebergDDL",
@@ -343,7 +344,8 @@ class StorageStack(Stack):
 
         upload_events_queue = sqs.Queue(self, "UploadEventsQueue",
                                         visibility_timeout=Duration.minutes(5),
-                                        retention_period=Duration.days(4))
+                                        retention_period=Duration.days(4),
+                                        dead_letter_queue=sqs.DeadLetterQueue(max_receive_count=1, queue=dlq))
 
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,

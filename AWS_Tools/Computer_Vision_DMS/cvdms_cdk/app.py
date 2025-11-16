@@ -6,7 +6,7 @@ import sys
 from config import CONFIG
 from stacks.logging_stack import LoggingStack
 from stacks.storage_stack import StorageStack
-# from stacks.upload_stack import ImageUploadStack
+from stacks.upload_stack import ImageUploadStack
 
 APP_NAME = CONFIG.app_name
 
@@ -19,28 +19,27 @@ env = cdk.Environment(
 logging_stack = LoggingStack(app,
                            f"{APP_NAME}-LoggingStack",
                             app_name=APP_NAME,
-                           env=env)
+                            env=env)
 
 storage_stack = StorageStack(app,
                        f"{APP_NAME}-StorageStack",
                         app_name=APP_NAME,
-                       env=env)
+                        env=env)
 
-# ImageUploadStack(
-#     app,
-#     f"{APP_NAME}-UploadStack",
-#     app_name=APP_NAME,
-#     file_bucket=storage.file_bucket,
-#     iceberg_bucket=storage.iceberg_bucket,
-#     job_table=storage.job_table,
-#     sha256_table=storage.sha256_table,
-#     phash_table=storage.phash_table,
-#     lock_table=storage.lock_table,
-#     global_dlq=storage.global_dlq,
-#     athena_database_name=storage.athena_database_name,
-#     app_log_group = storage.app_log_group,
-#     upload_events_queue =storage.upload_events_queue,
-#     env=env
-# )
+upload_stack = ImageUploadStack(
+    app,
+    f"{APP_NAME}-UploadStack",
+    app_name=APP_NAME,
+    file_bucket=storage_stack.file_bucket,
+    iceberg_bucket=storage_stack.iceberg_bucket,
+    job_table=storage_stack.job_table,
+    sha256_table=storage_stack.sha256_table,
+    phash_table=storage_stack.phash_table,
+    lock_table=storage_stack.lock_table,
+    global_dlq=storage_stack.global_dlq,
+    athena_database_name=storage_stack.athena_database_name,
+    upload_events_queue =storage_stack.upload_events_queue,
+    env=env
+)
 
 app.synth()

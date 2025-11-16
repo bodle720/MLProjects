@@ -1,5 +1,3 @@
-from constructs import Construct
-
 from aws_cdk import (
     Duration,
     Size,
@@ -15,6 +13,8 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_ecr_assets as ecr_assets
 )
+
+from constructs import Construct
 
 from config_models import StageConfig
 

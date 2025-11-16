@@ -1,6 +1,3 @@
-from datetime import datetime
-from constructs import Construct
-import aws_cdk as cdk
 from aws_cdk import (
     Stack,
     Duration,
@@ -13,6 +10,8 @@ from aws_cdk import (
     aws_kinesisfirehose as firehose,
     aws_glue as glue
 )
+from constructs import Construct
+from datetime import datetime
 
 from config import CONFIG
 
@@ -22,6 +21,7 @@ class LoggingStack(Stack):
                  construct_id: str,
                  app_name: str,
                  **kwargs) -> None:
+
         super().__init__(scope, construct_id, **kwargs)
 
         # --- S3 bucket for Parquet logs (auto-delete on destroy) ---
@@ -76,10 +76,11 @@ class LoggingStack(Stack):
                 storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
                     columns=[
                         glue.CfnTable.ColumnProperty(name="job_id", type="string"),
+                        glue.CfnTable.ColumnProperty(name="user", type="string"),
                         glue.CfnTable.ColumnProperty(name="event_type", type="string"),
                         glue.CfnTable.ColumnProperty(name="message", type="string"),
-                        glue.CfnTable.ColumnProperty(name="warnings", type="string"),
-                        glue.CfnTable.ColumnProperty(name="errors", type="string"),
+                        glue.CfnTable.ColumnProperty(name="warning", type="string"),
+                        glue.CfnTable.ColumnProperty(name="error", type="string"),
                         glue.CfnTable.ColumnProperty(name="timestamp", type="timestamp"),
                     ],
                     input_format="org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",

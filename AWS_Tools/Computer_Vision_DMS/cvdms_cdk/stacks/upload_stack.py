@@ -1,7 +1,3 @@
-from config import CONFIG
-from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig
-from stacks.upload_stack_utils import BatchingStage
-
 from aws_cdk import (
     Stack,
     RemovalPolicy,
@@ -20,6 +16,10 @@ from aws_cdk import (
     aws_dynamodb as dynamodb
 )
 from constructs import Construct
+
+from config import CONFIG
+from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig
+from stacks.upload_stack_utils import BatchingStage
 
 class ImageUploadStack(Stack):
     def __init__(self,
@@ -52,93 +52,93 @@ class ImageUploadStack(Stack):
         self.upload_events_queue = upload_events_queue
 
         # Creates Batch compute environment and job queue pointing to the compute environment.
-        job_queue = self._make_compute_env(CONFIG.compute_env)
+        # job_queue = self._make_compute_env(CONFIG.compute_env)
 
-        validation_stage = BatchingStage(
-            self, "validationStage",
-            stage_name="validationStage",
-            config=CONFIG.validation,
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database_name=self.athena_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq
-        )
-
-        internal_dedup_stage = BatchingStage(
-            self, "internalDedupStage",
-            stage_name="internalDedupStage",
-            config=CONFIG.internal_dedup,
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database_name=self.athena_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq
-        )
-
-
-        external_dedup_stage = BatchingStage(
-            self, "externalDedupStage",
-            stage_name="externalDedupStage",
-            config=CONFIG.external_dedup,
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database_name=self.athena_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq,
-            extra_container_env={'IMG_TYPE':sfn.JsonPath.string_at("$.img_type")},
-            extra_map_state_params={"img_type.$": "$.img_type"}
-        )
-
-        faiss_registration_stage = BatchingStage(
-            self, "faissRegistrationStage",
-            stage_name="faissRegistrationStage",
-            config=CONFIG.faiss_registration,
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database_name=self.athena_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq,
-        )
-
-        label_enrichment_stage = BatchingStage(
-            self, "labelEnrichmentStage",
-            stage_name="labelEnrichmentStage",
-            config=CONFIG.label_enrichment,
-            file_bucket=self.file_bucket,
-            job_table=self.job_table,
-            sha256_table=self.sha256_table,
-            phash_table=self.phash_table,
-            job_queue=job_queue,
-            athena_database_name=self.athena_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
-            region=self.region,
-            account=self.account,
-            global_dlq=self.global_dlq,
-        )
-
-        # Make cleanup lambda
-        cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
+        # validation_stage = BatchingStage(
+        #     self, "validationStage",
+        #     stage_name="validationStage",
+        #     config=CONFIG.validation,
+        #     file_bucket=self.file_bucket,
+        #     job_table=self.job_table,
+        #     sha256_table=self.sha256_table,
+        #     phash_table=self.phash_table,
+        #     job_queue=job_queue,
+        #     athena_database_name=self.athena_database_name,
+        #     ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+        #     region=self.region,
+        #     account=self.account,
+        #     global_dlq=self.global_dlq
+        # )
+        #
+        # internal_dedup_stage = BatchingStage(
+        #     self, "internalDedupStage",
+        #     stage_name="internalDedupStage",
+        #     config=CONFIG.internal_dedup,
+        #     file_bucket=self.file_bucket,
+        #     job_table=self.job_table,
+        #     sha256_table=self.sha256_table,
+        #     phash_table=self.phash_table,
+        #     job_queue=job_queue,
+        #     athena_database_name=self.athena_database_name,
+        #     ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+        #     region=self.region,
+        #     account=self.account,
+        #     global_dlq=self.global_dlq
+        # )
+        #
+        #
+        # external_dedup_stage = BatchingStage(
+        #     self, "externalDedupStage",
+        #     stage_name="externalDedupStage",
+        #     config=CONFIG.external_dedup,
+        #     file_bucket=self.file_bucket,
+        #     job_table=self.job_table,
+        #     sha256_table=self.sha256_table,
+        #     phash_table=self.phash_table,
+        #     job_queue=job_queue,
+        #     athena_database_name=self.athena_database_name,
+        #     ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+        #     region=self.region,
+        #     account=self.account,
+        #     global_dlq=self.global_dlq,
+        #     extra_container_env={'IMG_TYPE':sfn.JsonPath.string_at("$.img_type")},
+        #     extra_map_state_params={"img_type.$": "$.img_type"}
+        # )
+        #
+        # faiss_registration_stage = BatchingStage(
+        #     self, "faissRegistrationStage",
+        #     stage_name="faissRegistrationStage",
+        #     config=CONFIG.faiss_registration,
+        #     file_bucket=self.file_bucket,
+        #     job_table=self.job_table,
+        #     sha256_table=self.sha256_table,
+        #     phash_table=self.phash_table,
+        #     job_queue=job_queue,
+        #     athena_database_name=self.athena_database_name,
+        #     ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+        #     region=self.region,
+        #     account=self.account,
+        #     global_dlq=self.global_dlq,
+        # )
+        #
+        # label_enrichment_stage = BatchingStage(
+        #     self, "labelEnrichmentStage",
+        #     stage_name="labelEnrichmentStage",
+        #     config=CONFIG.label_enrichment,
+        #     file_bucket=self.file_bucket,
+        #     job_table=self.job_table,
+        #     sha256_table=self.sha256_table,
+        #     phash_table=self.phash_table,
+        #     job_queue=job_queue,
+        #     athena_database_name=self.athena_database_name,
+        #     ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+        #     region=self.region,
+        #     account=self.account,
+        #     global_dlq=self.global_dlq,
+        # )
+        #
+        # # Make cleanup lambda
+        # cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
         workflow_definition = (
             validation_stage.batching_task
@@ -154,6 +154,21 @@ class ImageUploadStack(Stack):
                 .next(cleanup_task)
         )
 
+        ta_first_step_lambda = _lambda.Function(
+            self, "taFirstStepSM",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="ta_first_step.handler",
+            code=_lambda.Code.from_asset("workers/lambdas"),
+            timeout=Duration.minutes(10),
+            environment={
+                    "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
+                    "ICEBERG_DATABASE_NAME": athena_database_name,
+                    "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
+                }
+        )
+        workflow_definition = (
+            ta_first_step_lambda
+        )
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
                               timeout=Duration.hours(CONFIG.upload_state_machine.duration_hours)

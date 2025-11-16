@@ -7,11 +7,12 @@ def normalize_record(record_body):
     Accept raw JSON or text and produce stable JSON structure:
     {
       "job_id": "<string>",
+      "user": "<string>",
       "event_type": "<string>",
       "message": "<string>",
-      "warnings": "<string or null>",
-      "errors": "<string or null>",
-      "timestamp": "<ISO8601 UTC>"
+      "warning": "<string or null>",
+      "error": "<string or null>",
+      "timestamp": "<ISO8601 timestamp UTC>"
     }
     """
     try:
@@ -23,27 +24,16 @@ def normalize_record(record_body):
     # tolerant normalization
     out = {}
     out["job_id"] = str(obj.get("job_id")) if obj.get("job_id") is not None else None
+    out["user"] = str(obj.get("user")) if obj.get("user") is not None else None
     out["event_type"] = obj.get("event_type") or obj.get("type") or "unknown"
     out["message"] = obj.get("message") or obj.get("msg") or ""
-    # ensure warnings/errors are strings or null
-    out["warnings"] = json.dumps(obj.get("warnings")) if obj.get("warnings") is not None else None
-    out["errors"] = json.dumps(obj.get("errors")) if obj.get("errors") is not None else None
+    out["warning"] = json.dumps(obj.get("warning")) if obj.get("warning") is not None else None
+    out["error"] = json.dumps(obj.get("error")) if obj.get("error") is not None else None
 
     # timestamp handling: accept numeric epoch, ISO strings, or create now
     ts = obj.get("timestamp")
     if ts is None:
-        out["timestamp"] = datetime.now(timezone.utc).isoformat()
-    else:
-        try:
-            # epoch in seconds
-            if isinstance(ts, (int, float)):
-                out["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            else:
-                # try parse as string
-                # a simple pass-through (assume valid ISO)
-                out["timestamp"] = str(ts)
-        except Exception:
-            out["timestamp"] = datetime.now(timezone.utc).isoformat()
+        out["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return out
 
