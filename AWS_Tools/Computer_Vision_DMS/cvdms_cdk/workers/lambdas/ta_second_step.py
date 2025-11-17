@@ -104,6 +104,6 @@ def handler(event, context):
         raise Exception(f"Could not set job status: {job_msg}")
     else:
         log(job_id_ko, user_ko, "Status of job set to COMPLETED in step function step 2")
-        log(job_id_ko, user_ko, f"The user from kickoff is {user_ko}, the user from step 1 output is {user_step1}")
+        log(job_id_ko, user_ko, f"The user from kickoff is {user_ko}, the user from step 1 output is {user_step1}, state machine is done.")
 
     return {'statusCode': 200, 'job_id': job_id_ko, 'user': user_ko, 'label_types': label_types_ko}

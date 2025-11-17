@@ -20,7 +20,6 @@ from constructs import Construct
 
 from config import CONFIG
 from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig
-from stacks.upload_stack_utils import BatchingStage
 
 class ImageUploadStack(Stack):
     def __init__(self,
