@@ -82,22 +82,28 @@ def handler(event, context):
     job_table = dynamodb.Table(JOB_TABLE_NAME)
 
     try:
-        job_id = event['job_id']
-        user = event['user']
-        label_types = event['label_types']
+        # kickoff input
+        job_id_ko = event['job_id']
+        user_ko = event['user']
+        label_types_ko =  event['label_types']
+
+        # step1 result (preferred if you trust step1 for canonical values)
+        step1 = event['step1']
+        job_id_step1 = step1['job_id']
+        user_step1 = step1['user']
+        label_types_step1 = step1['label_types']
     except KeyError as e:
         raise Exception(f"Could not get needed keys: {e}")
 
-    job_status_updated, job_msg = update_job_status(job_id,
-                                                    "IN_PROGRESS",
+    job_status_updated, job_msg = update_job_status(job_id_ko,
+                                                    "COMPLETED",
                                                     job_table)
 
     if not job_status_updated:
-        log(job_id, user, job_msg, error=job_msg, level="error")
+        log(job_id_ko, user_ko, job_msg, error=job_msg, level="error")
         raise Exception(f"Could not set job status: {job_msg}")
     else:
-        log(job_id, user, "Status of job set to in progress in step function step 1")
+        log(job_id_ko, user_ko, "Status of job set to COMPLETED in step function step 2")
+        log(job_id_ko, user_ko, f"The user from kickoff is {user_ko}, the user from step 1 output is {user_step1}")
 
-    return {'statusCode': 200, 'job_id': job_id, 'user': user, 'label_types': label_types}
-
-
+    return {'statusCode': 200, 'job_id': job_id_ko, 'user': user_ko, 'label_types': label_types_ko}

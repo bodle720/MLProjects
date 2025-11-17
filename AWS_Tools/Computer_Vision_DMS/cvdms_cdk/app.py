@@ -6,7 +6,7 @@ import sys
 from config import CONFIG
 from stacks.logging_stack import LoggingStack
 from stacks.storage_stack import StorageStack
-from stacks.upload_stack import ImageUploadStack
+from stacks.upload_stack_ta import ImageUploadStack # Change back to correct after testing
 
 APP_NAME = CONFIG.app_name
 
@@ -38,7 +38,8 @@ upload_stack = ImageUploadStack(
     lock_table=storage_stack.lock_table,
     global_dlq=storage_stack.global_dlq,
     athena_database_name=storage_stack.athena_database_name,
-    upload_events_queue =storage_stack.upload_events_queue,
+    upload_events_queue=storage_stack.upload_events_queue,
+    firehose_delivery_stream=logging_stack.firehose_delivery_stream,
     env=env
 )
 

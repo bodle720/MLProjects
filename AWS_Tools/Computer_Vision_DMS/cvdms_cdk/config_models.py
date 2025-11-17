@@ -9,6 +9,7 @@ class LoggingConfig:
     firehose_interval_in_seconds: int
     firehose_size_in_m_bs: int
     transform_lambda_duration_sec: int
+    transform_lambda_memory_size: int
 
 @dataclass
 class StorageConfig:

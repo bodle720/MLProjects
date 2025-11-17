@@ -38,7 +38,7 @@ class LoggingStack(Stack):
             handler="log_transformer.handler",
             code=_lambda.Code.from_asset(CONFIG.logging.transform_lambda_path),
             timeout=Duration.seconds(CONFIG.logging.transform_lambda_duration_sec),
-            memory_size=256
+            memory_size=CONFIG.logging.transform_lambda_memory_size
         )
 
         logs.LogRetention(self, "TransformLogRetention",
@@ -202,6 +202,6 @@ class LoggingStack(Stack):
 
         # Outputs
         self.log_bucket = log_bucket
-        self.firehose_delivery_stream_name = delivery_stream.ref
+        self.firehose_delivery_stream = delivery_stream
         self.glue_db_name = glue_db.ref
         self.glue_table_name = glue_table.table_input.name

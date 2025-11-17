@@ -34,6 +34,9 @@ def normalize_record(record_body):
     ts = obj.get("timestamp")
     if ts is None:
         out["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        out["timestamp"] = ts
+
 
     return out
 

@@ -10,6 +10,7 @@ CONFIG = AppConfig(
     logging=LoggingConfig(
         transform_lambda_path="workers/lambdas/logging",
         transform_lambda_duration_sec=60,
+        transform_lambda_memory_size=256,
         firehose_interval_in_seconds=60,
         firehose_size_in_m_bs=64
     ),
