@@ -28,6 +28,7 @@ class BatchingStage(Construct):
     def __init__(self, scope: Construct, id: str, *,
                  stage_name: str,
                  config: StageConfig,
+                 common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
                  sha256_table: dynamodb.Table,
@@ -65,6 +66,7 @@ class BatchingStage(Construct):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=config.file_batching.handler,
             code=_lambda.Code.from_asset(config.file_batching.path),
+            layers=[common_utils_layer],
             dead_letter_queue=global_dlq,
             memory_size=config.file_batching.memory_size,
             timeout=Duration.minutes(config.file_batching.timeout_min),
@@ -117,7 +119,8 @@ class BatchingStage(Construct):
         # 4. Batch job definition + task
         # build/publish local Docker image from a local path
         image_asset = ecr_assets.DockerImageAsset(self, f"{stage_name}TaskImage",
-                                                  directory=config.batch_task_job_def.path
+                                                  directory=config.batch_task_job_def.directory,
+                                                  file=config.batch_task_job_def.file
                                                   )
         container_image = ecs.ContainerImage.from_registry(image_asset.image_uri)
 
@@ -217,6 +220,7 @@ class ImageUploadStack(Stack):
                  scope: Construct,
                  construct_id: str,
                  app_name: str,
+                 common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
                  iceberg_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
@@ -244,6 +248,8 @@ class ImageUploadStack(Stack):
         self.athena_database_name = athena_database_name
         self.upload_events_queue = upload_events_queue
         self.firehose_delivery_stream = firehose_delivery_stream
+        self.common_utils_layer = common_utils_layer
+
         # Creates Batch compute environment and job queue pointing to the compute environment.
         # job_queue = self._make_compute_env(CONFIG.compute_env)
 
@@ -251,6 +257,7 @@ class ImageUploadStack(Stack):
         #     self, "validationStage",
         #     stage_name="validationStage",
         #     config=CONFIG.validation,
+        #     common_utils_layer=self.common_utils_layer,
         #     file_bucket=self.file_bucket,
         #     job_table=self.job_table,
         #     sha256_table=self.sha256_table,
@@ -267,6 +274,7 @@ class ImageUploadStack(Stack):
         #     self, "internalDedupStage",
         #     stage_name="internalDedupStage",
         #     config=CONFIG.internal_dedup,
+        #     common_utils_layer=self.common_utils_layer,
         #     file_bucket=self.file_bucket,
         #     job_table=self.job_table,
         #     sha256_table=self.sha256_table,
@@ -284,6 +292,7 @@ class ImageUploadStack(Stack):
         #     self, "externalDedupStage",
         #     stage_name="externalDedupStage",
         #     config=CONFIG.external_dedup,
+        #     common_utils_layer=self.common_utils_layer,
         #     file_bucket=self.file_bucket,
         #     job_table=self.job_table,
         #     sha256_table=self.sha256_table,
@@ -302,6 +311,7 @@ class ImageUploadStack(Stack):
         #     self, "faissRegistrationStage",
         #     stage_name="faissRegistrationStage",
         #     config=CONFIG.faiss_registration,
+        #     common_utils_layer=self.common_utils_layer,
         #     file_bucket=self.file_bucket,
         #     job_table=self.job_table,
         #     sha256_table=self.sha256_table,
@@ -318,6 +328,7 @@ class ImageUploadStack(Stack):
         #     self, "labelEnrichmentStage",
         #     stage_name="labelEnrichmentStage",
         #     config=CONFIG.label_enrichment,
+        #     common_utils_layer=self.common_utils_layer,
         #     file_bucket=self.file_bucket,
         #     job_table=self.job_table,
         #     sha256_table=self.sha256_table,
@@ -347,20 +358,8 @@ class ImageUploadStack(Stack):
         #         .next(cleanup_task)
         # )
 
-        ta_first_step_lambda = _lambda.Function(
-            self, "taFirstStepSM",
-            runtime=_lambda.Runtime.PYTHON_3_11,
-            handler="ta_first_step.handler",
-            code=_lambda.Code.from_asset("workers/lambdas"),
-            timeout=Duration.minutes(10),
-            environment={
-                    "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
-                    "ICEBERG_DATABASE_NAME": athena_database_name,
-                    "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
-                }
-        )
         workflow_definition = (
-            ta_first_step_lambda
+
         )
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
@@ -454,6 +453,7 @@ class ImageUploadStack(Stack):
     #         runtime=_lambda.Runtime.PYTHON_3_11,
     #         handler=cleanup_config.handler,
     #         code=_lambda.Code.from_asset(cleanup_config.path),
+    #         layers = [self.common_utils_layer],
     #         dead_letter_queue=self.global_dlq,
     #         memory_size=cleanup_config.memory_size,
     #         timeout=Duration.seconds(cleanup_config.timeout_sec),
@@ -498,6 +498,7 @@ class ImageUploadStack(Stack):
                 runtime=_lambda.Runtime.PYTHON_3_11,
                 handler=kickoff_config.handler,
                 code=_lambda.Code.from_asset(kickoff_config.path),
+                layers=[self.common_utils_layer],
                 dead_letter_queue=self.global_dlq,
                 memory_size=kickoff_config.memory_size,
                 timeout=Duration.seconds(kickoff_config.timeout_sec),

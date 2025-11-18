@@ -30,6 +30,7 @@ upload_stack = ImageUploadStack(
     app,
     f"{APP_NAME}-UploadStack",
     app_name=APP_NAME,
+    common_utils_layer=logging_stack.common_utils_layer,
     file_bucket=storage_stack.file_bucket,
     iceberg_bucket=storage_stack.iceberg_bucket,
     job_table=storage_stack.job_table,

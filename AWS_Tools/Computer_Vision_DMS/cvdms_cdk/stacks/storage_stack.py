@@ -363,3 +363,58 @@ class StorageStack(Stack):
         self.datasets_table = datasets_table
         self.athena_database_name = athena_database_name
         self.upload_events_queue = upload_events_queue
+
+        # SSM params
+        # Buckets
+        ssm.StringParameter(self, "FileBucketNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/file_bucket_name",
+                            string_value=file_bucket.bucket_name
+                            )
+
+        ssm.StringParameter(self, "IcebergBucketNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/iceberg_bucket_name",
+                            string_value=iceberg_bucket.bucket_name
+                            )
+
+        # Glue / Athena
+        ssm.StringParameter(self, "AthenaDatabaseNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/athena_database_name",
+                            string_value=athena_database_name
+                            )
+
+        # DynamoDB Tables
+        ssm.StringParameter(self, "JobTableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/job_table_name",
+                            string_value=job_table.table_name
+                            )
+
+        ssm.StringParameter(self, "DatasetsTableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/datasets_table_name",
+                            string_value=datasets_table.table_name
+                            )
+
+        ssm.StringParameter(self, "LockTableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/lock_table_name",
+                            string_value=lock_table.table_name
+                            )
+
+        ssm.StringParameter(self, "Sha256TableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/sha256_table_name",
+                            string_value=sha256_table.table_name
+                            )
+
+        ssm.StringParameter(self, "PhashTableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/phash_table_name",
+                            string_value=phash_table.table_name
+                            )
+
+        # Queues
+        ssm.StringParameter(self, "GlobalDlqNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/global_dlq_name",
+                            string_value=dlq.queue_name
+                            )
+
+        ssm.StringParameter(self, "UploadEventsQueueNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/upload_events_queue_name",
+                            string_value=upload_events_queue.queue_name
+                            )

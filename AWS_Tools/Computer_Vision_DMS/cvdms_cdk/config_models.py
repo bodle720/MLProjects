@@ -29,7 +29,8 @@ class FileBatchingConfig:
 class BatchTaskJobDefConfig:
     vcpus: int
     memory_limit_mib: int
-    path: str
+    directory: str
+    file: str
 
 @dataclass
 class StageConfig:

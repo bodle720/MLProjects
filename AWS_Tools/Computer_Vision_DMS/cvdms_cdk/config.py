@@ -16,7 +16,7 @@ CONFIG = AppConfig(
     ),
     storage=StorageConfig(
         ddl_lambda_path="workers/lambdas/storage/iceberg_ddl",
-        delete_db_lambda_path="workers/lambdas/storage/delete_db",
+        delete_db_lambda_path="workers/lambdas/storage",
         provider_ddl_lambda_path="workers/lambdas/storage",
         provider_cleanup_lambda_path = "workers/lambdas/storage"
 ),
@@ -36,7 +36,8 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="workers/batch_jobs/upload/validation"
+            directory="workers",
+            file="batch_jobs/upload/validation/Dockerfile"
         )
     ),
     internal_dedup=StageConfig(
@@ -49,7 +50,8 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="workers/batch_jobs/upload/internal_dedup"
+            directory="workers",
+            file="batch_jobs/upload/internal_dedup/Dockerfile"
         )
     ),
     external_dedup=StageConfig(
@@ -62,7 +64,8 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=4096,
-            path="workers/batch_jobs/upload/external_dedup"
+            directory="workers",
+            file="batch_jobs/upload/external_dedup/Dockerfile"
         )
     ),
     faiss_registration=StageConfig(
@@ -75,7 +78,8 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="workers/batch_jobs/upload/faiss_registration"
+            directory="workers",
+            file="batch_jobs/upload/faiss_registration/Dockerfile"
         )
     ),
     label_enrichment=StageConfig(
@@ -88,7 +92,8 @@ CONFIG = AppConfig(
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
-            path="workers/batch_jobs/upload/label_enrichment"
+            directory="workers",
+            file="batch_jobs/upload/label_enrichment/Dockerfile"
         )
     ),
     kickoff_lambda=KickoffLambdaConfig(

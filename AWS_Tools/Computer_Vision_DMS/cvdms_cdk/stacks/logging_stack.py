@@ -6,6 +6,7 @@ from aws_cdk import (
     aws_iam as iam,
     aws_s3 as s3,
     aws_logs as logs,
+    aws_ssm as ssm,
     aws_lambda as _lambda,
     aws_kinesisfirehose as firehose,
     aws_glue as glue
@@ -23,6 +24,15 @@ class LoggingStack(Stack):
                  **kwargs) -> None:
 
         super().__init__(scope, construct_id, **kwargs)
+
+        # Create a Lambda Layer from the common utilities
+        common_layer = _lambda.LayerVersion(
+            self,
+            "CommonUtilsLayer",
+            code=_lambda.Code.from_asset("workers/common"),
+            compatible_runtimes=[_lambda.Runtime.PYTHON_3_11],
+            description="Shared utilities for all Lambda functions"
+        )
 
         # --- S3 bucket for Parquet logs (auto-delete on destroy) ---
         log_bucket = s3.Bucket(self, "LogsBucket",
@@ -205,3 +215,28 @@ class LoggingStack(Stack):
         self.firehose_delivery_stream = delivery_stream
         self.glue_db_name = glue_db.ref
         self.glue_table_name = glue_table.table_input.name
+        self.common_utils_layer = common_layer
+
+        # SSM for users: store bucket name in SSM
+        ssm.StringParameter(self, "LogBucketNameParam",
+            parameter_name=f"/cvdms/{app_name}/logging/log_bucket_name",
+            string_value=log_bucket.bucket_name
+        )
+
+        # Glue DB name
+        ssm.StringParameter(self, "GlueDbNameParam",
+            parameter_name=f"/cvdms/{app_name}/logging/glue_db_name",
+            string_value=glue_db.ref
+        )
+
+        # Glue Table name
+        ssm.StringParameter(self, "GlueTableNameParam",
+            parameter_name=f"/cvdms/{app_name}/logging/glue_table_name",
+            string_value=glue_table.table_input.name
+        )
+
+        # Firehose stream name (optional but useful)
+        ssm.StringParameter(self, "FirehoseStreamNameParam",
+            parameter_name=f"/cvdms/{app_name}/logging/firehose_stream_name",
+            string_value=delivery_stream.ref  # or delivery_stream.attr_name depending on what you need
+        )

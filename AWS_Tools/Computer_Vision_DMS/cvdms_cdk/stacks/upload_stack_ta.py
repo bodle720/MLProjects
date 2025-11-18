@@ -26,6 +26,7 @@ class ImageUploadStack(Stack):
                  scope: Construct,
                  construct_id: str,
                  app_name: str,
+                 common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
                  iceberg_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
@@ -51,6 +52,7 @@ class ImageUploadStack(Stack):
         self.athena_database_name = athena_database_name
         self.upload_events_queue = upload_events_queue
         self.firehose_delivery_stream = firehose_delivery_stream
+        self.common_utils_layer = common_utils_layer
 
         self.send_to_dlq = tasks.CallAwsService(self, "SendToDLQ",
                                            service="sqs",
@@ -96,6 +98,7 @@ class ImageUploadStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=kickoff_config.handler,
             code=_lambda.Code.from_asset(kickoff_config.path),
+            layers=[self.common_utils_layer],
             dead_letter_queue=self.global_dlq,
             memory_size=kickoff_config.memory_size,
             timeout=Duration.seconds(kickoff_config.timeout_sec),
@@ -142,6 +145,7 @@ class ImageUploadStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="ta_first_step.handler",
             code=_lambda.Code.from_asset("workers/lambdas"),
+            layers=[self.common_utils_layer],
             dead_letter_queue=self.global_dlq,
             memory_size=256,
             timeout=Duration.seconds(60),
@@ -190,6 +194,7 @@ class ImageUploadStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="ta_second_step.handler",
             code=_lambda.Code.from_asset("workers/lambdas"),
+            layers=[self.common_utils_layer],
             dead_letter_queue=self.global_dlq,
             memory_size=256,
             timeout=Duration.seconds(60),

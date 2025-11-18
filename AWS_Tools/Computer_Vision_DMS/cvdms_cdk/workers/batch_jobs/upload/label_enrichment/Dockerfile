@@ -5,14 +5,17 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Copy requirements first to leverage Docker layer caching
-COPY requirements.txt .
+COPY batch_jobs/upload/label_enrichment/requirements.txt .
 
 # Upgrade pip and install dependencies
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY src .
+COPY batch_jobs/upload/label_enrichment/src/ .
+COPY common/ /opt/common/
 
-# Set the default command to run your internal deup job
+ENV PYTHONPATH="/opt/common:${PYTHONPATH}"
+
+# Set the default command to run your external deup job
 CMD ["python", "main.py"]

@@ -1,6 +1,7 @@
 import os, json, logging, boto3, time
 import faiss
 import numpy as np
+from common.utils import update_job_status, log
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)

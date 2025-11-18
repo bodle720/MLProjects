@@ -15,14 +15,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker layer caching
-COPY requirements.txt .
+COPY batch_jobs/upload/validation/requirements.txt .
 
 # Upgrade pip and install dependencies
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY src .
+COPY batch_jobs/upload/label_enrichment/src/ .
+COPY common/ /opt/common/
+
+ENV PYTHONPATH="/opt/common:${PYTHONPATH}"
 
 # Set the default command to run your validation job
 CMD ["python", "main.py"]
