@@ -34,7 +34,7 @@ def update_job_status(job_id,
             return False, f"job not found: {job_id}"
         return False, str(e)
 
-def log(job_id, user, message, event_type, stream_name, warning=None, error=None, level="info"):
+def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
     entry = {
         "job_id": job_id,
         "user": user,

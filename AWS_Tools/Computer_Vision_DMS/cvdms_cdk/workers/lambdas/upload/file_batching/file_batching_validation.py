@@ -4,8 +4,7 @@ import boto3
 import logging
 import datetime
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+from common.utils import log
 
 s3 = boto3.client("s3")
 
@@ -17,20 +16,6 @@ SAFETY_FACTOR = 0.5  # only use ~50% of memory for image data
 
 max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
 IMAGES_PER_BATCH = min(max_images, 200)  # cap at 200 for sanity
-
-def log(job_id, user, job_type, message, level="info"):
-    logged_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    entry = {
-        "job_id": job_id,
-        "user": user,
-        "job_type": job_type,
-        "logged_at": logged_at,
-        "message": message,
-    }
-    if level == "error":
-        logger.error(json.dumps(entry))
-    else:
-        logger.info(json.dumps(entry))
 
 def handler(event, context):
 

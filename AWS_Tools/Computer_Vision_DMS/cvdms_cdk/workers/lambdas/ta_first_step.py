@@ -6,10 +6,8 @@ from datetime import datetime, timezone
 import boto3
 from botocore.exceptions import ClientError
 
+# Lambda layer import
 from common.utils import update_job_status, log
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
 FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
@@ -34,10 +32,20 @@ def handler(event, context):
                                                     job_table)
 
     if not job_status_updated:
-        log(job_id, user, job_msg, error=job_msg, level="error")
+        log(job_id,
+            user,
+            EVENT_TYPE,
+            job_msg,
+            FIREHOSE_STREAM_NAME,
+            error=job_msg,
+            level='error')
         raise Exception(f"Could not set job status: {job_msg}")
     else:
-        log(job_id, user, "Status of job set to in progress in step function step 1")
+        log(job_id,
+            user,
+            EVENT_TYPE,
+            "Status of job set to in progress in step function step 1",
+            FIREHOSE_STREAM_NAME)
 
     return {'statusCode': 200, 'job_id': job_id, 'user': user, 'label_types': label_types}
 

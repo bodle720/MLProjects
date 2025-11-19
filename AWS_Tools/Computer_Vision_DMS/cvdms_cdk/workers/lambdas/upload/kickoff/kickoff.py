@@ -7,8 +7,8 @@ from urllib.parse import unquote_plus
 import boto3
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Lambda layer import
+from common.utils import update_job_status, log
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -22,67 +22,6 @@ firehose = boto3.client("firehose")
 sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
-
-def log(job_id, user, message, warning=None, error=None, level="info"):
-    entry = {
-        "job_id": job_id,
-        "user": user,
-        "event_type": EVENT_TYPE,
-        "message": message,
-        "warning": warning,
-        "error": error,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    }
-
-    # CloudWatch log for operational visibility
-    line = json.dumps(entry)
-    if level.lower() == "error":
-        logger.error(line)
-    else:
-        logger.info(line)
-
-    # Firehose DirectPut (JSON line)
-    try:
-        firehose.put_record(
-            DeliveryStreamName=FIREHOSE_STREAM_NAME,
-            Record={"Data": (line + "\n").encode("utf-8")}
-        )
-    except Exception as e:
-        # Do not fail the handler—your design prefers non-DLQ behavior.
-        # Optionally log the failure; avoid recursion by not calling log() again.
-        logger.error(json.dumps({
-            "job_id": job_id,
-            "user": user,
-            "event_type": EVENT_TYPE,
-            "message": "Failed to put log to Firehose",
-            "error": str(e),
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        }))
-
-def update_job_status(job_id,
-                      status,
-                      job_table,
-                      error_msg=None):
-
-    valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
-
-    if status not in valid_statuses:
-        return False, f"invalid status: {status}"
-
-    try:
-        job_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, #e = :e",
-            ExpressionAttributeNames={"#s": "status", "#e": "errors"},
-            ExpressionAttributeValues={":s": status, ":e": error_msg},
-            ConditionExpression="attribute_exists(job_id)",
-        )
-        return True, ""
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code == "ConditionalCheckFailedException":
-            return False, f"job not found: {job_id}"
-        return False, str(e)
 
 def list_label_types(bucket_name: str, job_id: str) -> list:
     """
@@ -158,12 +97,24 @@ def validate_labels(bucket, job_id, label_types, user):
                 missing_in_labels = sorted(set(image_bases) - set(label_bases))
                 extra_in_labels = sorted(set(label_bases) - set(image_bases))
                 error_msg = f"Mismatch for {label_type}. Missing labels for: {missing_in_labels}. Extra labels for: {extra_in_labels}"
-                log(job_id, user, f"Mismatch for label type {label_type}", error = error_msg, level = 'error')
+                log(job_id,
+                    user,
+                    EVENT_TYPE,
+                    f"Mismatch for label type {label_type}",
+                    FIREHOSE_STREAM_NAME,
+                    error = error_msg,
+                    level = 'error')
                 raise ValueError(error_msg)
 
             if len(image_bases) != len(label_bases):
                 error_msg = f"Count mismatch for {label_type}. images={len(image_bases)} labels={len(label_bases)}"
-                log(job_id, user, f"Count mismatch for label type {label_type}", error = error_msg, level = 'error')
+                log(job_id,
+                    user,
+                    EVENT_TYPE,
+                    f"Count mismatch for label type {label_type}",
+                    FIREHOSE_STREAM_NAME,
+                    error = error_msg,
+                    level = 'error')
                 raise ValueError(error_msg)
 
         elif label_type == "semantic_masks":
@@ -182,15 +133,31 @@ def validate_labels(bucket, job_id, label_types, user):
                 extra_json = sorted(set(mask_json_bases) - set(image_bases))
 
                 error_msg = f"Semantic masks mismatch. PNG missing: {missing_png}, PNG extra: {extra_png}, JSON missing: {missing_json}, JSON extra: {extra_json}"
-                log(job_id, user, f"Mask mismatch for label type {label_type}", error = error_msg, level = 'error')
+                log(job_id,
+                    user,
+                    EVENT_TYPE,
+                    f"Mask mismatch for label type {label_type}",
+                    FIREHOSE_STREAM_NAME,
+                    error = error_msg,
+                    level = 'error')
                 raise ValueError(error_msg)
 
             if len(image_bases) != len(mask_png_bases) or len(image_bases) != len(mask_json_bases):
                 error_msg = f"Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
-                log(job_id, user, f"Mask count mismatch for label type {label_type}", error = error_msg, level = 'error')
+                log(job_id,
+                    user,
+                    EVENT_TYPE,
+                    f"Mask count mismatch for label type {label_type}",
+                    FIREHOSE_STREAM_NAME,
+                    error = error_msg,
+                    level = 'error')
                 raise ValueError(error_msg)
 
-        log(job_id, user, f"Found {len(image_bases)} images and labels for {label_type}")
+        log(job_id,
+            user,
+            EVENT_TYPE,
+            f"Found {len(image_bases)} images and labels for {label_type}",
+            FIREHOSE_STREAM_NAME)
 
 # ---------- Handler ----------
 def handler(event, context):
@@ -199,7 +166,6 @@ def handler(event, context):
     # Guard: ensure there's at least one record
     records = event.get("Records", [])
     if not records:
-        log("unknown", "unknown", "No Records in event", error="empty event", level="error")
         return {"status": "failed", "job_id": 'unknown', "error": "No Records in event"}
 
     # Use the first SQS record (batch_size=1 configured)
@@ -208,19 +174,16 @@ def handler(event, context):
     # SQS message body contains the S3 notification JSON as a string
     body = sqs_rec.get("body")
     if not body:
-        log("unknown", "unknown", "SQS record missing body", error=str(sqs_rec), level="error")
         return {"status": "failed", "job_id": 'unknown', "error": "SQS record missing body"}
 
     try:
         body_json = json.loads(body)
     except Exception as e:
-        log("unknown", "unknown", "Failed to parse SQS body as JSON", error=str(e), level="error")
         return {"status": "failed", "job_id": 'unknown', "error": f"Failed to parse SQS body as JSON: {str(e)}"}
 
     # Expect the S3 notification inside body_json["Records"][0]["s3"]
     s3_records = body_json.get("Records", [])
     if not s3_records:
-        log("unknown", "unknown", "No S3 Records inside SQS body", error=str(body_json), level="error")
         return {"status": "failed", "job_id": 'unknown', "error": "No S3 Records inside SQS body"}
 
     s3_rec = s3_records[0]
@@ -229,7 +192,6 @@ def handler(event, context):
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
     if bucket != FILE_BUCKET_NAME:
-        log("unknown", "unknown", f"Bucket mismatch: got {bucket}", error=f"expected {FILE_BUCKET_NAME}", level="error")
         return {"status": "failed", "job_id": 'unknown', "error": f"Bucket mismatch in upload kickoff lambda"}
 
     # Now proceed with your existing logic to fetch job.json, validate, etc.
@@ -240,7 +202,13 @@ def handler(event, context):
         job_id = job_data["job_id"]
         user = job_data["user"]
     except Exception as e:
-        log(job_id, user, "Upload Kickoff Lambda could not initialize job_id and user.", error=str(e), level="error")
+        log(job_id,
+            user,
+            EVENT_TYPE,
+            "Upload Kickoff Lambda could not initialize job_id and user.",
+            FIREHOSE_STREAM_NAME,
+            error=str(e),
+            level='error')
 
         if job_id != 'unknown':
             job_status_updated, job_msg = update_job_status(job_id,
@@ -249,7 +217,13 @@ def handler(event, context):
                                                            error_msg=str(e))
 
             if not job_status_updated:
-                log(job_id, user, job_msg, error=job_msg, level="error")
+                log(job_id,
+                    user,
+                    EVENT_TYPE,
+                    job_msg,
+                    FIREHOSE_STREAM_NAME,
+                    error=job_msg,
+                    level='error')
 
         return {"status": "failed", "job_id": job_id, "error": f"Upload Kickoff Lambda could not initialize job_id and user: {str(e)}"}
 
@@ -258,9 +232,11 @@ def handler(event, context):
         if key != expected_key:
             log(job_id,
                 user,
+                EVENT_TYPE,
                 f"The key found ({key}) does not match expected key of {expected_key}",
-                error=f"The key found ({key}) does not match expected key of {expected_key}",
-                level="error")
+                FIREHOSE_STREAM_NAME,
+                error= f"The key found ({key}) does not match expected key of {expected_key}",
+                level='error')
 
             return {"status": "failed", "job_id": job_id, "error": f"job_id in job.json does not match key path: {key} vs {expected_key}"}
 
@@ -294,13 +270,17 @@ def handler(event, context):
         if not job_status_updated:
             log(job_id,
                 user,
+                EVENT_TYPE,
                 job_msg,
-                error=job_msg,
-                level="error")
+                FIREHOSE_STREAM_NAME,
+                error= job_msg,
+                level='error')
 
         log(job_id,
             user,
-            f"Kickoff Lambda started state machine execution {response['executionArn']}. Job status update to IN_PROGRESS succeeded={job_status_updated}")
+            EVENT_TYPE,
+            f"Kickoff Lambda started state machine execution {response['executionArn']}. Job status update to IN_PROGRESS succeeded={job_status_updated}",
+            FIREHOSE_STREAM_NAME)
 
         return {"status": "ok",
                 "job_id": job_id,
@@ -317,14 +297,18 @@ def handler(event, context):
         if not job_status_updated:
             log(job_id,
                 user,
+                EVENT_TYPE,
                 job_msg,
-                error=job_msg,
-                level="error")
+                FIREHOSE_STREAM_NAME,
+                error= job_msg,
+                level='error')
 
         log(job_id,
             user,
+            EVENT_TYPE,
             "Kickoff Lambda failed",
+            FIREHOSE_STREAM_NAME,
             error=str(e),
-            level="error")
+            level='error')
 
         return {"status": "failed", "job_id": job_id, "error": str(e)}
