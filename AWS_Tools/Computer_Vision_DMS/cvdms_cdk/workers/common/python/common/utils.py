@@ -9,31 +9,6 @@ logger.setLevel(logging.INFO)
 
 firehose = boto3.client("firehose")
 
-def update_job_status(job_id,
-                      status,
-                      job_table,
-                      error_msg=None):
-
-    valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
-
-    if status not in valid_statuses:
-        return False, f"invalid status: {status}"
-
-    try:
-        job_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, #e = :e",
-            ExpressionAttributeNames={"#s": "status", "#e": "errors"},
-            ExpressionAttributeValues={":s": status, ":e": error_msg},
-            ConditionExpression="attribute_exists(job_id)",
-        )
-        return True, ""
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code == "ConditionalCheckFailedException":
-            return False, f"job not found: {job_id}"
-        return False, str(e)
-
 def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
     entry = {
         "job_id": job_id,
@@ -69,3 +44,32 @@ def log(job_id, user, event_type, message, stream_name, warning=None, error=None
             "error": str(e),
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         }))
+
+def update_job_status(job_id,
+                      status,
+                      job_table,
+                      stream_name,
+                      user = 'unknown',
+                      event_type = 'unknown',
+                      error_msg=None):
+
+    valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
+    if status not in valid_statuses:
+        log(job_id, user, event_type, "Job status update failed.", stream_name, error=f"Failed to update job status because status {status} is invalid.", level="error")
+        return False, f"invalid status: {status}"
+
+    try:
+        job_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :s, #e = :e",
+            ExpressionAttributeNames={"#s": "status", "#e": "errors"},
+            ExpressionAttributeValues={":s": status, ":e": error_msg},
+            ConditionExpression="attribute_exists(job_id)",
+        )
+        return True, ""
+    except ClientError as e:
+        log(job_id, user, event_type, "Job status update failed.", stream_name, error=f"Failed to update job status because status due to error: {e}", level="error")
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            return False, f"job not found: {job_id}"
+        return False, str(e)

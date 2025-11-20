@@ -7,7 +7,7 @@ from urllib.parse import unquote_plus
 import boto3
 from botocore.exceptions import ClientError
 
-# Lambda layer import
+# Lambda layer imports
 from common.utils import update_job_status, log
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
@@ -22,36 +22,6 @@ firehose = boto3.client("firehose")
 sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
-
-def list_label_types(bucket_name: str, job_id: str) -> list:
-    """
-    Return list of immediate subfolders under temp/image-upload/<job_id>/.
-    Example return: ['string_labels', 'semantic_masks']
-    Raises ValueError if none of the expected label types are found.
-    """
-    prefix = f"temp/image-upload/{job_id}/"
-    paginator = s3.get_paginator("list_objects_v2")
-    page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix, Delimiter="/")
-
-    found = set()
-    for page in page_iterator:
-        for cp in page.get("CommonPrefixes", []):
-            # CommonPrefix looks like "temp/image-upload/<job_id>/string_labels/"
-            common = cp.get("Prefix")
-            if not common:
-                continue
-            # extract the folder name after the job prefix
-            suffix = common[len(prefix):].rstrip("/")  # e.g. "string_labels"
-            if suffix:
-                found.add(suffix)
-
-    # Intersect with expected types (ignore other folders like "images/")
-    label_types = sorted(found & ALLOWED_LABEL_TYPES)
-
-    if not label_types:
-        raise ValueError(f"No label subfolders found for job {job_id}; expected one of {sorted(ALLOWED_LABEL_TYPES)}")
-
-    return label_types
 
 def list_keys(bucket, prefix):
     keys = []
@@ -82,7 +52,7 @@ def require_no_duplicates(name_list, kind):
 def validate_labels(bucket, job_id, label_types, user):
     image_keys = list_keys(bucket, f"temp/image-upload/{job_id}/images/")
     image_bases = basenames_from_keys(
-        image_keys, allowed_exts={".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        image_keys, allowed_exts={".jpg", ".jpeg", ".png"}
     )
     require_no_duplicates(image_bases, "images")
 
@@ -97,24 +67,10 @@ def validate_labels(bucket, job_id, label_types, user):
                 missing_in_labels = sorted(set(image_bases) - set(label_bases))
                 extra_in_labels = sorted(set(label_bases) - set(image_bases))
                 error_msg = f"Mismatch for {label_type}. Missing labels for: {missing_in_labels}. Extra labels for: {extra_in_labels}"
-                log(job_id,
-                    user,
-                    EVENT_TYPE,
-                    f"Mismatch for label type {label_type}",
-                    FIREHOSE_STREAM_NAME,
-                    error = error_msg,
-                    level = 'error')
                 raise ValueError(error_msg)
 
             if len(image_bases) != len(label_bases):
                 error_msg = f"Count mismatch for {label_type}. images={len(image_bases)} labels={len(label_bases)}"
-                log(job_id,
-                    user,
-                    EVENT_TYPE,
-                    f"Count mismatch for label type {label_type}",
-                    FIREHOSE_STREAM_NAME,
-                    error = error_msg,
-                    level = 'error')
                 raise ValueError(error_msg)
 
         elif label_type == "semantic_masks":
@@ -131,35 +87,15 @@ def validate_labels(bucket, job_id, label_types, user):
                 extra_png = sorted(set(mask_png_bases) - set(image_bases))
                 missing_json = sorted(set(image_bases) - set(mask_json_bases))
                 extra_json = sorted(set(mask_json_bases) - set(image_bases))
-
                 error_msg = f"Semantic masks mismatch. PNG missing: {missing_png}, PNG extra: {extra_png}, JSON missing: {missing_json}, JSON extra: {extra_json}"
-                log(job_id,
-                    user,
-                    EVENT_TYPE,
-                    f"Mask mismatch for label type {label_type}",
-                    FIREHOSE_STREAM_NAME,
-                    error = error_msg,
-                    level = 'error')
                 raise ValueError(error_msg)
 
             if len(image_bases) != len(mask_png_bases) or len(image_bases) != len(mask_json_bases):
                 error_msg = f"Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
-                log(job_id,
-                    user,
-                    EVENT_TYPE,
-                    f"Mask count mismatch for label type {label_type}",
-                    FIREHOSE_STREAM_NAME,
-                    error = error_msg,
-                    level = 'error')
                 raise ValueError(error_msg)
 
-        log(job_id,
-            user,
-            EVENT_TYPE,
-            f"Found {len(image_bases)} images and labels for {label_type}",
-            FIREHOSE_STREAM_NAME)
+        log(job_id, user, EVENT_TYPE, f"Found {len(image_bases)} images and labels for label type = {label_type}", FIREHOSE_STREAM_NAME)
 
-# ---------- Handler ----------
 def handler(event, context):
     job_table = dynamodb.Table(JOB_TABLE_NAME)
 
@@ -195,63 +131,29 @@ def handler(event, context):
         return {"status": "failed", "job_id": 'unknown', "error": f"Bucket mismatch in upload kickoff lambda"}
 
     # Now proceed with your existing logic to fetch job.json, validate, etc.
+    job_id = None
+    user = 'unknown'
     try:
-        job_id = user = 'unknown'
         obj = s3.get_object(Bucket=bucket, Key=key)
         job_data = json.loads(obj["Body"].read().decode("utf-8"))
         job_id = job_data["job_id"]
         user = job_data["user"]
+        num_images = job_data["num_images"]
+        label_types = job_data["label_types"]
     except Exception as e:
-        log(job_id,
-            user,
-            EVENT_TYPE,
-            "Upload Kickoff Lambda could not initialize job_id and user.",
-            FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level='error')
-
-        if job_id != 'unknown':
-            job_status_updated, job_msg = update_job_status(job_id,
-                                                          "FAILED",
-                                                            job_table,
-                                                           error_msg=str(e))
-
-            if not job_status_updated:
-                log(job_id,
-                    user,
-                    EVENT_TYPE,
-                    job_msg,
-                    FIREHOSE_STREAM_NAME,
-                    error=job_msg,
-                    level='error')
-
-        return {"status": "failed", "job_id": job_id, "error": f"Upload Kickoff Lambda could not initialize job_id and user: {str(e)}"}
+        if job_id:
+            log(job_id, user, EVENT_TYPE, "Upload Kickoff Lambda could not initialize job_id, user, num_images, and label_types from manifest", FIREHOSE_STREAM_NAME, error=str(e), level='error')
+            update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user = user, event_type = EVENT_TYPE, error_msg=str(e))
+        return {"status": "failed", "error": f"Upload Kickoff Lambda could not initialize expected manifest fields: {str(e)}"}
 
     try:
-        expected_key = f"temp/image-upload/{job_id}/job.json"
-        if key != expected_key:
-            log(job_id,
-                user,
-                EVENT_TYPE,
-                f"The key found ({key}) does not match expected key of {expected_key}",
-                FIREHOSE_STREAM_NAME,
-                error= f"The key found ({key}) does not match expected key of {expected_key}",
-                level='error')
+        validate_labels(bucket, job_id, label_types, user)
+    except Exception as e:
+        log(job_id, user, EVENT_TYPE, "Error validating labels in kickoff lambda.", FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user=user, event_type=EVENT_TYPE, error_msg=str(e))
+        return {"status": "failed", "job_id": job_id, "error": f"Error validating labels: {str(e)}"}
 
-            return {"status": "failed", "job_id": job_id, "error": f"job_id in job.json does not match key path: {key} vs {expected_key}"}
-
-        # get the label types for this upload workflow, extracted from tag names in s3
-        try:
-            label_types = list_label_types(FILE_BUCKET_NAME, job_id)
-        except Exception as e:
-            return {"status": "failed", "job_id": job_id, "error": f"Error listing label types: {str(e)}"}
-
-        try:
-            validate_labels(bucket, job_id, label_types, user)
-        except Exception as e:
-            return {"status": "failed", "job_id": job_id, "error": f"Error validating labels: {str(e)}"}
-
-        # First try to start the workflow
+    try:
         response = sf.start_execution(
             stateMachineArn=UPLOAD_STATE_MACHINE_ARN,
             name = f"{job_id}-{int(datetime.now().timestamp() * 1000)}"[:80],
@@ -261,54 +163,16 @@ def handler(event, context):
                 "label_types": label_types
             })
         )
-
-        # If we got here, Step Function execution started successfully
-        job_status_updated, job_msg = update_job_status(job_id,
-                                               "IN_PROGRESS",
-                                                        job_table)
-
-        if not job_status_updated:
-            log(job_id,
-                user,
-                EVENT_TYPE,
-                job_msg,
-                FIREHOSE_STREAM_NAME,
-                error= job_msg,
-                level='error')
-
-        log(job_id,
-            user,
-            EVENT_TYPE,
-            f"Kickoff Lambda started state machine execution {response['executionArn']}. Job status update to IN_PROGRESS succeeded={job_status_updated}",
-            FIREHOSE_STREAM_NAME)
-
-        return {"status": "ok",
-                "job_id": job_id,
-                "user": user,
-                "event_type": EVENT_TYPE,
-                "label_types": label_types}
-
     except Exception as e:
-        job_status_updated, job_msg = update_job_status(job_id,
-                                                       "FAILED",
-                                                        job_table,
-                                                        error_msg=str(e))
+        log(job_id, user, EVENT_TYPE, "Error starting state machine for upload workflow.", FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user=user, event_type=EVENT_TYPE, error_msg=str(e))
+        return {"status": "failed", "job_id": job_id, "error": f"Error starting the step function for uploading: {str(e)}"}
 
-        if not job_status_updated:
-            log(job_id,
-                user,
-                EVENT_TYPE,
-                job_msg,
-                FIREHOSE_STREAM_NAME,
-                error= job_msg,
-                level='error')
+    log(job_id, user, EVENT_TYPE, f"Kickoff Lambda started state machine execution {response['executionArn']}", FIREHOSE_STREAM_NAME)
 
-        log(job_id,
-            user,
-            EVENT_TYPE,
-            "Kickoff Lambda failed",
-            FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level='error')
-
-        return {"status": "failed", "job_id": job_id, "error": str(e)}
+    return {"status": "ok",
+            "job_id": job_id,
+            "user": user,
+            "event_type": EVENT_TYPE,
+            "label_types": label_types,
+            "num_images":num_images}

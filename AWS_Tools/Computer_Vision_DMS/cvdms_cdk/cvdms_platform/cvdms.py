@@ -1,7 +1,7 @@
-# cvdms_platform/cvdms.py
 from functools import lru_cache
 from typing import Optional, Dict, Tuple, List
 import os
+import logging
 
 import boto3
 from botocore.exceptions import ClientError
@@ -9,7 +9,7 @@ from botocore.exceptions import ClientError
 from .clients import UploadClient
 
 SSM_PREFIX_TEMPLATE = "/cvdms/{app}/"
-REQUIRED_KEYS = ["job_table_name", "lock_table_name", "file_bucket_name"]
+REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name"]
 
 def _session_for_profile(profile_name: Optional[str]) -> boto3.Session:
     # prefer explicit profile; boto3 will use default if profile_name is None
@@ -52,6 +52,30 @@ class CvdmsApp:
     """
 
     def __init__(self, app_name: str, profile_name: Optional[str]):
+
+        main_dir = os.path.dirname(__file__)
+        logs_folder = os.path.join(main_dir, 'logs')
+        os.makedirs(logs_folder, exist_ok=True)
+
+        # Configure logging settings
+        logging_save_to = os.path.join(logs_folder, 'logs.txt')
+        logger = logging.getLogger()
+        if logger.hasHandlers():
+            logger.handlers.clear()
+        logger.setLevel(logging.INFO)
+
+        file_handler = logging.FileHandler(logging_save_to)
+        console_handler = logging.StreamHandler()
+
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+
+        logging.info('Instantiating user instance.')
+
         if not app_name:
             raise ValueError("app_name is required")
         if not profile_name:
@@ -74,31 +98,33 @@ class CvdmsApp:
         # quick credentials check
         try:
             sts = session.client("sts", region_name=region)
-            sts.get_caller_identity()
+            identity = sts.get_caller_identity()
+            user = identity["Arn"].split("/")[-1]
         except Exception as e:
             raise RuntimeError(f"Could not validate AWS credentials for profile '{profile_name}': {e}")
 
         # load and validate SSM params in resolved region
         cfg = _load_ssm_params(session=session, app_name=app_name, region_name=region)
+        logging.info(f"Using AWS profile: {profile_name}, user = {user}, region: {region}, passed config loading step.")
 
         # map SSM keys to UploadClient args and validate presence
-        file_bucket = cfg.get("file_bucket")
-        job_table = cfg.get("job_table")
-        lock_table = cfg.get("lock_table")
-        if not (file_bucket and job_table and lock_table):
-            missing = [k for k in ("file_bucket", "job_table", "lock_table") if not cfg.get(k)]
+        file_bucket_name = cfg.get("storage/file_bucket_name")
+        job_table_name = cfg.get("storage/job_table_name")
+        lock_table_name = cfg.get("storage/lock_table_name")
+        if not (file_bucket_name and job_table_name and lock_table_name):
+            missing = [k for k in ("storage/file_bucket_name", "storage/job_table_name", "storage/lock_table_name") if not cfg.get(k)]
             raise RuntimeError(f"Missing required SSM params for app {app_name}: {missing}")
 
         # construct UploadClient; it will create its own boto3 clients using the region
-        self._client = UploadClient(
+        self._upload_client = UploadClient(
             region_name=region,
-            file_bucket=file_bucket,
-            job_table=job_table,
-            lock_table=lock_table,
+            user=user,
+            file_bucket_name=file_bucket_name,
+            job_table_name=job_table_name,
+            lock_table_name=lock_table_name,
         )
 
-    def upload_imagery(self, csv_path: str, *, summary: str = "", dataset_id: Optional[str] = None) -> Tuple[bool, Dict]:
-        return self._client.start_upload_job_from_csv(csv_path, summary=summary, dataset_id=dataset_id)
+        logging.info('Instantiation complete.')
 
-    def update_job_status(self, job_id: str, status: str, error_msg: Optional[str] = None) -> Tuple[bool, str]:
-        return self._client.update_job_status(job_id, status, error_msg)
+    def upload_imagery(self, csv_path: str, *, summary: str = "") -> Tuple[bool, Dict]:
+        return self._upload_client.start_upload_job_from_csv(csv_path, summary=summary)

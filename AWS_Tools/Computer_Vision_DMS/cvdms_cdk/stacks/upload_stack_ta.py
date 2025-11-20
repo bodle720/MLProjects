@@ -67,7 +67,6 @@ class ImageUploadStack(Stack):
         send_to_dlq_fail = sfn.Fail(self, "SendToDLQFail", cause="StepFailed", error="StepError")
         self.send_to_dlq.next(send_to_dlq_fail)
 
-
         step1_task = self._make_first_step_lambda()
         step2_task = self._make_second_step_lambda()
 

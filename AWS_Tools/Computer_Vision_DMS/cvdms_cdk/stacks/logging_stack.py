@@ -218,6 +218,12 @@ class LoggingStack(Stack):
         self.common_utils_layer = common_layer
 
         # SSM for users: store bucket name in SSM
+        ssm.StringParameter(self, "RegionNameParam",
+            parameter_name=f"/cvdms/{app_name}/region",
+            string_value=self.region
+        )
+
+        # SSM for users: store bucket name in SSM
         ssm.StringParameter(self, "LogBucketNameParam",
             parameter_name=f"/cvdms/{app_name}/logging/log_bucket_name",
             string_value=log_bucket.bucket_name
