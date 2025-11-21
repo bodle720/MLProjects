@@ -10,6 +10,8 @@ from botocore.exceptions import ClientError
 from common.utils import log
 
 FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+print('The firehose stream name is = ', FIREHOSE_STREAM_NAME)
+
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 
 firehose = boto3.client("firehose")

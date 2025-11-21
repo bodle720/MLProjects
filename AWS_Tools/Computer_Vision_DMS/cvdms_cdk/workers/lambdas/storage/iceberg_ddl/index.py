@@ -25,7 +25,6 @@ class AthenaError(RuntimeError):
 def _remaining_seconds(context) -> float:
     return max(0.0, (context.get_remaining_time_in_millis() / 1000.0) - 2.0)
 
-
 def start_query_with_retries(query: str, context, max_attempts: int = MAX_ATTEMPTS) -> str:
     """Start Athena query with retries on transient errors. Returns QueryExecutionId."""
     attempt = 0
@@ -47,7 +46,6 @@ def start_query_with_retries(query: str, context, max_attempts: int = MAX_ATTEMP
                 raise AthenaError(f"start_query_execution failed after {attempt} attempts: {e}")
             backoff = min(BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)) + random.random(), MAX_BACKOFF_SECONDS)
             time.sleep(backoff)
-
 
 def wait_for_query(qid: str, context, max_attempts: int = MAX_ATTEMPTS) -> dict:
     """Wait for Athena query execution to finish, with retries for get_query_execution polling."""
@@ -74,7 +72,6 @@ def wait_for_query(qid: str, context, max_attempts: int = MAX_ATTEMPTS) -> dict:
                 raise AthenaError(f"get_query_execution failed and not enough remaining time: {e}")
             time.sleep(min(2 ** random.randint(0, 3), 5.0))
 
-
 def run_athena_query(query: str, context):
     """Start and wait for an Athena query, raise on failure with details."""
     qid = start_query_with_retries(query, context)
@@ -86,8 +83,7 @@ def run_athena_query(query: str, context):
         raise AthenaError(f"Athena query {qid} failed with state={state}. Reason: {reason}. Query: {query}")
     return qid
 
-
-def glue_table_exists_with_retry(database: str, table: str, context, attempts: int = 6) -> bool:
+def glue_table_exists_with_retry(database: str, table: str, context, attempts: int = 10) -> bool:
     """Validate table presence in Glue with retries (Glue can be eventually consistent)."""
     for attempt in range(1, attempts + 1):
         try:
@@ -106,7 +102,6 @@ def glue_table_exists_with_retry(database: str, table: str, context, attempts: i
         time.sleep(backoff)
     return False
 
-
 def safe_split_sql(sql_text: str) -> list:
     """
     Very small splitter that assumes semicolons are only used as statement terminators.
@@ -114,7 +109,6 @@ def safe_split_sql(sql_text: str) -> list:
     """
     statements = [stmt.strip() for stmt in sql_text.split(";") if stmt.strip()]
     return statements
-
 
 def handler(event, context):
     start_time = time.time()
@@ -175,7 +169,7 @@ def handler(event, context):
                     db_name = db_name.strip().strip("`").strip('"')
                     valid = glue_table_exists_with_retry(db_name, table_name, context)
                     if not valid:
-                        raise RuntimeError(f"Glue validation failed for table {db_name}.{table_name}")
+                        print(f'Warning: table {table_name} has not been verified to exist in Glue yet.')
             except Exception as e:
                 print(f"Glue validation parsing error for statement: {e}")
                 # Not fatal in all cases, but surface; if you want strictness, raise here
@@ -184,4 +178,3 @@ def handler(event, context):
     elapsed = time.time() - start_time
     print(json.dumps({"msg": "DDL lambda completed", "duration_seconds": elapsed}))
     return {"status": "ok", "duration_seconds": elapsed}
-

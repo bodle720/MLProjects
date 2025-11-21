@@ -6,9 +6,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict
 import logging
-
+import time
 import boto3
 from botocore.exceptions import ClientError
+from botocore.client import BaseClient
+from boto3.resources.base import ServiceResource
 
 ISO_NOW = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -27,21 +29,20 @@ class UploadClient:
     """
     def __init__(self,
                  *,
-                 region_name: str,
                  user: str,
                  file_bucket_name: str,
                  job_table_name: str,
                  lock_table_name: str,
-                 s3_client: Optional[boto3.client] = None,
-                 dynamodb_resource: Optional[boto3.resource] = None):
+                 s3_client: BaseClient,
+                 dynamodb_resource: ServiceResource):
 
         self.user = user
         self.file_bucket_name = file_bucket_name
         self.job_table_name = job_table_name
         self.lock_table_name = lock_table_name
 
-        self.s3 = s3_client or boto3.client("s3", region_name=region_name)
-        self.dynamodb = dynamodb_resource or boto3.resource("dynamodb", region_name=region_name)
+        self.s3 = s3_client
+        self.dynamodb = dynamodb_resource
 
         self.job_table = self.dynamodb.Table(self.job_table_name)
         self.lock_table = self.dynamodb.Table(self.lock_table_name)
@@ -66,15 +67,14 @@ class UploadClient:
             logging.error(f"Failed updating job status: {e}")
             return False, f"dynamodb_error: {e}"
 
-    def acquire_lock(self, lock_id: str = "global", holder: Optional[str] = None) -> Tuple[bool, str]:
+    def acquire_lock(self, lock_id: str = "global") -> Tuple[bool, str]:
         """
         Try to set locked = True, locked_by = holder (job_id).
         Returns (True, "") on success, (False, error_message) on failure.
         Uses conditional update so only one caller can win.
         """
-        if holder is None:
-            holder = str(uuid.uuid4())
-
+        holder = str(uuid.uuid4())
+        logging.info(f"Acquiring lock for job id {lock_id}, new potential holder = {holder}, used lock table name {self.lock_table_name}")
         try:
             self.lock_table.update_item(
                 Key={"lock_id": lock_id},
@@ -85,6 +85,7 @@ class UploadClient:
             )
             return True, holder
         except ClientError as e:
+            logging.error('Unable to acquire lock for lock id {lock_id}, error message: {e}')
             code = e.response.get("Error", {}).get("Code", "")
             if code == "ConditionalCheckFailedException":
                 return False, "lock_already_held"
@@ -158,6 +159,15 @@ class UploadClient:
         df = df[df["path"].notnull()]
         df = df.drop_duplicates(subset=["path"])
         df = df[df["path"].apply(os.path.exists)]
+
+        if "string_labels" in df.columns:
+            df["string_labels"] = (
+                df["string_labels"]
+                .astype(str)  # ensure string type
+                .str.strip()  # remove leading/trailing spaces
+                .str.lower()  # lowercase
+                .str.replace(r"\s+", "_")  # replace internal spaces with underscores
+            )
 
         image_format_validator = lambda path: os.path.splitext(path)[1].lower() in [".jpg", ".jpeg", ".png"]
 
@@ -259,6 +269,7 @@ class UploadClient:
             return False, "No DataFrame loaded. Run start_upload_job_from_csv first."
 
         prefix = f"temp/image-upload/{job_id}"
+        manifest_prefix = "temp/image-upload"
         try:
             for _, row in self.df.iterrows():
                 image_path = row["path"]
@@ -315,7 +326,7 @@ class UploadClient:
                 "num_images": len(self.df),
                 "label_types": [col for col in self.df.columns if col in VALID_LABEL_COLUMNS and col != "mask_map"]
             }
-            manifest_key = f"{prefix}/job.json"
+            manifest_key = f"{manifest_prefix}/job.json"
             self.s3.put_object(
                 Bucket=self.file_bucket_name,
                 Key=manifest_key,
@@ -389,4 +400,80 @@ class UploadClient:
         logging.info("Done uploading files to S3.")
         self.update_job_status(job_id, "IN_PROGRESS", error_msg=msg)
 
-        return True, {"status": "success", "job_id": job_id}
+        return True, {"submission_status": "success", "job_id": job_id}
+
+class LogClient:
+    """
+    High-level client to query logs.
+    """
+    def __init__(self,
+                 *,
+                 glue_db_name: str,
+                 glue_table_name: str,
+                 log_bucket_name: str,
+                 athena_client: BaseClient):
+
+        self.glue_db_name = glue_db_name
+        self.glue_table_name = glue_table_name
+        self.log_bucket_name = log_bucket_name
+        self.athena = athena_client
+
+
+    def _run_query(self, query: str) -> Dict:
+        resp = self.athena.start_query_execution(
+            QueryString=query,
+            QueryExecutionContext={"Database": self.glue_db_name},
+            ResultConfiguration={
+                "OutputLocation": f"s3://{self.log_bucket_name}/athena-results/"
+            }
+        )
+        qid = resp["QueryExecutionId"]
+
+        # poll until finished
+        while True:
+            status = self.athena.get_query_execution(QueryExecutionId=qid)
+            state = status["QueryExecution"]["Status"]["State"]
+            if state in ["SUCCEEDED", "FAILED", "CANCELLED"]:
+                break
+            time.sleep(2)
+
+        if state != "SUCCEEDED":
+            raise RuntimeError(f"Athena query failed with state {state}")
+
+        return self.athena.get_query_results(QueryExecutionId=qid)
+
+    def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict, Optional[pd.DataFrame]]:
+        try:
+            # Step 1: repair partitions so new data is visible
+            self._run_query(f"MSCK REPAIR TABLE {self.glue_table_name}")
+
+            # Step 2: run the actual log query
+            results = self._run_query(
+                f"""
+                SELECT *
+                FROM {self.glue_table_name}
+                WHERE job_id = '{job_id}'
+                ORDER BY timestamp DESC
+                """
+            )
+
+            # Extract column names
+            columns = [col["Name"] for col in results["ResultSet"]["ResultSetMetadata"]["ColumnInfo"]]
+
+            # Extract rows (skip the header row)
+            rows = results["ResultSet"]["Rows"][1:]
+            data = []
+            for row in rows:
+                values = []
+                for cell in row.get("Data", []):
+                    values.append(cell.get("VarCharValue"))
+                data.append(values)
+
+            # Build DataFrame if we have data
+            df = pd.DataFrame(data, columns=columns) if data else None
+
+            return True, results, df
+
+        except Exception as e:
+            logging.error(f"Error querying Athena: {e}")
+            return False, {"error": str(e)}, None

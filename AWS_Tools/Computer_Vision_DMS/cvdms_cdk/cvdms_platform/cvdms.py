@@ -1,15 +1,17 @@
 from functools import lru_cache
 from typing import Optional, Dict, Tuple, List
 import os
+import sys
 import logging
 
 import boto3
 from botocore.exceptions import ClientError
 
-from .clients import UploadClient
+from .clients import UploadClient, LogClient
 
 SSM_PREFIX_TEMPLATE = "/cvdms/{app}/"
-REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name"]
+REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name",
+                 "logging/log_bucket_name", "logging/glue_db_name", "logging/glue_table_name"]
 
 def _session_for_profile(profile_name: Optional[str]) -> boto3.Session:
     # prefer explicit profile; boto3 will use default if profile_name is None
@@ -54,7 +56,7 @@ class CvdmsApp:
     def __init__(self, app_name: str, profile_name: Optional[str]):
 
         main_dir = os.path.dirname(__file__)
-        logs_folder = os.path.join(main_dir, 'logs')
+        logs_folder = os.path.join(main_dir, 'api_logs')
         os.makedirs(logs_folder, exist_ok=True)
 
         # Configure logging settings
@@ -65,7 +67,7 @@ class CvdmsApp:
         logger.setLevel(logging.INFO)
 
         file_handler = logging.FileHandler(logging_save_to)
-        console_handler = logging.StreamHandler()
+        console_handler = logging.StreamHandler(sys.stdout)
 
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         file_handler.setFormatter(formatter)
@@ -117,14 +119,26 @@ class CvdmsApp:
 
         # construct UploadClient; it will create its own boto3 clients using the region
         self._upload_client = UploadClient(
-            region_name=region,
             user=user,
             file_bucket_name=file_bucket_name,
             job_table_name=job_table_name,
             lock_table_name=lock_table_name,
+            s3_client=session.client("s3", region_name=region),
+            dynamodb_resource=session.resource("dynamodb", region_name=region),
         )
+
+        logging_glue_db_name = cfg.get("logging/glue_db_name")
+        logging_glue_table_name = cfg.get("logging/glue_table_name")
+        log_bucket_name = cfg.get("logging/log_bucket_name")
+        self._log_client = LogClient(glue_db_name=logging_glue_db_name,
+                                     glue_table_name=logging_glue_table_name,
+                                     log_bucket_name=log_bucket_name,
+                                     athena_client=session.client("athena", region_name=region))
 
         logging.info('Instantiation complete.')
 
     def upload_imagery(self, csv_path: str, *, summary: str = "") -> Tuple[bool, Dict]:
         return self._upload_client.start_upload_job_from_csv(csv_path, summary=summary)
+
+    def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict]:
+        return self._log_client.get_logs_by_job_id(job_id)

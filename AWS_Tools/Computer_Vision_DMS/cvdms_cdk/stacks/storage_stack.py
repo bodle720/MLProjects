@@ -73,6 +73,29 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
+        seed_lock = cr.AwsCustomResource(
+            self, "SeedLockRow",
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=[lock_table.table_arn]
+            ),
+            on_create=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="putItem",
+                parameters={
+                    "TableName": lock_table.table_name,
+                    "Item": {
+                        "lock_id": {"S": "global"},
+                        "locked": {"BOOL": False}
+                    },
+                    # Only insert if lock_id doesn't already exist
+                    "ConditionExpression": "attribute_not_exists(lock_id)"
+                },
+                physical_resource_id=cr.PhysicalResourceId.of("SeedLockRowResource"),
+            ),
+        )
+
+        seed_lock.node.add_dependency(lock_table)
+
         # Datasets table
         datasets_table = dynamodb.Table(
             self, "DatasetsTable",
@@ -134,7 +157,7 @@ class StorageStack(Stack):
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="index.handler",
             code=_lambda.Code.from_asset(CONFIG.storage.ddl_lambda_path),
-            timeout=Duration.minutes(10),
+            timeout=Duration.minutes(15),
             environment={
                     "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
                     "ICEBERG_DATABASE_NAME": athena_database_name,

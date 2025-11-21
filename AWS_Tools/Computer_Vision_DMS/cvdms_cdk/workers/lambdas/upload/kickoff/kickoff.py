@@ -97,6 +97,7 @@ def validate_labels(bucket, job_id, label_types, user):
         log(job_id, user, EVENT_TYPE, f"Found {len(image_bases)} images and labels for label type = {label_type}", FIREHOSE_STREAM_NAME)
 
 def handler(event, context):
+
     job_table = dynamodb.Table(JOB_TABLE_NAME)
 
     # Guard: ensure there's at least one record

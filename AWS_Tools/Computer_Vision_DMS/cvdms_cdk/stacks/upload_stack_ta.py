@@ -175,7 +175,8 @@ class ImageUploadStack(Stack):
         step1_task = tasks.LambdaInvoke(self, "Step1Task",
                                         lambda_function=ta_first_step_lambda,
                                         result_path="$.step1",
-                                        output_path="$")
+                                        output_path="$",
+                                        payload_response_only=True)
 
         step1_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
 
@@ -224,7 +225,8 @@ class ImageUploadStack(Stack):
         step2_task = tasks.LambdaInvoke(self, "Step2Task",
                                         lambda_function=ta_second_step_lambda,
                                         result_path="$.step2",
-                                        output_path="$")
+                                        output_path="$",
+                                        payload_response_only=True)
 
         step2_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
 

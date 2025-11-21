@@ -18,6 +18,7 @@ def normalize_record(record_body):
     try:
         obj = json.loads(record_body)
     except Exception:
+        print(f'Could not load json record_body {record_body}')
         # not JSON, wrap raw text as message
         obj = {"message": record_body}
 
@@ -27,16 +28,17 @@ def normalize_record(record_body):
     out["user"] = str(obj.get("user")) if obj.get("user") is not None else None
     out["event_type"] = obj.get("event_type") or obj.get("type") or "unknown"
     out["message"] = obj.get("message") or obj.get("msg") or ""
-    out["warning"] = json.dumps(obj.get("warning")) if obj.get("warning") is not None else None
-    out["error"] = json.dumps(obj.get("error")) if obj.get("error") is not None else None
+    out["warning"] = str(obj.get("warning")) if obj.get("warning") is not None else None
+    out["error"] = str(obj.get("error")) if obj.get("error") is not None else None
 
     # timestamp handling: accept numeric epoch, ISO strings, or create now
     ts = obj.get("timestamp")
-    if ts is None:
-        out["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(ts, (int, float)):
+        out["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif ts:
+        out["timestamp"] = str(ts)
     else:
-        out["timestamp"] = ts
-
+        out["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return out
 
@@ -53,10 +55,13 @@ def handler(event, context):
         # Firehose gives base64 data
         try:
             raw = base64.b64decode(rec.get("data")).decode("utf-8")
-        except Exception:
+        except Exception as e:
+            print(f"Issue decoding, setting raw = empty string for rec = {rec}, error = {e}")
             raw = ""
 
         normalized = normalize_record(raw)
+        print("Normalized record = ", normalized) # for debugging
+
         # Firehose JSON->Parquet conversion expects JSON lines; send back a JSON string per record.
         out_data = json.dumps(normalized) + "\n"
         out_b64 = base64.b64encode(out_data.encode("utf-8")).decode("utf-8")

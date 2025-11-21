@@ -34,7 +34,7 @@ def log(job_id, user, event_type, message, stream_name, warning=None, error=None
             Record={"Data": (line + "\n").encode("utf-8")}
         )
     except Exception as e:
-        # Do not fail the handler—your design prefers non-DLQ behavior.
+        # Do not fail the handler—the design prefers non-DLQ behavior.
         # Optionally log the failure; avoid recursion by not calling log() again.
         logger.error(json.dumps({
             "job_id": job_id,

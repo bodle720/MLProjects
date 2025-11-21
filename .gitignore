@@ -3,6 +3,8 @@
 
 # Any script generated logs.
 logs/
+api_logs/
+sample/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
