@@ -6,7 +6,7 @@ import sys
 from config import CONFIG
 from stacks.logging_stack import LoggingStack
 from stacks.storage_stack import StorageStack
-from stacks.upload_stack_ta import ImageUploadStack # Change back to correct after testing
+from stacks.upload_stack_ta2 import ImageUploadStack # Change back to correct after testing
 
 APP_NAME = CONFIG.app_name
 

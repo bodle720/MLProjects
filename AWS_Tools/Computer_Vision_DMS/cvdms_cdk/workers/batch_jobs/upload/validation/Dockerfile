@@ -22,7 +22,7 @@ RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY batch_jobs/upload/label_enrichment/src/ .
+COPY batch_jobs/upload/validation/src/ .
 COPY common/ /opt/common/
 
 ENV PYTHONPATH="/opt/common:${PYTHONPATH}"

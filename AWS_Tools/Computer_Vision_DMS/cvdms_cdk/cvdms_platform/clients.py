@@ -116,7 +116,7 @@ class UploadClient:
                        job_id: str,
                        *,
                        summary: str = "",
-                       job_type: str = "IMAGE_UPLOAD") -> Tuple[bool, str]:
+                       event_type: str = "") -> Tuple[bool, str]:
         """
         Insert initial job row with status=PENDING. Returns (True,"") or (False,error).
         Uses a condition to avoid overwriting an existing job_id.
@@ -126,7 +126,7 @@ class UploadClient:
             "created_at": ISO_NOW(),
             "status": "PENDING",
             "summary": summary,
-            "job_type": job_type,
+            "event_type": event_type,
             "errors": "",
         }
 
@@ -260,7 +260,7 @@ class UploadClient:
         except Exception as e:
             return False, f"delete_error: {e}"
 
-    def upload_files_to_s3(self, job_id: str) -> Tuple[bool, str]:
+    def upload_files_to_s3(self, job_id: str, source: str = "") -> Tuple[bool, str]:
         """
         Uploads all files referenced in self.df to the appropriate S3 temp folder for the given job_id.
         Returns (True, "success") or (False, error_message).
@@ -324,6 +324,7 @@ class UploadClient:
                 "job_id": job_id,
                 "user": self.user,
                 "num_images": len(self.df),
+                "source":source,
                 "label_types": [col for col in self.df.columns if col in VALID_LABEL_COLUMNS and col != "mask_map"]
             }
             manifest_key = f"{manifest_prefix}/job.json"
@@ -348,8 +349,7 @@ class UploadClient:
                                   csv_path: str,
                                   *,
                                   summary: str = "",
-                                  job_type: str = "IMAGE_UPLOAD",
-                                  lock_id: str = "global") -> Tuple[bool, Dict]:
+                                  source: str = "") -> Tuple[bool, Dict]:
         """
         High-level operation a caller will use. Steps:
           1) try to acquire lock
@@ -359,6 +359,7 @@ class UploadClient:
 
         This method keeps errors explicit so callers can decide to retry or inspect.
         """
+        lock_id = "global"
         # try to acquire lock
         ok, holder_or_err = self.acquire_lock(lock_id=lock_id)
         if not ok:
@@ -369,7 +370,7 @@ class UploadClient:
         logging.info(f"Acquired lock: {job_id}")
 
         # create job row
-        ok, err = self.create_job_row(job_id, summary=summary, job_type=job_type)
+        ok, err = self.create_job_row(job_id, summary=summary, event_type="IMAGE_UPLOAD")
         if not ok:
             logging.error(f"Failed to create job row: {err}")
             # release lock before returning
@@ -390,7 +391,7 @@ class UploadClient:
 
         # At this point we have job_id, PENDING row, and self.df to upload to temp folder.
         logging.info("CSV loaded in and validated.")
-        ok, msg = self.upload_files_to_s3(job_id)
+        ok, msg = self.upload_files_to_s3(job_id, source=source)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
             self.update_job_status(job_id, "FAILED", error_msg=msg)

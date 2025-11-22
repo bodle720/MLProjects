@@ -140,10 +140,11 @@ def handler(event, context):
         job_id = job_data["job_id"]
         user = job_data["user"]
         num_images = job_data["num_images"]
+        source = job_data["source"]
         label_types = job_data["label_types"]
     except Exception as e:
         if job_id:
-            log(job_id, user, EVENT_TYPE, "Upload Kickoff Lambda could not initialize job_id, user, num_images, and label_types from manifest", FIREHOSE_STREAM_NAME, error=str(e), level='error')
+            log(job_id, user, EVENT_TYPE, "Upload Kickoff Lambda could not initialize job_id, user, num_images, source, and label_types from manifest", FIREHOSE_STREAM_NAME, error=str(e), level='error')
             update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user = user, event_type = EVENT_TYPE, error_msg=str(e))
         return {"status": "failed", "error": f"Upload Kickoff Lambda could not initialize expected manifest fields: {str(e)}"}
 
@@ -161,7 +162,8 @@ def handler(event, context):
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
-                "label_types": label_types
+                "label_types": label_types,
+                "source":source.lower()
             })
         )
     except Exception as e:
@@ -176,4 +178,5 @@ def handler(event, context):
             "user": user,
             "event_type": EVENT_TYPE,
             "label_types": label_types,
-            "num_images":num_images}
+            "num_images":num_images,
+            "source":source}

@@ -51,7 +51,7 @@ def update_job_status(job_id,
                       stream_name,
                       user = 'unknown',
                       event_type = 'unknown',
-                      error_msg=None):
+                      error_msg = None):
 
     valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
     if status not in valid_statuses:

@@ -8,7 +8,9 @@ from common.utils import log
 
 s3 = boto3.client("s3")
 
-BUCKET = os.environ["FILE_BUCKET_NAME"]
+FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+
 # You can tune this constant
 MAX_MEMORY_MB = 2048 # from the job definition for validation step
 IMAGE_SIZE_MB = 3  # worst-case per image
@@ -17,6 +19,8 @@ SAFETY_FACTOR = 0.5  # only use ~50% of memory for image data
 max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
 IMAGES_PER_BATCH = min(max_images, 200)  # cap at 200 for sanity
 
+EVENT_TYPE = "IMAGE_UPLOAD"
+
 def handler(event, context):
 
     job_id = user = 'UNKNOWN'
@@ -24,19 +28,19 @@ def handler(event, context):
     try:
         job_id = event["job_id"]
         user = event["user"]
-        job_type = event["job_type"]
-        label_type = event["label_type"]
+        label_types = event["label_types"]
+        source = event["source"]
     except KeyError as e:
-        log(job_id, user, "IMAGE_UPLOAD", f"Missing key(s) for batching event on image upload: {e}.", level="error")
+        log(job_id, user, EVENT_TYPE, f"Missing key(s) for batching event on image upload.", LOG_FIREHOSE_STREAM_NAME, error = str(e), level="error")
         raise
 
-    log(job_id, user, job_type, f"Starting batching of images for image upload validation job id {job_id}.")
+    log(job_id, user, EVENT_TYPE, f"Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 
     # Images are assumed to be under temp/image-upload/{job_id}/images/
     image_keys = []
     continuation_token = None
     prefix = f"temp/image-upload/{job_id}/images/"
-    kwargs = {"Bucket": BUCKET, "Prefix": prefix}
+    kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": prefix}
     iteration_cap = 9_000_000 # for safety, likely unneeded
     iteration_count = 0
     while True and (iteration_count < iteration_cap):
@@ -50,7 +54,8 @@ def handler(event, context):
         continuation_token = resp["NextContinuationToken"]
 
     if len(image_keys) == 0:
-        log(job_id, user, "IMAGE_UPLOAD", f"No images found under {prefix}", level="error")
+        err_msg = f"No images found under {prefix}"
+        log(job_id, user, EVENT_TYPE, err_msg, LOG_FIREHOSE_STREAM_NAME, error = err_msg, level="error")
         raise
 
     # Chunk into batches
@@ -65,19 +70,21 @@ def handler(event, context):
         manifest_key = f"temp/image-upload/{job_id}/batches/validation-step/batch-{idx:03d}.json"
 
         s3.put_object(
-            Bucket=BUCKET,
+            Bucket=FILE_BUCKET_NAME,
             Key=manifest_key,
             Body=json.dumps(manifest).encode("utf-8"),
             ContentType="application/json"
         )
 
-        manifest_keys.append(f"s3://{BUCKET}/{manifest_key}")
+        manifest_keys.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
 
-    log(job_id, user, job_type, f"Done batching {len(image_keys)} total images for image upload validation: label type = {label_type}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch.")
+    msg = f"Done batching {len(image_keys)} total images for image upload validation: label types = {label_types}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
+    log(job_id, user, EVENT_TYPE, msg, LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,
         "user": user,
-        "label_type": label_type,
+        "label_types": label_types,
+        "source":source,
         "manifests": manifest_keys
     }
