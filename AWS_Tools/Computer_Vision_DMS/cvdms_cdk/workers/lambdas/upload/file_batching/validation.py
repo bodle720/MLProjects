@@ -2,7 +2,6 @@ import os
 import json
 import boto3
 import logging
-import datetime
 
 from common.utils import log
 
@@ -19,8 +18,6 @@ SAFETY_FACTOR = 0.5  # only use ~50% of memory for image data
 max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
 IMAGES_PER_BATCH = min(max_images, 200)  # cap at 200 for sanity
 
-EVENT_TYPE = "IMAGE_UPLOAD"
-
 def handler(event, context):
 
     job_id = user = 'UNKNOWN'
@@ -30,11 +27,12 @@ def handler(event, context):
         user = event["user"]
         label_types = event["label_types"]
         source = event["source"]
+        event_type = event["event_type"]
     except KeyError as e:
-        log(job_id, user, EVENT_TYPE, f"Missing key(s) for batching event on image upload.", LOG_FIREHOSE_STREAM_NAME, error = str(e), level="error")
+        log(job_id, user, "IMAGE_UPLOAD", f"Missing key(s) for batching event on image upload.", LOG_FIREHOSE_STREAM_NAME, error = str(e), level="error")
         raise
 
-    log(job_id, user, EVENT_TYPE, f"Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 
     # Images are assumed to be under temp/image-upload/{job_id}/images/
     image_keys = []
@@ -55,7 +53,7 @@ def handler(event, context):
 
     if len(image_keys) == 0:
         err_msg = f"No images found under {prefix}"
-        log(job_id, user, EVENT_TYPE, err_msg, LOG_FIREHOSE_STREAM_NAME, error = err_msg, level="error")
+        log(job_id, user, event_type, err_msg, LOG_FIREHOSE_STREAM_NAME, error = err_msg, level="error")
         raise
 
     # Chunk into batches
@@ -79,12 +77,13 @@ def handler(event, context):
         manifest_keys.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
 
     msg = f"Done batching {len(image_keys)} total images for image upload validation: label types = {label_types}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
-    log(job_id, user, EVENT_TYPE, msg, LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,
         "user": user,
         "label_types": label_types,
         "source":source,
+        "event_type": event_type,
         "manifests": manifest_keys
     }

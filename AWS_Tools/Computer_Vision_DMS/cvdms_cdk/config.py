@@ -2,7 +2,7 @@ from config_models import (
     AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
     StageConfig, FileBatchingConfig, BatchTaskJobDefConfig,
     KickoffLambdaConfig, CleanupLambdaConfig, StorageConfig,
-    LoggingConfig
+    LoggingConfig, DLQProcessorConfig
 )
 
 CONFIG = AppConfig(
@@ -19,7 +19,13 @@ CONFIG = AppConfig(
         delete_db_lambda_path="workers/lambdas/storage",
         provider_ddl_lambda_path="workers/lambdas/storage",
         provider_cleanup_lambda_path = "workers/lambdas/storage"
-),
+    ),
+    dlq_processor=DLQProcessorConfig(
+            path="workers/lambdas/storage",
+            handler="dlq_processor.handler",
+            memory_size=512,
+            timeout_sec=30
+        ),
     compute_env=ComputeEnvConfig(
         minv_cpus=0,
         maxv_cpus=64,
@@ -29,7 +35,7 @@ CONFIG = AppConfig(
     validation=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="file_batching_validation.handler",
+            handler="validation.handler",
             memory_size=512,
             timeout_min=5
         ),
@@ -43,7 +49,7 @@ CONFIG = AppConfig(
     internal_dedup=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="file_batching_internal_dedup.handler",
+            handler="internal_dedup.handler",
             memory_size=512,
             timeout_min=5
         ),
@@ -57,7 +63,7 @@ CONFIG = AppConfig(
     external_dedup=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="file_batching_external_dedup.handler",
+            handler="external_dedup.handler",
             memory_size=512,
             timeout_min=5
         ),
@@ -71,7 +77,7 @@ CONFIG = AppConfig(
     faiss_registration=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="file_batching_faiss_registration.handler",
+            handler="faiss_registration.handler",
             memory_size=512,
             timeout_min=5
         ),
@@ -85,7 +91,7 @@ CONFIG = AppConfig(
     label_enrichment=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="file_batching_label_enrichment.handler",
+            handler="label_enrichment.handler",
             memory_size=512,
             timeout_min=5
         ),
@@ -97,13 +103,13 @@ CONFIG = AppConfig(
         )
     ),
     kickoff_lambda=KickoffLambdaConfig(
-        path="workers/lambdas/upload/kickoff",
+        path="workers/lambdas/upload",
         handler="kickoff.handler",
         memory_size=512,
         timeout_sec=30
     ),
     cleanup_lambda=CleanupLambdaConfig(
-        path="workers/lambdas/upload/cleanup",
+        path="workers/lambdas/upload",
         handler="cleanup.handler",
         memory_size=512,
         timeout_sec=30

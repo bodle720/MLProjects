@@ -1,4 +1,3 @@
-# cvdms_platform/clients.py
 import pandas as pd
 import os
 import json
@@ -36,6 +35,7 @@ class UploadClient:
                  s3_client: BaseClient,
                  dynamodb_resource: ServiceResource):
 
+        self.event_type = "IMAGE_UPLOAD"
         self.user = user
         self.file_bucket_name = file_bucket_name
         self.job_table_name = job_table_name
@@ -51,14 +51,14 @@ class UploadClient:
     def update_job_status(self, job_id: str, status: str, error_msg: Optional[str] = None) -> Tuple[bool, str]:
         valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
         if status not in valid_statuses:
-            logging.error(f"Failed updating job status because specified status wasinvalid: {status}")
+            logging.error(f"Failed updating job status because specified status was invalid: {status}")
             return False, f"invalid_status: {status}"
 
         try:
             self.job_table.update_item(
                 Key={"job_id": job_id},
                 UpdateExpression="SET #s = :s, #e = :e",
-                ExpressionAttributeNames={"#s": "status", "#e": "errors"},
+                ExpressionAttributeNames={"#s": "status", "#e": "error"},
                 ExpressionAttributeValues={":s": status, ":e": error_msg or ""},
             )
             logging.info(f"Successfully updated job status to {status}")
@@ -67,14 +67,15 @@ class UploadClient:
             logging.error(f"Failed updating job status: {e}")
             return False, f"dynamodb_error: {e}"
 
-    def acquire_lock(self, lock_id: str = "global") -> Tuple[bool, str]:
+    def acquire_lock(self) -> Tuple[bool, str]:
         """
         Try to set locked = True, locked_by = holder (job_id).
         Returns (True, "") on success, (False, error_message) on failure.
         Uses conditional update so only one caller can win.
         """
+        lock_id = "global"
         holder = str(uuid.uuid4())
-        logging.info(f"Acquiring lock for job id {lock_id}, new potential holder = {holder}, used lock table name {self.lock_table_name}")
+        logging.info(f"Acquiring lock for lock {lock_id}, new potential holder = {holder}, used lock table name {self.lock_table_name}")
         try:
             self.lock_table.update_item(
                 Key={"lock_id": lock_id},
@@ -91,11 +92,12 @@ class UploadClient:
                 return False, "lock_already_held"
             return False, f"dynamodb_error: {e}"
 
-    def release_lock(self, lock_id: str = "global", expected_holder: str = "") -> Tuple[bool, str]:
+    def release_lock(self, expected_holder: str = "") -> Tuple[bool, str]:
         """
         Release lock only if current locked_by matches expected_holder (the job id holding the lock).
         Returns (True, "") on success.
         """
+        lock_id = "global"
         try:
             self.lock_table.update_item(
                 Key={"lock_id": lock_id},
@@ -115,8 +117,7 @@ class UploadClient:
     def create_job_row(self,
                        job_id: str,
                        *,
-                       summary: str = "",
-                       event_type: str = "") -> Tuple[bool, str]:
+                       summary: str = "") -> Tuple[bool, str]:
         """
         Insert initial job row with status=PENDING. Returns (True,"") or (False,error).
         Uses a condition to avoid overwriting an existing job_id.
@@ -126,7 +127,7 @@ class UploadClient:
             "created_at": ISO_NOW(),
             "status": "PENDING",
             "summary": summary,
-            "event_type": event_type,
+            "event_type": self.event_type,
             "errors": "",
         }
 
@@ -325,6 +326,7 @@ class UploadClient:
                 "user": self.user,
                 "num_images": len(self.df),
                 "source":source,
+                "event_type": self.event_type,
                 "label_types": [col for col in self.df.columns if col in VALID_LABEL_COLUMNS and col != "mask_map"]
             }
             manifest_key = f"{manifest_prefix}/job.json"
@@ -359,9 +361,8 @@ class UploadClient:
 
         This method keeps errors explicit so callers can decide to retry or inspect.
         """
-        lock_id = "global"
         # try to acquire lock
-        ok, holder_or_err = self.acquire_lock(lock_id=lock_id)
+        ok, holder_or_err = self.acquire_lock()
         if not ok:
             logging.error(f"Failed to acquire lock: {holder_or_err}")
             return False, {"error": f"could_not_acquire_lock: {holder_or_err}"}
@@ -370,14 +371,14 @@ class UploadClient:
         logging.info(f"Acquired lock: {job_id}")
 
         # create job row
-        ok, err = self.create_job_row(job_id, summary=summary, event_type="IMAGE_UPLOAD")
+        ok, err = self.create_job_row(job_id, summary=summary)
         if not ok:
             logging.error(f"Failed to create job row: {err}")
             # release lock before returning
-            self.release_lock(lock_id=lock_id, expected_holder=job_id)
+            self.release_lock(expected_holder=job_id)
             return False, {"error": f"could_not_create_job_row: {err}"}
 
-        logging.info("Created job row in job table and is status: PENDING.")
+        logging.info("Created job row in job table for {self.event_type} event and is status: PENDING.")
 
         # read csv and assign self.df if ok.
         ok, errors_dict = self._load_and_validate_csv(csv_path)
@@ -386,7 +387,7 @@ class UploadClient:
             logging.error(f"Failed to load and validate csv: {errors_dict}")
             msg = json.dumps(errors_dict)
             self.update_job_status(job_id, "FAILED", error_msg=msg)
-            self.release_lock(lock_id=lock_id, expected_holder=job_id)
+            self.release_lock(expected_holder=job_id)
             return False, {"error": errors_dict}
 
         # At this point we have job_id, PENDING row, and self.df to upload to temp folder.
@@ -395,7 +396,7 @@ class UploadClient:
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
             self.update_job_status(job_id, "FAILED", error_msg=msg)
-            self.release_lock(lock_id=lock_id, expected_holder=job_id)
+            self.release_lock(expected_holder=job_id)
             return False, {"error": f"Failed upload step: {msg}"}
 
         logging.info("Done uploading files to S3.")

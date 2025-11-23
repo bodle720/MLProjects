@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     temp_semantic_mask_path string,
     temp_instance_annotation_path string,
     validation_status string,
-    validation_errors array<string>,
+    validation_error string,
     dedup_status string,
     matched_image_id string,
     merge_action string

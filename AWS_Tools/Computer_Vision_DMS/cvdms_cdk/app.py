@@ -23,8 +23,10 @@ logging_stack = LoggingStack(app,
 
 storage_stack = StorageStack(app,
                        f"{APP_NAME}-StorageStack",
-                        app_name=APP_NAME,
-                        env=env)
+                         app_name=APP_NAME,
+                         common_utils_layer=logging_stack.common_utils_layer,
+                         firehose_delivery_stream=logging_stack.firehose_delivery_stream,
+                         env=env)
 
 upload_stack = ImageUploadStack(
     app,

@@ -55,6 +55,13 @@ class KickoffLambdaConfig:
     timeout_sec: int
 
 @dataclass
+class DLQProcessorConfig:
+    path: str
+    handler: str
+    memory_size: int
+    timeout_sec: int
+
+@dataclass
 class CleanupLambdaConfig:
     path: str
     handler: str
@@ -66,6 +73,7 @@ class AppConfig:
     app_name: str
     logging: LoggingConfig
     storage: StorageConfig
+    dlq_processor: DLQProcessorConfig
     compute_env: ComputeEnvConfig
     upload_state_machine: UploadStateMachineConfig
     validation: StageConfig

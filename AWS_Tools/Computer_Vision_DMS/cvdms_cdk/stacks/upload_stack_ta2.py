@@ -118,16 +118,20 @@ class BatchingStage(Construct):
                              errors=["States.ALL"],
                              result_path="$.errorInfo"
                              )
-        # with these settings, the output will look like this, with stage_name = 'MyStage' for exampls
+        # with these settings, the output will look like this, with stage_name = 'MyStage' for example
         # {
         #   "job_id": "abc123",
         #   "user": "alice",
         #   "label_types": ["foo"],
+        #   "source": "SomeImgSourceName",
+        #   "event_type": "SOME_EVENT_TYPE"
         #   "MyStage": {
         #     "manifests": ["s3://bucket/path1.json", "s3://bucket/path2.json"],
         #     "job_id": "abc123",
         #     "user": "alice",
         #     "label_types": ["foo"]
+        #     "source": "SomeImgSourceName",
+        #     "event_type": "SOME_EVENT_TYPE"
         #   }
         # }'
 
@@ -171,19 +175,13 @@ class BatchingStage(Construct):
             )
         )
 
-        # baseline container env
-        # Explanation: assume batching lambda returns dict of form
-        # {"manifests": ["s3://bucket/path1.json", "s3://bucket/path2.json"],
-        #  "job_id": "abc123",
-        #  "user": "alice",
-        #  "label_types": ["foo"}
-
         container_env = {
             "MANIFEST_S3_KEY": sfn.JsonPath.string_at("$.manifest"), # means Step Functions will substitute the values from the per‑item input into environment variables for the container, see below
             "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
             "USER": sfn.JsonPath.string_at("$.user"),
             "LABEL_TYPES": sfn.JsonPath.string_at("$.label_types"),
             "SOURCE": sfn.JsonPath.string_at("$.source"),
+            "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
@@ -216,7 +214,8 @@ class BatchingStage(Construct):
                 "job_id.$": "$.job_id", # keys ending with .$ tell Step Functions “this value comes from a JSONPath expression.”
                 "user.$": "$.user",
                 "label_types.$": "$.label_types",
-                "source.$": "$.source"
+                "source.$": "$.source",
+                "event_type.$": "$.event_type"
         }
 
         if extra_map_state_params:
@@ -234,7 +233,9 @@ class BatchingStage(Construct):
         # {"manifest": "<one element from manifests>",
         #     "job_id": "abc123",
         #     "user": "alice",
-        #     "label_types": "foo"}
+        #     "label_types": ["single_labels"],
+        #     "source": "SomeImgSourceName",
+        #     "event_type": "SOME_EVENT_TYPE"}
 
 
         # build iterator chain from the single batch task

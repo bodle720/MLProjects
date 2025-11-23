@@ -1,27 +1,22 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import unquote_plus
 
 import boto3
 from botocore.exceptions import ClientError
 
 # Lambda layer imports
-from common.utils import update_job_status, log
+from common.utils import log
 
-JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
-FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-
-EVENT_TYPE = "IMAGE_UPLOAD"
+LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 ALLOWED_LABEL_TYPES = ["string_labels", "bounding_boxes", "semantic_masks", "instance_annotations"]
 
-firehose = boto3.client("firehose")
 sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
-dynamodb = boto3.resource("dynamodb")
 
 def list_keys(bucket, prefix):
     keys = []
@@ -49,7 +44,7 @@ def require_no_duplicates(name_list, kind):
     if dups:
         raise ValueError(f"Duplicate {kind} detected for basenames: {dups}")
 
-def validate_labels(bucket, job_id, label_types, user):
+def validate_labels(bucket, job_id, label_types, user, event_type):
     image_keys = list_keys(bucket, f"temp/image-upload/{job_id}/images/")
     image_bases = basenames_from_keys(
         image_keys, allowed_exts={".jpg", ".jpeg", ".png"}
@@ -94,16 +89,14 @@ def validate_labels(bucket, job_id, label_types, user):
                 error_msg = f"Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
                 raise ValueError(error_msg)
 
-        log(job_id, user, EVENT_TYPE, f"Found {len(image_bases)} images and labels for label type = {label_type}", FIREHOSE_STREAM_NAME)
+        log(job_id, user, event_type, f"Found {len(image_bases)} images and labels for label type = {label_type}", LOG_FIREHOSE_STREAM_NAME)
 
 def handler(event, context):
-
-    job_table = dynamodb.Table(JOB_TABLE_NAME)
 
     # Guard: ensure there's at least one record
     records = event.get("Records", [])
     if not records:
-        return {"status": "failed", "job_id": 'unknown', "error": "No Records in event"}
+        raise RuntimeError(f"Kickoff Lambda failed: No Records in event")
 
     # Use the first SQS record (batch_size=1 configured)
     sqs_rec = records[0]
@@ -111,17 +104,17 @@ def handler(event, context):
     # SQS message body contains the S3 notification JSON as a string
     body = sqs_rec.get("body")
     if not body:
-        return {"status": "failed", "job_id": 'unknown', "error": "SQS record missing body"}
+        raise RuntimeError(f"Kickoff Lambda failed: SQS record missing body")
 
     try:
         body_json = json.loads(body)
     except Exception as e:
-        return {"status": "failed", "job_id": 'unknown', "error": f"Failed to parse SQS body as JSON: {str(e)}"}
+        raise RuntimeError(f"Kickoff Lambda failed: Failed to parse SQS body as JSON: {str(e)}")
 
     # Expect the S3 notification inside body_json["Records"][0]["s3"]
     s3_records = body_json.get("Records", [])
     if not s3_records:
-        return {"status": "failed", "job_id": 'unknown', "error": "No S3 Records inside SQS body"}
+        raise RuntimeError(f"Kickoff Lambda failed: No S3 Records inside SQS body")
 
     s3_rec = s3_records[0]
     s3_info = s3_rec.get("s3", {})
@@ -129,7 +122,7 @@ def handler(event, context):
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
     if bucket != FILE_BUCKET_NAME:
-        return {"status": "failed", "job_id": 'unknown', "error": f"Bucket mismatch in upload kickoff lambda"}
+        raise RuntimeError(f"Kickoff Lambda failed: Bucket mismatch in upload kickoff lambda")
 
     # Now proceed with your existing logic to fetch job.json, validate, etc.
     job_id = None
@@ -142,18 +135,17 @@ def handler(event, context):
         num_images = job_data["num_images"]
         source = job_data["source"]
         label_types = job_data["label_types"]
+        event_type = job_data["event_type"]
     except Exception as e:
         if job_id:
-            log(job_id, user, EVENT_TYPE, "Upload Kickoff Lambda could not initialize job_id, user, num_images, source, and label_types from manifest", FIREHOSE_STREAM_NAME, error=str(e), level='error')
-            update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user = user, event_type = EVENT_TYPE, error_msg=str(e))
-        return {"status": "failed", "error": f"Upload Kickoff Lambda could not initialize expected manifest fields: {str(e)}"}
+            log(job_id, user, "IMAGE_UPLOAD", "Upload Kickoff Lambda could not initialize job_id, user, num_images, source, event_type, and label_types from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        raise RuntimeError(f"Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
     try:
-        validate_labels(bucket, job_id, label_types, user)
+        validate_labels(bucket, job_id, label_types, user, event_type)
     except Exception as e:
-        log(job_id, user, EVENT_TYPE, "Error validating labels in kickoff lambda.", FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user=user, event_type=EVENT_TYPE, error_msg=str(e))
-        return {"status": "failed", "job_id": job_id, "error": f"Error validating labels: {str(e)}"}
+        log(job_id, user, event_type, "Error validating labels in kickoff lambda.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        raise RuntimeError(f"Kickoff Lambda failed: error validating labels: {str(e)}")
 
     try:
         response = sf.start_execution(
@@ -163,20 +155,20 @@ def handler(event, context):
                 "job_id": job_id,
                 "user": user,
                 "label_types": label_types,
-                "source":source.lower()
+                "source":source.lower(),
+                "event_type":event_type,
             })
         )
     except Exception as e:
-        log(job_id, user, EVENT_TYPE, "Error starting state machine for upload workflow.", FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        update_job_status(job_id, "FAILED", job_table, FIREHOSE_STREAM_NAME, user=user, event_type=EVENT_TYPE, error_msg=str(e))
-        return {"status": "failed", "job_id": job_id, "error": f"Error starting the step function for uploading: {str(e)}"}
+        log(job_id, user, event_type, "Error starting state machine for upload workflow.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        raise RuntimeError(f"Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
 
-    log(job_id, user, EVENT_TYPE, f"Kickoff Lambda started state machine execution {response['executionArn']}", FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"Kickoff Lambda started state machine execution {response['executionArn']}", LOG_FIREHOSE_STREAM_NAME)
 
     return {"status": "ok",
             "job_id": job_id,
             "user": user,
-            "event_type": EVENT_TYPE,
             "label_types": label_types,
             "num_images":num_images,
-            "source":source}
+            "source":source,
+            "event_type": event_type}

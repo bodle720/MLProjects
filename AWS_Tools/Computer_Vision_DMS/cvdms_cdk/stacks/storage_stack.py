@@ -12,7 +12,9 @@ from aws_cdk import (
     aws_lambda as _lambda,
     custom_resources as cr,
     aws_ssm as ssm,
-    aws_s3_notifications as s3n
+    aws_s3_notifications as s3n,
+    aws_kinesisfirehose as firehose,
+    aws_lambda_event_sources as event_sources
 )
 from constructs import Construct
 
@@ -27,11 +29,16 @@ class StorageStack(Stack):
                  scope: Construct,
                  construct_id: str,
                  app_name: str,
+                 common_utils_layer: _lambda.LayerVersion,
+                 firehose_delivery_stream: firehose.CfnDeliveryStream,
                  **kwargs) -> None:
 
         # The super call accepts env and initializes the self.account and self.region values
         # inside the base Stack class. So e can call them in this subclass.
         super().__init__(scope, construct_id, **kwargs)
+
+        self.common_utils_layer = common_utils_layer
+        self.firehose_delivery_stream = firehose_delivery_stream
 
         # Derive a unique iceberg database name from the stack name
         athena_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
@@ -375,6 +382,33 @@ class StorageStack(Stack):
             s3n.SqsDestination(upload_events_queue),
             s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
         )
+
+        # Make a lambda that polls the dlq and processes the messages
+        dlq_processor = _lambda.Function(
+            self,
+            "DLQProcessor",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler=CONFIG.dlq_processor.handler,
+            code=_lambda.Code.from_asset(CONFIG.dlq_processor.path),
+            layers=[self.common_utils_layer],
+            memory_size=CONFIG.dlq_processor.memory_size,
+            timeout=Duration.seconds(CONFIG.dlq_processor.timeout_sec),
+            environment={
+                "JOB_TABLE_NAME": job_table.table_name,
+                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+                "LOCK_TABLE_NAME": lock_table.table_name
+            }
+        )
+        job_table.grant_read_write_data(dlq_processor)
+        lock_table.grant_read_write_data(dlq_processor)
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[self.firehose_delivery_stream.attr_arn],  # use ARN provided by the L1
+        ))
+
+        dlq_processor.add_event_source(event_sources.SqsEventSource(dlq, batch_size=10))
+        dlq.grant_consume_messages(dlq_processor)
+
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
