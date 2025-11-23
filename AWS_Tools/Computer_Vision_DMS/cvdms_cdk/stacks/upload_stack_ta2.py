@@ -20,6 +20,8 @@ from aws_cdk import (
     aws_ecr_assets as ecr_assets
 )
 from constructs import Construct
+from typing import Callable
+import uuid
 
 from config import CONFIG
 from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig, StageConfig
@@ -39,7 +41,7 @@ class BatchingStage(Construct):
                  region: str,
                  account: str,
                  global_dlq: sqs.Queue,
-                 send_to_dlq: tasks.CallAwsService,
+                 dlq_chain_factory: Callable[[], sfn.Chain],
                  firehose_delivery_stream_name: str,
                  extra_lambda_env: dict = None,
                  extra_permissions: list[iam.PolicyStatement] = None,
@@ -70,7 +72,6 @@ class BatchingStage(Construct):
         if extra_lambda_env:
             lambda_env.update(extra_lambda_env)
 
-        # --- Batching Lambda ---
         batching_fn = _lambda.Function(
             self, f"{stage_name}BatchingLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
@@ -83,12 +84,11 @@ class BatchingStage(Construct):
             environment=lambda_env
         )
 
-        # baseline grants
+        # baseline grants and policies
         sha256_table.grant_read_data(batching_fn)
         phash_table.grant_read_data(batching_fn)
         file_bucket.grant_read_write(batching_fn)
 
-        # baseline policies
         batching_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket","s3:GetBucketLocation"],
             resources=[file_bucket.bucket_arn]
@@ -102,40 +102,23 @@ class BatchingStage(Construct):
             for stmt in extra_permissions:
                 batching_fn.add_to_role_policy(stmt)
 
-        # 2. LambdaInvoke task
         batching_task = tasks.LambdaInvoke(
             self, f"{stage_name}BatchingTask",
             lambda_function=batching_fn,
             result_path=f"$.{stage_name}",
             output_path="$",
-            payload_response_only=True
+            payload_response_only=True # this means Lambda’s return is also merged into the state output, not just nested.
         )
 
         batching_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
 
         # if the batching Lambda fails, Step Functions will capture the error info under $.errorInfo and transition to the DLQ state.
-        batching_task.add_catch(send_to_dlq,
-                             errors=["States.ALL"],
-                             result_path="$.errorInfo"
-                             )
-        # with these settings, the output will look like this, with stage_name = 'MyStage' for example
-        # {
-        #   "job_id": "abc123",
-        #   "user": "alice",
-        #   "label_types": ["foo"],
-        #   "source": "SomeImgSourceName",
-        #   "event_type": "SOME_EVENT_TYPE"
-        #   "MyStage": {
-        #     "manifests": ["s3://bucket/path1.json", "s3://bucket/path2.json"],
-        #     "job_id": "abc123",
-        #     "user": "alice",
-        #     "label_types": ["foo"]
-        #     "source": "SomeImgSourceName",
-        #     "event_type": "SOME_EVENT_TYPE"
-        #   }
-        # }'
+        batching_task.add_catch(
+            handler=dlq_chain_factory(),  # fresh chain instance
+            errors=["States.ALL"],
+            result_path="$.errorInfo",
+        )
 
-        # 3. Job Role
         job_role = iam.Role(
             self, f"{stage_name}JobRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
@@ -152,7 +135,6 @@ class BatchingStage(Construct):
             for stmt in extra_permissions:
                 job_role.add_to_policy(stmt)
 
-        # 4. Batch job definition + task
         # build/publish local Docker image from a local path
         image_asset = ecr_assets.DockerImageAsset(self, f"{stage_name}TaskImage",
                                                   directory=config.batch_task_job_def.directory,
@@ -203,10 +185,11 @@ class BatchingStage(Construct):
             integration_pattern=sfn.IntegrationPattern.RUN_JOB
         )
 
-        batch_task.add_catch(send_to_dlq,
-                             errors=["States.ALL"],
-                             result_path="$.errorInfo"
-                             )
+        batch_task.add_catch(
+            handler=dlq_chain_factory(),  # fresh chain instance
+            errors=["States.ALL"],
+            result_path="$.errorInfo",
+        )
 
         # Map state (wired to Batch task)
         params = {
@@ -223,49 +206,14 @@ class BatchingStage(Construct):
 
         map_state = sfn.Map(
             self, f"{stage_name}MapState",
-            items_path="$.manifests", # tells Step Functions: iterate over the array in the manifests key from the batching lambda output return dict
-            # For each element in that array, Step Functions creates an item context ($$.Map.Item.Value is the current element)
-            item_selector=params, # defines what the per‑item input looks like. It’s a mapping from new keys to JSONPath expressions.
-            max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus))))
+            items_path=f"$.{stage_name}.manifests",
+            item_selector=params,
+            max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus)))),
         )
 
-        # so fo each iteration, the input becomes something like
-        # {"manifest": "<one element from manifests>",
-        #     "job_id": "abc123",
-        #     "user": "alice",
-        #     "label_types": ["single_labels"],
-        #     "source": "SomeImgSourceName",
-        #     "event_type": "SOME_EVENT_TYPE"}
+        per_item = sfn.Chain.start(batch_task)
+        map_state.iterator(per_item)
 
-
-        # build iterator chain from the single batch task
-        iterator_chain = sfn.Chain.start(batch_task)
-
-        # attach to the Map using the most-compatible API available
-        # prefer ItemProcessor + StateMachineFragment when both exist and StateMachineFragment is instantiable
-        try:
-            can_use_itemprocessor = hasattr(sfn, "ItemProcessor") and hasattr(sfn, "StateMachineFragment")
-            if can_use_itemprocessor:
-                # try to instantiate to ensure StateMachineFragment isn't abstract in this runtime
-                try:
-                    fragment = sfn.StateMachineFragment(self, "MapProcessorFragment", definition=iterator_chain)
-                    # prefer explicit ItemProcessor when available
-                    if hasattr(sfn, "ItemProcessor"):
-                        map_state.item_processor(sfn.ItemProcessor(processor=fragment))
-                    else:
-                        # some CDK versions accept the fragment directly
-                        map_state.item_processor(fragment)
-                except TypeError:
-                    # StateMachineFragment is abstract in this CDK; fall back to iterator
-                    map_state.iterator(iterator_chain)
-            else:
-                # no ItemProcessor/StateMachineFragment support on this CDK - use the older API
-                map_state.iterator(iterator_chain)
-        except Exception:
-            # last-resort fallback to the old API
-            map_state.iterator(iterator_chain)
-
-        # Expose entrypoints
         self.batching_task = batching_task
         self.map_state = map_state
         self.job_def = job_def
@@ -304,19 +252,6 @@ class ImageUploadStack(Stack):
         self.firehose_delivery_stream = firehose_delivery_stream
         self.common_utils_layer = common_utils_layer
 
-        self.send_to_dlq = tasks.CallAwsService(self, "SendToDLQ",
-                                           service="sqs",
-                                           action="sendMessage",
-                                           parameters={
-                                               "QueueUrl": self.global_dlq.queue_url,
-                                               "MessageBody.$": 'States.JsonToString({"job_id": $.job_id, "user": $.user, "error": $.errorInfo})'
-                                           },
-                                           iam_resources=[self.global_dlq.queue_arn]
-                                           )
-
-        send_to_dlq_fail = sfn.Fail(self, "SendToDLQFail", cause="StepFailed", error="StepError")
-        self.send_to_dlq.next(send_to_dlq_fail)
-
         # Creates Batch compute environment and job queue pointing to the compute environment.
         job_queue = self._make_compute_env(CONFIG.compute_env)
 
@@ -335,18 +270,16 @@ class ImageUploadStack(Stack):
             region=self.region,
             account=self.account,
             global_dlq=self.global_dlq,
-            send_to_dlq=self.send_to_dlq,
+            dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
         )
 
         # Make cleanup lambda
         cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
-        workflow_definition = (
-            validation_stage.batching_task
-                .next(validation_stage.map_state)
-                .next(cleanup_task)
-        )
+        workflow_definition = sfn.Chain.start(validation_stage.batching_task) \
+            .next(validation_stage.map_state) \
+            .next(cleanup_task)
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
@@ -364,6 +297,21 @@ class ImageUploadStack(Stack):
 
         # Make kickoff lambda to trigger on job.json upload
         self._make_kickoff_lambda(upload_state_machine, CONFIG.kickoff_lambda)
+
+    def _make_dlq_chain(self) -> sfn.Chain:
+        suffix = uuid.uuid4().hex[:8]
+        send_to_dlq = tasks.CallAwsService(
+            self, f"SendToDLQ_{suffix}",
+            service="sqs",
+            action="sendMessage",
+            parameters={
+                "QueueUrl": self.global_dlq.queue_url,
+                "MessageBody.$": 'States.JsonToString({"job_id": $.job_id, "user": $.user, "error": $.errorInfo})'
+            },
+            iam_resources=[self.global_dlq.queue_arn],
+        )
+        send_to_dlq_fail = sfn.Fail(self, f"SendToDLQFail_{suffix}", cause="StepFailed", error="StepError")
+        return sfn.Chain.start(send_to_dlq).next(send_to_dlq_fail)
 
     def _make_compute_env(self,
                           ce_config: ComputeEnvConfig):
@@ -470,10 +418,12 @@ class ImageUploadStack(Stack):
 
         cleanup_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
 
-        cleanup_task.add_catch(self.send_to_dlq,
-                             errors=["States.ALL"],
-                             result_path="$.errorInfo"
-                             )
+        cleanup_task.add_catch(
+            handler=self._make_dlq_chain(),  # fresh chain instance
+            errors=["States.ALL"],
+            result_path="$.errorInfo",
+        )
+
         return cleanup_task
 
     def _make_kickoff_lambda(self,

@@ -48,4 +48,4 @@ def generate_csv_and_images(output_dir: str = "sample", num_samples: int = 100):
     print(f"CSV manifest written to {os.path.abspath(csv_path)}")
 
 if __name__ == "__main__":
-    generate_csv_and_images(num_samples=200)
+    generate_csv_and_images(num_samples=525)
