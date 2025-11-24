@@ -3,6 +3,7 @@ from typing import Optional, Dict, Tuple, List
 import os
 import sys
 import logging
+import pandas as pd
 
 import boto3
 from botocore.exceptions import ClientError
@@ -140,5 +141,5 @@ class CvdmsApp:
     def upload_imagery(self, csv_path: str, *, summary: str = "", source: str = "") -> Tuple[bool, Dict]:
         return self._upload_client.start_upload_job_from_csv(csv_path, summary=summary, source=source)
 
-    def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict]:
+    def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict, Optional[pd.DataFrame]]:
         return self._log_client.get_logs_by_job_id(job_id)

@@ -82,7 +82,7 @@ def handler(event, context):
     return {
         "job_id": job_id,
         "user": user,
-        "label_types": label_types,
+        "label_types": json.dumps(label_types),
         "source":source,
         "event_type": event_type,
         "manifests": manifest_keys

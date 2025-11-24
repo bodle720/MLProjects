@@ -300,18 +300,31 @@ class ImageUploadStack(Stack):
 
     def _make_dlq_chain(self) -> sfn.Chain:
         suffix = uuid.uuid4().hex[:8]
+
+        make_dlq_message = sfn.Pass(
+            self, f"MakeDLQMessage_{suffix}",
+            parameters={
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "error.$": "$.errorInfo"
+            },
+            result_path="$.dlqMessage"
+        )
+
         send_to_dlq = tasks.CallAwsService(
             self, f"SendToDLQ_{suffix}",
             service="sqs",
             action="sendMessage",
             parameters={
                 "QueueUrl": self.global_dlq.queue_url,
-                "MessageBody.$": 'States.JsonToString({"job_id": $.job_id, "user": $.user, "error": $.errorInfo})'
+                "MessageBody.$": "$.dlqMessage"
             },
             iam_resources=[self.global_dlq.queue_arn],
         )
+
         send_to_dlq_fail = sfn.Fail(self, f"SendToDLQFail_{suffix}", cause="StepFailed", error="StepError")
-        return sfn.Chain.start(send_to_dlq).next(send_to_dlq_fail)
+
+        return sfn.Chain.start(make_dlq_message).next(send_to_dlq).next(send_to_dlq_fail)
 
     def _make_compute_env(self,
                           ce_config: ComputeEnvConfig):
