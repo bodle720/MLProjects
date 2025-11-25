@@ -29,7 +29,7 @@ CONFIG = AppConfig(
     compute_env=ComputeEnvConfig(
         minv_cpus=0,
         maxv_cpus=64,
-        instance_types=["m5.large", "m5.xlarge"]
+        instance_types=["m5.large", "m5.xlarge", "m5.2xlarge"]
     ),
     upload_state_machine=UploadStateMachineConfig(duration_hours=2),
     validation=StageConfig(

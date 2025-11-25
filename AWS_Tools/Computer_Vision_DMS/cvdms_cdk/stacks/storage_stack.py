@@ -395,15 +395,90 @@ class StorageStack(Stack):
             timeout=Duration.seconds(CONFIG.dlq_processor.timeout_sec),
             environment={
                 "JOB_TABLE_NAME": job_table.table_name,
+                "FILE_BUCKET_NAME": file_bucket.bucket_name,
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                "LOCK_TABLE_NAME": lock_table.table_name
+                "ICEBERG_UPLOAD_STAGING_TABLE_NAME": "upload_staging",
+                "LOCK_TABLE_NAME": lock_table.table_name,
+                "ATHENA_WORKGROUP": "primary",
+                "ICEBERG_DB_NAME": athena_database_name,
+                "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             }
         )
-        job_table.grant_read_write_data(dlq_processor)
+
+        # 1) DynamoDB
         lock_table.grant_read_write_data(dlq_processor)
+        job_table.grant_read_write_data(dlq_processor)
+
+        # 2) S3: delete temp files under temp/image-upload/ and read them
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+        ))
+
+        # 3) S3: Athena results write only to athena-results/
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*"]
+        ))
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket", "s3:GetBucketLocation"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*","athena-results/*"]}}
+        ))
+
+        # 4) Athena: start and poll queries in the workgroup
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+            resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
+        ))
+
+        # 5) Firehose logging
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
-            resources=[self.firehose_delivery_stream.attr_arn],  # use ARN provided by the L1
+            resources=[self.firehose_delivery_stream.attr_arn]
+        ))
+
+        # 6) Glue metadata read (catalog, DB, and tables)
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase", "glue:GetDatabases",
+                "glue:GetTable", "glue:GetTables",
+                "glue:GetPartition", "glue:GetPartitions",
+                "glue:GetTableVersion", "glue:GetTableVersions"
+            ],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*"
+            ]
+        ))
+
+        # 7) Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+            ],
+            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                       f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
+                       f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/upload_staging"
+                       ]
+        ))
+
+        # 8) S3: read and delete Iceberg files for upload_staging prefix
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"]
+        ))
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
         ))
 
         dlq_processor.add_event_source(event_sources.SqsEventSource(dlq, batch_size=10))

@@ -13,6 +13,7 @@ from common.utils import log
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+
 ALLOWED_LABEL_TYPES = ["string_labels", "bounding_boxes", "semantic_masks", "instance_annotations"]
 
 sf = boto3.client("stepfunctions")
@@ -154,7 +155,7 @@ def handler(event, context):
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
-                "label_types": label_types,
+                "label_types": json.dumps(label_types),
                 "source":source.lower(),
                 "event_type":event_type,
             })

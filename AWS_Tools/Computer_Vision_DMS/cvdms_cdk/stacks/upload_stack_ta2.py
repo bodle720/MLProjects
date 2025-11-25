@@ -32,6 +32,7 @@ class BatchingStage(Construct):
                  config: StageConfig,
                  common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
+                 iceberg_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
                  sha256_table: dynamodb.Table,
                  phash_table: dynamodb.Table,
@@ -43,6 +44,8 @@ class BatchingStage(Construct):
                  global_dlq: sqs.Queue,
                  dlq_chain_factory: Callable[[], sfn.Chain],
                  firehose_delivery_stream_name: str,
+                 firehose_delivery_stream_attr_arn: str,
+                 batch_service_role: iam.Role,
                  extra_lambda_env: dict = None,
                  extra_permissions: list[iam.PolicyStatement] = None,
                  extra_container_env: dict = None,
@@ -62,7 +65,7 @@ class BatchingStage(Construct):
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
-            "ICEBERG_DB": athena_database_name,
+            "ICEBERG_DB_NAME": athena_database_name,
             "UPLOAD_STAGING_TABLE": "upload_staging",
             "SHA256_TABLE": sha256_table.table_name,
             "PHASH_TABLE": phash_table.table_name,
@@ -97,6 +100,10 @@ class BatchingStage(Construct):
             actions=["athena:StartQueryExecution","athena:GetQueryExecution","athena:GetQueryResults"],
             resources=[f"arn:aws:athena:{region}:{account}:workgroup/primary"]
         ))
+        batching_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[firehose_delivery_stream_attr_arn]
+        ))
 
         if extra_permissions:
             for stmt in extra_permissions:
@@ -123,14 +130,93 @@ class BatchingStage(Construct):
             self, f"{stage_name}JobRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com")
         )
-        file_bucket.grant_read_write(job_role)
+
+        # allow Batch service to pass the job role to ECS
+        batch_service_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"],
+            resources=[job_role.role_arn]
+        ))
+
+        # Firehose logging (unchanged)
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[firehose_delivery_stream_attr_arn]
+        ))
+
+        # DynamoDB tables
         job_table.grant_read_write_data(job_role)
         phash_table.grant_read_data(job_role)
         sha256_table.grant_read_data(job_role)
+
+        # Athena: start queries and poll results (scoped to workgroup)
         job_role.add_to_policy(iam.PolicyStatement(
-            actions=["athena:StartQueryExecution","athena:GetQueryExecution","athena:GetQueryResults"],
+            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
             resources=[f"arn:aws:athena:{region}:{account}:workgroup/primary"]
         ))
+
+        # Glue metadata read (catalog, database, and all tables in the DB)
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase", "glue:GetDatabases",
+                "glue:GetTable", "glue:GetTables",
+                "glue:GetPartition", "glue:GetPartitions",
+                "glue:GetTableVersion", "glue:GetTableVersions"
+            ],
+            resources=[
+                f"arn:aws:glue:{region}:{account}:catalog",
+                f"arn:aws:glue:{region}:{account}:database/{athena_database_name}",
+                f"arn:aws:glue:{region}:{account}:table/{athena_database_name}/*"
+            ]
+        ))
+
+        # Glue metadata write for upload_staging (required when INSERT/DELETE/OPTIMIZE updates Iceberg metadata)
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+            ],
+            resources=[
+                f"arn:aws:glue:{region}:{account}:catalog",
+                f"arn:aws:glue:{region}:{account}:database/{athena_database_name}",
+                f"arn:aws:glue:{region}:{account}:table/{athena_database_name}/upload_staging"
+            ]
+        ))
+
+        # S3: Athena results write only to athena-results/ prefix in file_bucket
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*"]
+        ))
+        # allow listing only for athena-results prefix on file_bucket
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket", "s3:GetBucketLocation"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["athena-results/*"]}}
+        ))
+
+        # S3: read/write/delete Iceberg files for upload_staging prefix
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"]
+        ))
+        # allow listing only for upload_staging prefix on iceberg_bucket
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+        ))
+
+        # Optional: if the batch job needs to read temp files from file_bucket (adjust prefix if different)
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+        ))
+
         if extra_permissions:
             for stmt in extra_permissions:
                 job_role.add_to_policy(stmt)
@@ -140,21 +226,33 @@ class BatchingStage(Construct):
                                                   directory=config.batch_task_job_def.directory,
                                                   file=config.batch_task_job_def.file
                                                   )
-        container_image = ecs.ContainerImage.from_registry(image_asset.image_uri)
-
-        job_def = batch.EcsJobDefinition(
+        log_group = logs.LogGroup(
             self,
-            f"{stage_name}JobDef",
-            retry_attempts=5,
-            timeout=Duration.hours(2),
-            container=batch.EcsEc2ContainerDefinition(
-                self,
-                f"{stage_name}containerDefn",
-                image=container_image,
-                memory=Size.mebibytes(config.batch_task_job_def.memory_limit_mib),
-                cpu=int(config.batch_task_job_def.vcpus * 1024),
-                job_role=job_role
-            )
+            f"{stage_name}LogGroup",
+            log_group_name=f"/aws/batch/{stage_name}",
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
+        job_def = batch.CfnJobDefinition(
+            self, f"{stage_name}JobDef",
+            type="container",
+            container_properties={
+                "image": image_asset.image_uri,
+                "cpu": int(config.batch_task_job_def.vcpus * 1024),
+                "vcpus": config.batch_task_job_def.vcpus,  # job-level vCPUs Batch uses for placement
+                "memory": config.batch_task_job_def.memory_limit_mib,
+                "jobRoleArn": job_role.role_arn,
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": log_group.log_group_name,
+                        "awslogs-region": region,
+                        "awslogs-stream-prefix": f"{stage_name}-batch"
+                    }
+                },
+            },
+            retry_strategy={"attempts": 5},
+            timeout={"attemptDurationSeconds": int(Duration.hours(2).to_seconds())}
         )
 
         container_env = {
@@ -167,16 +265,18 @@ class BatchingStage(Construct):
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
-            "ICEBERG_DB": athena_database_name,
-            "UPLOAD_STAGING_TABLE": "upload_staging",
-            "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name
+            "ICEBERG_DB_NAME": athena_database_name,
+            "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
+            "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
+            "AWS_REGION": region,
+            "AWS_DEFAULT_REGION": region
         }
         if extra_container_env:
             container_env.update(extra_container_env)
 
         batch_task = tasks.BatchSubmitJob(
             self, f"{stage_name}BatchTask",
-            job_definition_arn=job_def.job_definition_arn,
+            job_definition_arn=job_def.attr_job_definition_arn,
             job_queue_arn=job_queue.job_queue_arn,
             job_name=f"{stage_name.lower()}-batch",
             container_overrides=tasks.BatchContainerOverrides(
@@ -217,6 +317,7 @@ class BatchingStage(Construct):
         self.batching_task = batching_task
         self.map_state = map_state
         self.job_def = job_def
+        self.job_role = job_role
 
 class ImageUploadStack(Stack):
     def __init__(self,
@@ -253,6 +354,7 @@ class ImageUploadStack(Stack):
         self.common_utils_layer = common_utils_layer
 
         # Creates Batch compute environment and job queue pointing to the compute environment.
+        # instantiates self.batch_service_role
         job_queue = self._make_compute_env(CONFIG.compute_env)
 
         validation_stage = BatchingStage(
@@ -261,6 +363,7 @@ class ImageUploadStack(Stack):
             config=CONFIG.validation,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
+            iceberg_bucket=self.iceberg_bucket,
             job_table=self.job_table,
             sha256_table=self.sha256_table,
             phash_table=self.phash_table,
@@ -272,6 +375,8 @@ class ImageUploadStack(Stack):
             global_dlq=self.global_dlq,
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
+            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            batch_service_role=self.batch_service_role
         )
 
         # Make cleanup lambda
@@ -292,8 +397,16 @@ class ImageUploadStack(Stack):
         upload_state_machine.apply_removal_policy(RemovalPolicy.DESTROY)
 
         for stage in [validation_stage]:#, internal_dedup_stage, external_dedup_stage, faiss_registration_stage, label_enrichment_stage]:
-            # grant the state machine's role permission to submit that stage's job
-            stage.job_def.grant_submit_job(upload_state_machine.role, job_queue)
+            upload_state_machine.role.add_to_principal_policy(iam.PolicyStatement(
+                actions=["batch:SubmitJob"],
+                resources=[job_queue.job_queue_arn, stage.job_def.attr_job_definition_arn]
+            ))
+
+            # allow the state machine role to pass the job role to Batch/ECS
+            upload_state_machine.role.add_to_principal_policy(iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[stage.job_role.role_arn]
+            ))
 
         # Make kickoff lambda to trigger on job.json upload
         self._make_kickoff_lambda(upload_state_machine, CONFIG.kickoff_lambda)
@@ -346,6 +459,9 @@ class ImageUploadStack(Stack):
             assumed_by=iam.ServicePrincipal("batch.amazonaws.com"),
             managed_policies=[iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSBatchServiceRole")]
         )
+
+        # expose the batch service role
+        self.batch_service_role = batch_service_role
 
         # The role the EC2 nodes take on, needed to register with clusters, pull containers, etc
         # Things for the node to do, not necessarily the job running on it.
@@ -408,18 +524,89 @@ class ImageUploadStack(Stack):
             environment={
                 "JOB_TABLE_NAME": self.job_table.table_name,
                 "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
-                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref
+                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+                "ICEBERG_UPLOAD_STAGING_TABLE_NAME": "upload_staging",
+                "LOCK_TABLE_NAME": self.lock_table.table_name,
+                "ATHENA_WORKGROUP": "primary",
+                "ICEBERG_DB_NAME": self.athena_database_name,
+                "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
             }
         )
 
-        # Permissions for the kickoff lambda
+        # 1) DynamoDB
+        self.lock_table.grant_read_write_data(cleanup_lambda)
         self.job_table.grant_read_write_data(cleanup_lambda)
-        self.file_bucket.grant_read(cleanup_lambda)
 
-        # ensure S3 bucket-level list and get-location are permitted
+        # 2) S3: delete temp files under temp/image-upload/ and read them
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+        ))
+
+        # 3) S3: Athena results write only to athena-results/
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/athena-results/*"]
+        ))
         cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket", "s3:GetBucketLocation"],
             resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*","athena-results/*"]}}
+        ))
+
+        # 4) Athena: start and poll queries in the workgroup
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+            resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
+        ))
+
+        # 5) Firehose logging
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[self.firehose_delivery_stream.attr_arn]
+        ))
+
+        # 6) Glue metadata read (catalog, DB, and tables)
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase", "glue:GetDatabases",
+                "glue:GetTable", "glue:GetTables",
+                "glue:GetPartition", "glue:GetPartitions",
+                "glue:GetTableVersion", "glue:GetTableVersions"
+            ],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{self.athena_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.athena_database_name}/*"
+            ]
+        ))
+
+        # 7) Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+            ],
+            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                       f"arn:aws:glue:{self.region}:{self.account}:database/{self.athena_database_name}",
+                       f"arn:aws:glue:{self.region}:{self.account}:table/{self.athena_database_name}/upload_staging"
+                       ]
+        ))
+
+        # 8) S3: read and delete Iceberg files for upload_staging prefix
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*"]
+        ))
+        cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
         ))
 
         cleanup_task = tasks.LambdaInvoke(

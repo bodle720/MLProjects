@@ -11,15 +11,15 @@ from common.utils import log
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
-ICEBERG_DB = os.environ["ICEBERG_DB"]
-UPLOAD_STAGING_TABLE = os.environ["UPLOAD_STAGING_TABLE"]
+ICEBERG_DB_NAME = os.environ["ICEBERG_DB_NAME"]
+UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 # From the map state input
 MANIFEST_S3_KEY = os.environ["MANIFEST_S3_KEY"]
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
-LABEL_TYPES = json.loads(os.environ["LABEL_TYPES"])
+LABEL_TYPES = json.loads(os.environ["LABEL_TYPES"]) # now list of strs, indicating the label types in this upload
 SOURCE = os.environ["SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 
@@ -120,7 +120,7 @@ def chunked_insert(rows, chunk_size=200):
         "temp_instance_annotation_path", "validation_status", "validation_error",
         "dedup_status", "matched_image_id", "merge_action"
     ]
-    table = f'"{ICEBERG_DB}"."{UPLOAD_STAGING_TABLE}"'
+    table = f'"{ICEBERG_DB_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
 
     for i in range(0, len(rows), chunk_size):
         batch = rows[i:i+chunk_size]

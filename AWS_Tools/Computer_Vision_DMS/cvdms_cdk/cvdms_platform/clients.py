@@ -378,7 +378,7 @@ class UploadClient:
             self.release_lock(expected_holder=job_id)
             return False, {"error": f"could_not_create_job_row: {err}"}
 
-        logging.info("Created job row in job table for {self.event_type} event and is status: PENDING.")
+        logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
 
         # read csv and assign self.df if ok.
         ok, errors_dict = self._load_and_validate_csv(csv_path)

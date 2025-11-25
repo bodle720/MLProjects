@@ -23,10 +23,11 @@ RUN pip install --upgrade pip \
 
 # Copy source code
 COPY batch_jobs/upload/validation/src/ .
-COPY common/ /opt/common/
+
+# Copy the python package so /opt/common/common exists
+COPY common/python/ /opt/common/
 
 ENV PYTHONPATH=/opt/common:/usr/local/lib/python3.12/site-packages:/usr/local/lib/python3/site-packages
 
 # Set the default command to run your validation job
 CMD ["python", "main.py"]
-
