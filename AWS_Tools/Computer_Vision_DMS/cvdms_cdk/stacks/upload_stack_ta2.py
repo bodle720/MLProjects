@@ -190,8 +190,7 @@ class BatchingStage(Construct):
         # allow listing only for athena-results prefix on file_bucket
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["athena-results/*"]}}
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"]
         ))
 
         # S3: read/write/delete Iceberg files for upload_staging prefix
@@ -555,8 +554,7 @@ class ImageUploadStack(Stack):
         ))
         cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*","athena-results/*"]}}
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"]
         ))
 
         # 4) Athena: start and poll queries in the workgroup

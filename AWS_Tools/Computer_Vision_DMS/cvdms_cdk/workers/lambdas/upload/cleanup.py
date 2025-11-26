@@ -19,25 +19,21 @@ ICEBERG_DB_NAME = os.environ["ICEBERG_DB_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
 def handler(event, context):
-    """
-    Input event:
-    {
-      "job_id": "...",
-      "user": "...",
-      "event_type": "...",
-      ...
-    }
-    """
     job_id = user = event_type = 'unknown'
 
     try:
-        job_id = event["job_id"]
-        user = event["user"]
-        event_type = event["event_type"]
+        # Step Functions passes a list of job detail dicts
+        job_detail = event[0] if isinstance(event, list) else event
+        env_list = job_detail.get("Container", {}).get("Environment", [])
+        env_map = {e["Name"]: e["Value"] for e in env_list}
+
+        job_id = env_map.get("JOB_ID", "unknown")
+        user = env_map.get("USER", "unknown")
+        event_type = env_map.get("EVENT_TYPE", "unknown")
     except Exception as e:
-        error_msg = f"Failed to parse event on cleanup call: {e}"
+        error_msg = f"Failed to parse event on cleanup call: {e}, event = {event}"
         log(job_id, user, event_type, error_msg, LOG_FIREHOSE_STREAM_NAME, error=error_msg, level="error")
-        raise ValueError("Missing key in the cleanup lambda: {e}")
+        raise ValueError(f"Missing key in the cleanup lambda: {e}, event = {event}")
 
     log(job_id, user, event_type, f"Starting cleanup lambda for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 

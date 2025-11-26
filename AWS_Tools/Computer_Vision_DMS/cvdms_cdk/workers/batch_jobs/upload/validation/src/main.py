@@ -73,13 +73,18 @@ def validate_labels_presence(image_uuid):
     return errors
 
 # Pushing to iceberg table helpers
-def to_sql_value(v):
+def to_sql_value(r, c):
+    v = r.get(c)
+
     if v is None:
         return "NULL"
+    if c == 'uploaded_at':
+        return f"TIMESTAMP '{v}'"
     if isinstance(v, (int, float)):
         return str(v)
     if isinstance(v, list):
         return "ARRAY[" + ", ".join("'" + str(x).replace("'", "''") + "'" for x in v) + "]"
+
     return "'" + str(v).replace("'", "''") + "'"
 
 def wait_for_athena(query_execution_id, poll=1.5, timeout=900):
@@ -121,16 +126,18 @@ def chunked_insert(rows, chunk_size=200):
         "dedup_status", "matched_image_id", "merge_action"
     ]
     table = f'"{ICEBERG_DB_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-
+    all_failed = False
+    fail_count = 0
+    last_error = ""
     for i in range(0, len(rows), chunk_size):
         batch = rows[i:i+chunk_size]
         values_clause = []
         for r in batch:
-            values = [to_sql_value(r.get(c)) for c in columns]
+            values = [to_sql_value(r, c) for c in columns]
             values_clause.append("(" + ", ".join(values) + ")")
         sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES " + ", ".join(values_clause)
 
-        # first try to insert the btch, all or nothing is inserted in this athena call
+        # first try to insert the batch, all or nothing is inserted in this athena call
         try:
             qid = athena.start_query_execution(
                 QueryString=sql,
@@ -150,7 +157,7 @@ def chunked_insert(rows, chunk_size=200):
             # Retry row-by-row for this batch if batch insert failed due to a bad row.
             for r in batch:
                 try:
-                    values = [to_sql_value(r.get(c)) for c in columns]
+                    values = [to_sql_value(r, c) for c in columns]
                     sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(values)})"
                     qid = athena.start_query_execution(
                         QueryString=sql,
@@ -158,10 +165,13 @@ def chunked_insert(rows, chunk_size=200):
                         WorkGroup=ATHENA_WORKGROUP
                     )["QueryExecutionId"]
                     wait_for_athena(qid)
-                except Exception as row_e:
-                    log(JOB_ID, USER, EVENT_TYPE,
-                        f"Athena insert failed for image {r.get('image_id')}: {row_e}",
-                        LOG_FIREHOSE_STREAM_NAME, error=str(row_e), level='error')
+                except Exception as last_error:
+                    fail_count += 1
+
+    if fail_count == len(rows):
+        all_failed = True
+
+    return all_failed, str(last_error)
 
 # Main image processor
 def process_image(image_key):
@@ -178,7 +188,7 @@ def process_image(image_key):
            "num_channels": None,
            "dtype": None,
            "file_size_mb": 0.0, # a double value
-           "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), # timestamp, UTC upload time in ISO8601
+           "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), # Athena preferred format.
            "source": SOURCE,
            "sha256_hash": None,
            "phash": None,
@@ -256,7 +266,6 @@ def process_image(image_key):
         row["validation_error"] = ", ".join(label_presence_errors)
         return row
 
-    log(JOB_ID, USER, EVENT_TYPE, f"Successfully validated image {image_key}", LOG_FIREHOSE_STREAM_NAME)
     row["validation_status"] = "passed"
     row["temp_string_labels_path"] = f"temp/image-upload/{JOB_ID}/string_labels/{image_uuid}.json" if "string_labels" in LABEL_TYPES else None
     row["temp_bbox_path"] = f"temp/image-upload/{JOB_ID}/bounding_boxes/{image_uuid}.json" if "bounding_boxes" in LABEL_TYPES else None
@@ -284,11 +293,23 @@ def main():
         if row["validation_status"] != "passed":
             failed += 1
 
-    msg = f"Failed to process {failed} images in validation batch job."
+    msg = f"Image count that failed to process in validation batch job: {failed} images."
     log(JOB_ID, USER, EVENT_TYPE, msg, LOG_FIREHOSE_STREAM_NAME)
 
+    if failed == len(images):
+        raise
+
     if rows:
-        chunked_insert(rows, chunk_size=200)
+        all_failed, last_error = chunked_insert(rows, chunk_size=200)
+
+        if last_error:
+            log(JOB_ID, USER, EVENT_TYPE,
+                f"Athena insert failed for an image, and the last error was: {last_error}",
+                LOG_FIREHOSE_STREAM_NAME, error=str(last_error), level='error')
+
+        if all_failed:
+            # Send to global DLQ.
+            raise Exception(f"Validation batch job failed for all images, total failed = {len(rows)}")
 
     log(JOB_ID, USER, EVENT_TYPE, f"Completed processing: {len(rows)} rows written, {failed} failed", LOG_FIREHOSE_STREAM_NAME)
 

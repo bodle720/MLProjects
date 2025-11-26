@@ -427,8 +427,7 @@ class StorageStack(Stack):
         ))
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*","athena-results/*"]}}
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"]
         ))
 
         # 4) Athena: start and poll queries in the workgroup

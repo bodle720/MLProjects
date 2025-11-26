@@ -391,7 +391,7 @@ class UploadClient:
             return False, {"error": errors_dict}
 
         # At this point we have job_id, PENDING row, and self.df to upload to temp folder.
-        logging.info("CSV loaded in and validated.")
+        logging.info("CSV loaded in and validated. Uploading to S3...")
         ok, msg = self.upload_files_to_s3(job_id, source=source)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")

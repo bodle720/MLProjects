@@ -27,4 +27,4 @@ if upload_ok:
 
     if log_retrieval_success:
         log_df_results.to_csv(f'logs_{job_id}.csv', index=False)
-        pretty_print_wrapped(log_df_results, width = 60, max_rows = 50)
+        pretty_print_wrapped(log_df_results, width = 60, max_rows = 600)
