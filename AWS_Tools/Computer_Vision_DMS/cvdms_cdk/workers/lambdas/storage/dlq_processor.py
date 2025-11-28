@@ -3,7 +3,7 @@ import json
 import boto3
 
 # Lambda layer imports
-from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows
+from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows, get_job_input
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -11,26 +11,10 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 ICEBERG_UPLOAD_STAGING_TABLE_NAME = os.environ["ICEBERG_UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
-ICEBERG_DB_NAME = os.environ["ICEBERG_DB_NAME"]
+ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
 dynamodb = boto3.resource('dynamodb')
-
-def find_key_recursively(obj, target_key):
-    """Search for target_key anywhere in a nested dict/list structure."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k == target_key:
-                return v
-            result = find_key_recursively(v, target_key)
-            if result is not None:
-                return result
-    elif isinstance(obj, list):
-        for item in obj:
-            result = find_key_recursively(item, target_key)
-            if result is not None:
-                return result
-    return None
 
 def handler(event, context):
     # DLQ messages come in as a batch from SQS
@@ -40,13 +24,12 @@ def handler(event, context):
         total_records += 1
         try:
             body = json.loads(record['body'])
+            job_input = get_job_input(body)
+            job_id = job_input["job_id"]
+            user = job_input["user"]
+            event_type = job_input["event_type"]
 
-            # Depending on how you structure messages, job_id may be nested
-            job_id = find_key_recursively(body, "job_id")
-            user = find_key_recursively(body, "user")
-            event_type = find_key_recursively(body, "event_type")
-
-            if job_id and user and event_type:
+            if (job_id != 'unknown') and user and event_type:
 
                 # 1. Delete S3 temp files
                 prefix = f"temp/image-upload/{job_id}/"

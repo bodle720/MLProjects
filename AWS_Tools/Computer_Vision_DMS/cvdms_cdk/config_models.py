@@ -77,9 +77,6 @@ class AppConfig:
     compute_env: ComputeEnvConfig
     upload_state_machine: UploadStateMachineConfig
     validation: StageConfig
-    internal_dedup: StageConfig
-    external_dedup: StageConfig
-    faiss_registration: StageConfig
-    label_enrichment: StageConfig
+    deduplication: StageConfig
     kickoff_lambda: KickoffLambdaConfig
     cleanup_lambda: CleanupLambdaConfig

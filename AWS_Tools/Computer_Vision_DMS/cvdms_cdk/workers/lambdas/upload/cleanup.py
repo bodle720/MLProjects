@@ -3,7 +3,7 @@ import time
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows
+from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows, get_job_input
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
@@ -15,25 +15,17 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 ICEBERG_UPLOAD_STAGING_TABLE_NAME = os.environ["ICEBERG_UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
-ICEBERG_DB_NAME = os.environ["ICEBERG_DB_NAME"]
+ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
 def handler(event, context):
-    job_id = user = event_type = 'unknown'
-
     try:
-        # Step Functions passes a list of job detail dicts
-        job_detail = event[0] if isinstance(event, list) else event
-        env_list = job_detail.get("Container", {}).get("Environment", [])
-        env_map = {e["Name"]: e["Value"] for e in env_list}
-
-        job_id = env_map.get("JOB_ID", "unknown")
-        user = env_map.get("USER", "unknown")
-        event_type = env_map.get("EVENT_TYPE", "unknown")
-    except Exception as e:
-        error_msg = f"Failed to parse event on cleanup call: {e}, event = {event}"
-        log(job_id, user, event_type, error_msg, LOG_FIREHOSE_STREAM_NAME, error=error_msg, level="error")
-        raise ValueError(f"Missing key in the cleanup lambda: {e}, event = {event}")
+        job_input = get_job_input(event)
+        job_id = job_input["job_id"]
+        user = job_input["user"]
+        event_type = job_input["event_type"]
+    except KeyError as e:
+        raise RuntimeError(f"Missing key in the cleanup lambda: {e}, event = {event}")
 
     log(job_id, user, event_type, f"Starting cleanup lambda for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 

@@ -22,7 +22,13 @@ class LoggingStack(Stack):
                  construct_id: str,
                  app_name: str,
                  **kwargs) -> None:
-
+        '''
+        Makes a bucket and Glue Database Catalog for storing logs in parquet format in the logs bucket in S3.
+        The Glue catalog allows the schema definition. Firehose is used to consolidate every lambda log in the
+        used later into this database and normalize it according to the log transformer function. This gives us
+        all logs in one location that we can query. Further, it creates a lambda layer from utils.py that other
+        lambdas (and eventually Docker based jobs via the Dockerfile def.) can reference.
+        '''
         super().__init__(scope, construct_id, **kwargs)
 
         # Create a Lambda Layer from the common utilities
@@ -211,10 +217,7 @@ class LoggingStack(Stack):
         delivery_stream.add_dependency(glue_db)
 
         # Outputs
-        self.log_bucket = log_bucket
         self.firehose_delivery_stream = delivery_stream
-        self.glue_db_name = glue_db.ref
-        self.glue_table_name = glue_table.table_input.name
         self.common_utils_layer = common_layer
 
         # SSM for users: store bucket name in SSM

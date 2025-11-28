@@ -5,13 +5,13 @@ from PIL import Image
 import imagehash
 from botocore.exceptions import ClientError
 
-from common.utils import log
+from common.utils import log, chunked_insert_upload_staging
 
 # Env Variables from upload stack
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
-ICEBERG_DB_NAME = os.environ["ICEBERG_DB_NAME"]
+ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
@@ -27,15 +27,6 @@ s3 = boto3.client("s3")
 athena = boto3.client("athena")
 
 # Image feature calculation helpers
-def compute_phash_values(img):
-    if len(img.getbands()) == 1:
-        return str(imagehash.phash(img))
-    elif len(img.getbands()) == 3:
-        r, g, b = img.split()
-        return f"{imagehash.phash(r)}|{imagehash.phash(g)}|{imagehash.phash(b)}"
-    else:
-        raise ValueError(f"Invalid band count: {len(img.getbands())}")
-
 def infer_dtype(img):
     mode = img.mode
     if mode in ("L", "RGB", "RGBA", "CMYK", "YCbCr"):
@@ -72,107 +63,6 @@ def validate_labels_presence(image_uuid):
 
     return errors
 
-# Pushing to iceberg table helpers
-def to_sql_value(r, c):
-    v = r.get(c)
-
-    if v is None:
-        return "NULL"
-    if c == 'uploaded_at':
-        return f"TIMESTAMP '{v}'"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, list):
-        return "ARRAY[" + ", ".join("'" + str(x).replace("'", "''") + "'" for x in v) + "]"
-
-    return "'" + str(v).replace("'", "''") + "'"
-
-def wait_for_athena(query_execution_id, poll=1.5, timeout=900):
-    """Poll Athena until query completes or times out. Returns True if succeeded, False otherwise."""
-    start = time.time()
-    while True:
-        try:
-            resp = athena.get_query_execution(QueryExecutionId=query_execution_id)
-            state = resp["QueryExecution"]["Status"]["State"]
-            if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
-                if state == "SUCCEEDED":
-                    return True
-                else:
-                    reason = resp["QueryExecution"]["Status"].get("StateChangeReason", "")
-                    log(JOB_ID, USER, EVENT_TYPE,
-                        f"Athena query {query_execution_id} ended with state {state}: {reason}",
-                        LOG_FIREHOSE_STREAM_NAME, error=str(reason), level='error')
-                    return False
-            if time.time() - start > timeout:
-                log(JOB_ID, USER, EVENT_TYPE,
-                    f"Athena query {query_execution_id} timed out after {timeout} seconds",
-                    LOG_FIREHOSE_STREAM_NAME, error="athena timeout", level='error')
-                return False
-            time.sleep(poll)
-        except Exception as e:
-            log(JOB_ID, USER, EVENT_TYPE,
-                f"Error polling Athena query {query_execution_id}: {e}",
-                LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-            return False
-
-def chunked_insert(rows, chunk_size=200):
-    """Insert rows into Iceberg in batches. If a batch fails, retry row-by-row."""
-    columns = [
-        "job_id", "image_id", "temp_source_ref", "copy_to",
-        "img_type", "img_height", "img_width", "num_channels", "dtype",
-        "file_size_mb", "uploaded_at", "source", "sha256_hash", "phash",
-        "temp_string_labels_path", "temp_bbox_path", "temp_semantic_mask_path",
-        "temp_instance_annotation_path", "validation_status", "validation_error",
-        "dedup_status", "matched_image_id", "merge_action"
-    ]
-    table = f'"{ICEBERG_DB_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-    all_failed = False
-    fail_count = 0
-    last_error = ""
-    for i in range(0, len(rows), chunk_size):
-        batch = rows[i:i+chunk_size]
-        values_clause = []
-        for r in batch:
-            values = [to_sql_value(r, c) for c in columns]
-            values_clause.append("(" + ", ".join(values) + ")")
-        sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES " + ", ".join(values_clause)
-
-        # first try to insert the batch, all or nothing is inserted in this athena call
-        try:
-            qid = athena.start_query_execution(
-                QueryString=sql,
-                ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-                WorkGroup=ATHENA_WORKGROUP
-            )["QueryExecutionId"]
-
-            success = wait_for_athena(qid)
-            if not success:
-                raise RuntimeError("Batch insert failed")
-
-        except Exception as e:
-            log(JOB_ID, USER, EVENT_TYPE,
-                f"Athena batch insert failed for batch {i//chunk_size+1}: {e}",
-                LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-
-            # Retry row-by-row for this batch if batch insert failed due to a bad row.
-            for r in batch:
-                try:
-                    values = [to_sql_value(r, c) for c in columns]
-                    sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(values)})"
-                    qid = athena.start_query_execution(
-                        QueryString=sql,
-                        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-                        WorkGroup=ATHENA_WORKGROUP
-                    )["QueryExecutionId"]
-                    wait_for_athena(qid)
-                except Exception as last_error:
-                    fail_count += 1
-
-    if fail_count == len(rows):
-        all_failed = True
-
-    return all_failed, str(last_error)
-
 # Main image processor
 def process_image(image_key):
     # Extract UUID from filename
@@ -191,7 +81,6 @@ def process_image(image_key):
            "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), # Athena preferred format.
            "source": SOURCE,
            "sha256_hash": None,
-           "phash": None,
            "temp_string_labels_path": None,
            "temp_bbox_path": None,
            "temp_semantic_mask_path": None,
@@ -247,16 +136,6 @@ def process_image(image_key):
     row["img_height"] = int(height)
     row["img_width"] = int(width)
 
-    try:
-        ph = compute_phash_values(img) # type str
-    except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"phash error for image key: {image_key}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        row["validation_status"] = "failed"
-        row["validation_error"] = f"phash error for image key: {image_key}"
-        return row
-    else:
-        row["phash"] = ph
-
     # Validate labels
     label_presence_errors = validate_labels_presence(image_uuid)
 
@@ -300,7 +179,12 @@ def main():
         raise
 
     if rows:
-        all_failed, last_error = chunked_insert(rows, chunk_size=200)
+        all_failed, last_error = chunked_insert_upload_staging(rows,
+                                                               ICEBERG_DB_NAME,
+                                                               UPLOAD_STAGING_TABLE_NAME,
+                                                               ATHENA_WORKGROUP,
+                                                               ATHENA_OUTPUT_S3,
+                                                               chunk_size=200)
 
         if last_error:
             log(JOB_ID, USER, EVENT_TYPE,

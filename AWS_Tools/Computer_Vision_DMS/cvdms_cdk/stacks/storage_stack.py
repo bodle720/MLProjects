@@ -32,6 +32,11 @@ class StorageStack(Stack):
                  common_utils_layer: _lambda.LayerVersion,
                  firehose_delivery_stream: firehose.CfnDeliveryStream,
                  **kwargs) -> None:
+        '''
+        This stack makes the file bucket that will store all files and the iceberg bucket, which will store all
+        Iceberg table data. It makes the GLue database and relevant tables via a DDL lambda call at deploy time
+        for said Iceberg tables.
+        '''
 
         # The super call accepts env and initializes the self.account and self.region values
         # inside the base Stack class. So e can call them in this subclass.
@@ -40,8 +45,8 @@ class StorageStack(Stack):
         self.common_utils_layer = common_utils_layer
         self.firehose_delivery_stream = firehose_delivery_stream
 
-        # Derive a unique iceberg database name from the stack name
-        athena_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
+        # Derive a unique glue database name from the stack name to store the iceberg table schema
+        iceberg_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
 
         # File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
@@ -149,14 +154,6 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # phash lookup table
-        phash_table = dynamodb.Table(
-            self, "PhashLookupTable",
-            partition_key=dynamodb.Attribute(name="phash", type=dynamodb.AttributeType.STRING),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY
-        )
-
         # Lambda for Iceberg DDL, always auto deleted, lambdas cannot be retained on cdk destroy.
         # DDL = Data Definition Language, defines the database schema, a subset language of SQL.
         ddl_lambda = _lambda.Function(
@@ -167,7 +164,7 @@ class StorageStack(Stack):
             timeout=Duration.minutes(15),
             environment={
                     "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
-                    "ICEBERG_DATABASE_NAME": athena_database_name,
+                    "ICEBERG_DATABASE_NAME": iceberg_database_name,
                     "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
                 }
         )
@@ -214,8 +211,8 @@ class StorageStack(Stack):
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                    f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
-                    f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*"
+                    f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
+                    f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/*"
                 ]
             )
         )
@@ -306,7 +303,7 @@ class StorageStack(Stack):
             code=_lambda.Code.from_asset(CONFIG.storage.delete_db_lambda_path),
             timeout=Duration.minutes(10),
             environment={
-                "GLUE_DATABASE_NAME": athena_database_name
+                "ICEBERG_DATABASE_NAME": iceberg_database_name
             }
         )
 
@@ -330,9 +327,9 @@ class StorageStack(Stack):
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                    f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
-                    f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*",
-                    f"arn:aws:glue:{self.region}:{self.account}:userDefinedFunction/{athena_database_name}/*"
+                    f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
+                    f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/*",
+                    f"arn:aws:glue:{self.region}:{self.account}:userDefinedFunction/{iceberg_database_name}/*"
                 ]
             )
         )
@@ -400,7 +397,7 @@ class StorageStack(Stack):
                 "ICEBERG_UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOCK_TABLE_NAME": lock_table.table_name,
                 "ATHENA_WORKGROUP": "primary",
-                "ICEBERG_DB_NAME": athena_database_name,
+                "ICEBERG_DATABASE_NAME": iceberg_database_name,
                 "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             }
         )
@@ -452,8 +449,8 @@ class StorageStack(Stack):
             ],
             resources=[
                 f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
-                f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/*"
+                f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/*"
             ]
         ))
 
@@ -464,8 +461,8 @@ class StorageStack(Stack):
                 "glue:BatchCreatePartition", "glue:BatchDeletePartition"
             ],
             resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                       f"arn:aws:glue:{self.region}:{self.account}:database/{athena_database_name}",
-                       f"arn:aws:glue:{self.region}:{self.account}:table/{athena_database_name}/upload_staging"
+                       f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
+                       f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/upload_staging"
                        ]
         ))
 
@@ -488,11 +485,10 @@ class StorageStack(Stack):
         self.iceberg_bucket = iceberg_bucket
         self.job_table = job_table
         self.sha256_table = sha256_table
-        self.phash_table = phash_table
         self.lock_table = lock_table
         self.global_dlq = dlq
         self.datasets_table = datasets_table
-        self.athena_database_name = athena_database_name
+        self.iceberg_database_name = iceberg_database_name
         self.upload_events_queue = upload_events_queue
 
         # SSM params
@@ -509,8 +505,8 @@ class StorageStack(Stack):
 
         # Glue / Athena
         ssm.StringParameter(self, "AthenaDatabaseNameParam",
-                            parameter_name=f"/cvdms/{app_name}/storage/athena_database_name",
-                            string_value=athena_database_name
+                            parameter_name=f"/cvdms/{app_name}/storage/iceberg_database_name",
+                            string_value=iceberg_database_name
                             )
 
         # DynamoDB Tables
@@ -532,11 +528,6 @@ class StorageStack(Stack):
         ssm.StringParameter(self, "Sha256TableNameParam",
                             parameter_name=f"/cvdms/{app_name}/storage/sha256_table_name",
                             string_value=sha256_table.table_name
-                            )
-
-        ssm.StringParameter(self, "PhashTableNameParam",
-                            parameter_name=f"/cvdms/{app_name}/storage/phash_table_name",
-                            string_value=phash_table.table_name
                             )
 
         # Queues

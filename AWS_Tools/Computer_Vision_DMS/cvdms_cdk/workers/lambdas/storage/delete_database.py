@@ -4,7 +4,7 @@ import os
 glue = boto3.client("glue")
 
 def handler(event, context):
-    db_name = os.environ["GLUE_DATABASE_NAME"]
+    db_name = os.environ["ICEBERG_DATABASE_NAME"]
 
     # List and delete all tables
     paginator = glue.get_paginator("get_tables")

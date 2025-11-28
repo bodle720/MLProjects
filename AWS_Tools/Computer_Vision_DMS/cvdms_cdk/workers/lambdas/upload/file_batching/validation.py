@@ -3,7 +3,7 @@ import json
 import boto3
 import logging
 
-from common.utils import log
+from common.utils import log, get_job_input
 
 s3 = boto3.client("s3")
 
@@ -19,18 +19,16 @@ max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
 IMAGES_PER_BATCH = min(max_images, 200)  # cap at 200 for sanity
 
 def handler(event, context):
-
-    job_id = user = 'UNKNOWN'
-
     try:
-        job_id = event["job_id"]
-        user = event["user"]
-        label_types = event["label_types"]
-        source = event["source"]
-        event_type = event["event_type"]
+        job_input = get_job_input(event)
+        job_id = job_input["job_id"]
+        user = job_input["user"]
+        event_type = job_input["event_type"]
+        label_types = job_input["label_types"] # a list
+        source = job_input.get("source", "unknown")
     except KeyError as e:
-        log(job_id, user, "IMAGE_UPLOAD", f"Missing key(s) for batching event on image upload.", LOG_FIREHOSE_STREAM_NAME, error = str(e), level="error")
-        raise
+        raise RuntimeError(f"Validation batching Lambda failed: missing required key {e}")
+
 
     log(job_id, user, event_type, f"Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 

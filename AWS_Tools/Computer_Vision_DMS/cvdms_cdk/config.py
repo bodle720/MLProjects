@@ -46,60 +46,18 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/validation/Dockerfile"
         )
     ),
-    internal_dedup=StageConfig(
+    deduplication=StageConfig(
         file_batching=FileBatchingConfig(
             path="workers/lambdas/upload/file_batching",
-            handler="internal_dedup.handler",
+            handler="deduplication.handler",
             memory_size=512,
-            timeout_min=5
+            timeout_min=15
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
             memory_limit_mib=2048,
             directory="workers",
-            file="batch_jobs/upload/internal_dedup/Dockerfile"
-        )
-    ),
-    external_dedup=StageConfig(
-        file_batching=FileBatchingConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="external_dedup.handler",
-            memory_size=512,
-            timeout_min=5
-        ),
-        batch_task_job_def=BatchTaskJobDefConfig(
-            vcpus=1,
-            memory_limit_mib=4096,
-            directory="workers",
-            file="batch_jobs/upload/external_dedup/Dockerfile"
-        )
-    ),
-    faiss_registration=StageConfig(
-        file_batching=FileBatchingConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="faiss_registration.handler",
-            memory_size=512,
-            timeout_min=5
-        ),
-        batch_task_job_def=BatchTaskJobDefConfig(
-            vcpus=1,
-            memory_limit_mib=2048,
-            directory="workers",
-            file="batch_jobs/upload/faiss_registration/Dockerfile"
-        )
-    ),
-    label_enrichment=StageConfig(
-        file_batching=FileBatchingConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="label_enrichment.handler",
-            memory_size=512,
-            timeout_min=5
-        ),
-        batch_task_job_def=BatchTaskJobDefConfig(
-            vcpus=1,
-            memory_limit_mib=2048,
-            directory="workers",
-            file="batch_jobs/upload/label_enrichment/Dockerfile"
+            file="batch_jobs/upload/deduplication/Dockerfile"
         )
     ),
     kickoff_lambda=KickoffLambdaConfig(
