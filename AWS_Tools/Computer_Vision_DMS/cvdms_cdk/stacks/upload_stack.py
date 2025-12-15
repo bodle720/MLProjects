@@ -1,3 +1,7 @@
+import uuid
+from typing import Callable
+from constructs import Construct
+
 from aws_cdk import (
     Stack,
     RemovalPolicy,
@@ -19,9 +23,6 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_ecr_assets as ecr_assets
 )
-from constructs import Construct
-from typing import Callable
-import uuid
 
 from config import CONFIG
 from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig, StageConfig

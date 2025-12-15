@@ -1,10 +1,11 @@
-import boto3
 import os
 import time
 import json
 import random
 from pathlib import Path
 from typing import Optional
+
+import boto3
 
 athena = boto3.client("athena")
 glue = boto3.client("glue")

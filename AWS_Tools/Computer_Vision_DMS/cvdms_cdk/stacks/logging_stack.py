@@ -1,3 +1,6 @@
+from datetime import datetime
+from constructs import Construct
+
 from aws_cdk import (
     Stack,
     Duration,
@@ -11,8 +14,6 @@ from aws_cdk import (
     aws_kinesisfirehose as firehose,
     aws_glue as glue
 )
-from constructs import Construct
-from datetime import datetime
 
 from config import CONFIG
 

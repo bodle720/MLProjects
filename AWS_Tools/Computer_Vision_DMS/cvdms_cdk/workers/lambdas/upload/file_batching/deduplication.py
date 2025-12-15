@@ -2,6 +2,7 @@ import os
 import json
 import math
 import time
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -15,7 +16,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE = os.environ.get("UPLOAD_STAGING_TABLE", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-# Tunables (hardcoded, but can be overridden via extra_lambda_env by making env vars)
+# Tunables (hardcoded)
 # Average row size in KB (conservative metadata estimate). Tune if you have better numbers.
 AVG_ROW_KB = 2.0
 # Safety factor for memory usage (0.0-1.0)

@@ -1,15 +1,16 @@
-import pandas as pd
 import os
 import json
 import uuid
-from datetime import datetime, timezone
-from typing import Optional, Tuple, Dict
 import logging
 import time
+from datetime import datetime, timezone
+from typing import Optional, Tuple, Dict
+
 import boto3
 from botocore.exceptions import ClientError
 from botocore.client import BaseClient
 from boto3.resources.base import ServiceResource
+import pandas as pd
 
 ISO_NOW = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -202,7 +203,7 @@ class UploadClient:
                 try:
                     mask_map_str = str(row["mask_map"]).strip()
                     mask_map = json.loads(mask_map_str)
-                    if "0" not in mask_map or mask_map["0"].lower() != "bg":
+                    if "0" not in mask_map or mask_map["0"] != "bg":
                         row_errors.append("mask_map_missing_bg")
                     keys = sorted(map(int, mask_map.keys()))
                     if keys != list(range(len(keys))):

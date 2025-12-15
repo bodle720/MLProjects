@@ -1,3 +1,7 @@
+import uuid
+from re import sub
+from constructs import Construct
+
 from aws_cdk import (
     Stack,
     Duration,
@@ -16,10 +20,6 @@ from aws_cdk import (
     aws_kinesisfirehose as firehose,
     aws_lambda_event_sources as event_sources
 )
-from constructs import Construct
-
-import uuid
-from re import sub
 
 from config import CONFIG
 

@@ -1,6 +1,7 @@
-from cvdms_platform import CvdmsApp
-import pandas as pd
 import textwrap
+import pandas as pd
+
+from cvdms_platform import CvdmsApp
 
 def wrap_cell(s, width=60):
     if s is None:

@@ -1,7 +1,5 @@
-from dataclasses import dataclass
 from typing import List
-
-from aws_cdk.aws_sns import LoggingConfig
+from dataclasses import dataclass
 
 @dataclass
 class LoggingConfig:

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import aws_cdk as cdk
 import os
 import sys
+
+import aws_cdk as cdk
 
 from config import CONFIG
 from stacks.logging_stack import LoggingStack

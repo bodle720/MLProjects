@@ -1,7 +1,8 @@
 import os
 import json
-import boto3
 import logging
+
+import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

@@ -1,13 +1,11 @@
-import json
-import logging
-from datetime import datetime, timezone
-import boto3
-from botocore.exceptions import ClientError
-from typing import Tuple
 import time
 import json
 import logging
-from typing import Any, Optional, List, Dict
+from typing import Tuple, Any, Optional, List, Dict
+from datetime import datetime, timezone
+
+import boto3
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -407,4 +405,3 @@ def get_job_input(event: Any) -> Dict[str, Any]:
         "source": source or "unknown",
         "event_type": event_type or "unknown"
     }
-
