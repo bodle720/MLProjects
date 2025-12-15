@@ -21,10 +21,9 @@ ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
 def handler(event, context):
     try:
-        job_input = get_job_input(event)
-        job_id = job_input["job_id"]
-        user = job_input["user"]
-        event_type = job_input["event_type"]
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
     except KeyError as e:
         raise RuntimeError(f"Missing key in the cleanup lambda: {e}, event = {event}")
 

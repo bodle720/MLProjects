@@ -67,6 +67,13 @@ class CleanupLambdaConfig:
     timeout_sec: int
 
 @dataclass
+class DedupLambdaConfig:
+    path: str
+    handler: str
+    memory_size: int
+    timeout_sec: int
+
+@dataclass
 class AppConfig:
     app_name: str
     logging: LoggingConfig
@@ -78,3 +85,4 @@ class AppConfig:
     deduplication: StageConfig
     kickoff_lambda: KickoffLambdaConfig
     cleanup_lambda: CleanupLambdaConfig
+    dedup_ingest_lambda: DedupLambdaConfig

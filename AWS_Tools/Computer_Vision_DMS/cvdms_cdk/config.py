@@ -2,7 +2,7 @@ from config_models import (
     AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
     StageConfig, FileBatchingConfig, BatchTaskJobDefConfig,
     KickoffLambdaConfig, CleanupLambdaConfig, StorageConfig,
-    LoggingConfig, DLQProcessorConfig
+    LoggingConfig, DLQProcessorConfig, DedupLambdaConfig
 )
 
 CONFIG = AppConfig(
@@ -69,6 +69,12 @@ CONFIG = AppConfig(
     cleanup_lambda=CleanupLambdaConfig(
         path="workers/lambdas/upload",
         handler="cleanup.handler",
+        memory_size=512,
+        timeout_sec=30
+    ),
+    dedup_ingest_lambda = DedupLambdaConfig(
+        path="workers/lambdas/upload",
+        handler="deduplication_ingest.handler",
         memory_size=512,
         timeout_sec=30
     )

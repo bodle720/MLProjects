@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+'''
+This Batch job reads one dedup shard, deterministically marks internal duplicates, checks survivor hashes against the
+canonical SHA table for external duplicates, and writes shard-local dedup results for later global reconciliation.
+'''
 import os
 import json
 import time
@@ -51,18 +55,15 @@ dynamodb = boto3.client("dynamodb")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-
 def s3_read_json(s3_uri):
     """Read a JSON object from s3://bucket/key and return parsed JSON."""
     bucket, key = s3_uri.replace("s3://", "").split("/", 1)
     resp = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(resp["Body"].read().decode("utf-8"))
 
-
 def write_s3_text(bucket, key, text, content_type="application/json"):
     """Write text to S3."""
     s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
-
 
 def read_parquet_rows_from_s3_uris(s3_uris):
     """
@@ -95,7 +96,6 @@ def read_parquet_rows_from_s3_uris(s3_uris):
                 logger.exception("Failed to read parquet file %s: %s", uri, e)
                 raise
 
-
 def read_json_or_csv_rows_from_s3_uris(s3_uris):
     """
     Fallback generator for JSON/CSV files. Supports JSONL or JSON array.
@@ -122,18 +122,20 @@ def read_json_or_csv_rows_from_s3_uris(s3_uris):
             except Exception:
                 logger.warning("Unable to parse file %s as JSON/JSONL", uri)
 
-
 def pick_representative(group):
     """
     Deterministic representative selection:
     1) earliest uploaded_at (string compare works for 'YYYY-MM-DD HH:MM:SS')
     2) tie-breaker: lexicographically smallest image_id
     """
+
+    if len(group) == 1:
+        return group[0]
+
     def key_fn(r):
         ts = r.get("uploaded_at") or "9999-12-31 23:59:59"
         return (ts, r.get("image_id") or "")
     return min(group, key=key_fn)
-
 
 def batch_get_dynamodb_items(table_name, keys):
     """
@@ -164,7 +166,6 @@ def batch_get_dynamodb_items(table_name, keys):
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 8.0)
     return results
-
 
 def process_manifest(manifest):
     """
@@ -209,36 +210,21 @@ def process_manifest(manifest):
                 processed_rows.append(r)
             continue
 
-        if len(group) == 1:
-            rep = group[0]
-            rep["dedup_status"] = rep.get("dedup_status", "internal_survivor")
-            processed_rows.append(rep)
-            representatives.append((sha, rep.get("image_id")))
-        else:
-            # guard group size
-            if len(group) > MAX_GROUP_SIZE:
-                # mark all but one as internal_duplicate deterministically
-                rep = pick_representative(group)
-                rep["dedup_status"] = rep.get("dedup_status", "internal_survivor")
-                processed_rows.append(rep)
-                representatives.append((sha, rep.get("image_id")))
-                for r in group:
-                    if r is rep:
-                        continue
-                    r["dedup_status"] = "internal_duplicate"
-                    processed_rows.append(r)
-                    internal_dup_count += 1
-            else:
-                rep = pick_representative(group)
-                rep["dedup_status"] = rep.get("dedup_status", "internal_survivor")
-                processed_rows.append(rep)
-                representatives.append((sha, rep.get("image_id")))
-                for r in group:
-                    if r is rep:
-                        continue
-                    r["dedup_status"] = "internal_duplicate"
-                    processed_rows.append(r)
-                    internal_dup_count += 1
+        if len(group) > MAX_GROUP_SIZE:
+            logger.warning(
+                f"SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
+            )
+
+        rep = pick_representative(group)
+        rep["dedup_status"] = rep.get("dedup_status", "survivor")
+        processed_rows.append(rep)
+        representatives.append((sha, rep.get("image_id")))
+        for r in group:
+            if r is rep:
+                continue
+            r["dedup_status"] = "internal_duplicate"
+            processed_rows.append(r)
+            internal_dup_count += 1
 
     # Query DynamoDB for representatives' sha values
     sha_list = [s for s, _ in representatives]
@@ -272,7 +258,6 @@ def process_manifest(manifest):
 
     return processed_rows, summary
 
-
 def write_processed_outputs(job_id, shard_name, processed_rows, summary):
     """
     Writes:
@@ -302,7 +287,6 @@ def write_processed_outputs(job_id, shard_name, processed_rows, summary):
         "summary": f"s3://{bucket}/{summary_key}",
         "success": f"s3://{bucket}/{success_key}"
     }
-
 
 def main():
     start = time.time()

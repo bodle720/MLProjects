@@ -352,7 +352,6 @@ def _normalize_label_types(raw) -> List[str]:
             return [s.strip() for s in raw.split(",") if s.strip()]
     return [str(raw)]
 
-
 def get_job_input(event: Any) -> Dict[str, Any]:
     """
     Return a normalized dict with keys:

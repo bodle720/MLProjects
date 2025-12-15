@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+'''
+This deduplication_ingest Lambda correctly finalizes deduplication by enforcing survivor-only semantics in
+upload_staging and safely cleans up the job-scoped CTAS table.
+'''
 import os
 import json
 import time
@@ -35,7 +39,6 @@ s3 = boto3.client("s3")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-
 def _s3_list_keys(bucket: str, prefix: str) -> List[str]:
     paginator = s3.get_paginator("list_objects_v2")
     keys = []
@@ -46,11 +49,9 @@ def _s3_list_keys(bucket: str, prefix: str) -> List[str]:
                 keys.append(key)
     return keys
 
-
 def _s3_read_json(bucket: str, key: str) -> Dict:
     resp = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(resp["Body"].read().decode("utf-8"))
-
 
 def _s3_read_jsonl(bucket: str, key: str):
     """Generator yielding parsed JSON objects from an S3 JSONL object."""
@@ -59,7 +60,6 @@ def _s3_read_jsonl(bucket: str, key: str):
         if not line:
             continue
         yield json.loads(line.decode("utf-8"))
-
 
 def _wait_for_athena(qid: str, poll_interval: float = 2.0, timeout_seconds: int = 600):
     start = time.time()
@@ -74,7 +74,6 @@ def _wait_for_athena(qid: str, poll_interval: float = 2.0, timeout_seconds: int 
         if time.time() - start > timeout_seconds:
             return False, f"timeout after {timeout_seconds}s"
         time.sleep(poll_interval)
-
 
 def _athena_count_job_rows(job_id: str) -> int:
     """Run a quick Athena count(*) for upload_staging WHERE job_id = '<job_id>'."""
@@ -102,7 +101,6 @@ def _athena_count_job_rows(job_id: str) -> int:
         except Exception:
             return 0
     return 0
-
 
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -186,46 +184,38 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_processed_rows": total_processed_rows
     }
 
-
 def _read_all_processed_rows(bucket: str, jsonl_keys: List[str]):
     """Generator yielding all processed rows from the list of jsonl S3 keys."""
     for key in jsonl_keys:
         for row in _s3_read_jsonl(bucket, key):
             yield row
 
+def _drop_ctas_table_if_exists(job_id):
+    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    table_name = f"dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    resp = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
+        WorkGroup=ATHENA_WORKGROUP
+    )
+    return resp["QueryExecutionId"]
 
 def handler(event, context):
     # Validate input
     try:
-        job_input = get_job_input(event)
-        job_id = job_input["job_id"]
-        user = job_input["user"]
-        event_type = job_input["event_type"]
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
+        manifests = event["manifests"]
     except KeyError as e:
-        raise RuntimeError(f"Missing key in the cleanup lambda: {e}")
+        raise RuntimeError(
+            f"Missing key in dedup ingest lambda: {e}, event={json.dumps(event)}"
+        )
 
     if not job_id or job_id == "unknown":
         raise RuntimeError("Dedup reingest Lambda failed: missing job_id in event")
 
-    # Try common locations for manifests (top-level, nested stage, recursive fallback)
-    manifests = None
-    if isinstance(event, dict) and "manifests" in event:
-        manifests = event["manifests"]
-    else:
-        # look under any top-level nested dict (e.g., event['validationStage']['manifests'])
-        for v in (event.values() if isinstance(event, dict) else []):
-            if isinstance(v, dict) and "manifests" in v:
-                manifests = v["manifests"]
-                break
-
-    # final fallback: recursive search (bounded) using helper from common.utils if available
-    if manifests is None:
-        try:
-            manifests = find_key_recursively(event, "manifests")
-        except Exception:
-            manifests = None
-
-    # Validate
     if not manifests:
         raise RuntimeError("Reingest Lambda failed: missing manifests in event")
     if not isinstance(manifests, list):
@@ -286,7 +276,8 @@ def handler(event, context):
         chunk = []
         chunk_size = 200
         for r in rows_iter:
-            chunk.append(r)
+            if r.get("dedup_status") in ("survivor", "external_duplicate"):
+                chunk.append(r)
             if len(chunk) >= chunk_size:
                 all_failed, last_error = chunked_insert_upload_staging(chunk,
                                                                        ICEBERG_DATABASE_NAME,
@@ -321,6 +312,17 @@ def handler(event, context):
         raise
 
     log(job_id, user, event_type, f"Reingest complete for job {job_id}: inserted_rows={inserted_rows}, new_count={new_count}", LOG_FIREHOSE_STREAM_NAME)
+
+    drop_qid = _drop_ctas_table_if_exists(job_id)
+    dropped, meta_or_reason = _wait_for_athena(drop_qid)
+    if not dropped:
+        err = f"Failed to drop our created CTAS temp table for our current job id = {job_id}, reason = {meta_or_reason}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+
+    skipped = total_processed_rows - inserted_rows
+    log(job_id, user, event_type,
+        f"Filtered out {skipped} non-survivor rows during dedup reingest",
+        LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,

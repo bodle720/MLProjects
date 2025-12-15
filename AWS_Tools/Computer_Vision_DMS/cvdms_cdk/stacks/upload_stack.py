@@ -25,7 +25,7 @@ from aws_cdk import (
 )
 
 from config import CONFIG
-from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig, StageConfig
+from config_models import ComputeEnvConfig, KickoffLambdaConfig, CleanupLambdaConfig, StageConfig, DedupLambdaConfig
 
 class BatchingStage(Construct):
     def __init__(self, scope: Construct, id: str, *,
@@ -112,7 +112,7 @@ class BatchingStage(Construct):
             lambda_function=batching_fn,
             result_path=f"$.{stage_name}",
             output_path="$",
-            payload_response_only=True # this means Lambda’s return is also merged into the state output, not just nested.
+            payload_response_only=True # means the Lambda’s response is used as the task output
         )
 
         batching_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
@@ -396,10 +396,14 @@ class ImageUploadStack(Stack):
         # Make cleanup lambda
         cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
+        # Make cleanup lambda
+        dedup_ingest_task = self._make_dedup_ingest_task(CONFIG.dedup_ingest_lambda)
+
         workflow_definition = sfn.Chain.start(validation_stage.batching_task) \
             .next(validation_stage.map_state) \
             .next(deduplication_stage.batching_task) \
             .next(deduplication_stage.map_state) \
+            .next(dedup_ingest_task) \
             .next(cleanup_task)
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
@@ -412,7 +416,7 @@ class ImageUploadStack(Stack):
 
         upload_state_machine.apply_removal_policy(RemovalPolicy.DESTROY)
 
-        for stage in [validation_stage]:#, internal_dedup_stage, external_dedup_stage, faiss_registration_stage, label_enrichment_stage]:
+        for stage in [validation_stage, deduplication_stage]:
             upload_state_machine.role.add_to_principal_policy(iam.PolicyStatement(
                 actions=["batch:SubmitJob"],
                 resources=[job_queue.job_queue_arn, stage.job_def.attr_job_definition_arn]
@@ -629,6 +633,11 @@ class ImageUploadStack(Stack):
             lambda_function=cleanup_lambda,
             result_path="$.cleanup",
             output_path="$",
+            payload=sfn.TaskInput.from_object({
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "event_type.$": "$.event_type"
+            }),
             payload_response_only=True)
 
         cleanup_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
@@ -690,3 +699,125 @@ class ImageUploadStack(Stack):
             # Trigger: S3 event for job.json, add the queue as an event source
             kickoff_lambda.add_event_source(event_sources.SqsEventSource(self.upload_events_queue, batch_size=1))
             self.upload_events_queue.grant_consume_messages(kickoff_lambda)
+
+    def _make_dedup_ingest_task(self,
+                                dedup_ingest_config: DedupLambdaConfig):
+        dedup_ingest_lambda = _lambda.Function(
+            self,
+            "DedupIngestLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler=dedup_ingest_config.handler,
+            code=_lambda.Code.from_asset(dedup_ingest_config.path),
+            layers = [self.common_utils_layer],
+            dead_letter_queue=self.global_dlq,
+            memory_size=dedup_ingest_config.memory_size,
+            timeout=Duration.seconds(dedup_ingest_config.timeout_sec),
+            environment={
+                "JOB_TABLE_NAME": self.job_table.table_name,
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+                "ICEBERG_UPLOAD_STAGING_TABLE_NAME": "upload_staging",
+                "LOCK_TABLE_NAME": self.lock_table.table_name,
+                "ATHENA_WORKGROUP": "primary",
+                "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
+                "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
+            }
+        )
+
+        # 1) DynamoDB
+        self.lock_table.grant_read_write_data(dedup_ingest_lambda)
+        self.job_table.grant_read_write_data(dedup_ingest_lambda)
+
+        # 2) S3: delete temp files under temp/image-upload/ and read them
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+        ))
+
+        # 3) S3: Athena results write only to athena-results/
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/athena-results/*"]
+        ))
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket", "s3:GetBucketLocation"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"]
+        ))
+
+        # 4) Athena: start and poll queries in the workgroup
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+            resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
+        ))
+
+        # 5) Firehose logging
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[self.firehose_delivery_stream.attr_arn]
+        ))
+
+        # 6) Glue metadata read (catalog, DB, and tables)
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase", "glue:GetDatabases",
+                "glue:GetTable", "glue:GetTables",
+                "glue:GetPartition", "glue:GetPartitions",
+                "glue:GetTableVersion", "glue:GetTableVersions"
+            ],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/*"
+            ]
+        ))
+
+        # 7) Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+            ],
+            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                       f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
+                       f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/upload_staging"
+                       ]
+        ))
+
+        # 8) S3: read and delete Iceberg files for upload_staging prefix
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*"]
+        ))
+        dedup_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+        ))
+
+        dedup_ingest_task = tasks.LambdaInvoke(
+            self, "DedupIngestTask",
+            lambda_function=dedup_ingest_lambda,
+            result_path="$.dedup_ingest",
+            output_path="$",
+            payload=sfn.TaskInput.from_object({
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "event_type.$": "$.event_type",
+                "manifests.$": "$.deduplicationStage.manifests"
+            }),
+            payload_response_only=True)
+
+        dedup_ingest_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
+
+        dedup_ingest_task.add_catch(
+            handler=self._make_dlq_chain(),  # fresh chain instance
+            errors=["States.ALL"],
+            result_path="$.errorInfo",
+        )
+
+        return dedup_ingest_task

@@ -1,3 +1,8 @@
+'''
+This Lambda dynamically shards upload_staging rows by SHA prefix, exports them via Athena CTAS into Parquet, writes
+internal dedup manifests, and feeds those manifests into a Step Functions Map so dedup Batch workers can run safely
+and in parallel.
+'''
 import os
 import json
 import math
@@ -52,6 +57,17 @@ def _start_athena_count(job_id):
     )
     return resp["QueryExecutionId"]
 
+def _drop_ctas_table_if_exists(job_id):
+    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    table_name = f"dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    resp = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
+        WorkGroup=ATHENA_WORKGROUP
+    )
+    return resp["QueryExecutionId"]
+
 def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     """
     Run CTAS to export upload_staging rows for job_id to export_s3_prefix,
@@ -61,9 +77,11 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE}"'
 
     safe_job_id = job_id.replace("'", "''")
-    export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
     # sanitize table name for CTAS (replace non-alnum with underscore)
-    tmp_table = f"dedup_export_{''.join(c if c.isalnum() else '_' for c in job_id)}_{prefix_len}"
+    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
+    tmp_table = f"dedup_export_{sanitized_job_id}"
+
     sql = (
         f"CREATE TABLE {tmp_table} "
         f"WITH (format='PARQUET', external_location = '{export_location}') AS "
@@ -129,7 +147,7 @@ def _list_export_files(export_prefix):
                     sha_prefix = p.split("=", 1)[1]
                     break
             if not sha_prefix:
-                sha_prefix = "zz"
+                raise RuntimeError(f"Unable to extract sha_prefix from export key: {key}")
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
     return files_by_prefix
 
@@ -199,7 +217,6 @@ def handler(event, context):
     # Prepare prefixes
     export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/export"
     manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/manifests"
-    processed_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/processed"
 
     # 0) Run COUNT(*) to estimate rows
     try:
@@ -233,7 +250,15 @@ def handler(event, context):
 
     # 2) Run CTAS to export partitioned files with sha_prefix
     try:
+        drop_qid = _drop_ctas_table_if_exists(job_id)
+        ok, meta_or_reason = _wait_for_athena(drop_qid)
+        if not ok:
+            err = f"Failed to drop CTAS temp table for job_id={job_id}: {meta_or_reason}"
+            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+            raise RuntimeError(err)
+
         qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
+
     except Exception as e:
         err = f"Failed to start Athena CTAS for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
