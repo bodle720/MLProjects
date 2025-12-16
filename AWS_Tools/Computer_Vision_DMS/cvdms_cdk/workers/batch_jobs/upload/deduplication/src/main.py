@@ -18,6 +18,7 @@ except Exception:
     PYARROW_AVAILABLE = False
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Your logging helper must be available in the image or layer
 from common.utils import log
@@ -55,10 +56,21 @@ dynamodb = boto3.client("dynamodb")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+def read_manifest_with_retry(bucket, key, retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return s3.get_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    continue
+            raise
+
 def s3_read_json(s3_uri):
     """Read a JSON object from s3://bucket/key and return parsed JSON."""
     bucket, key = s3_uri.replace("s3://", "").split("/", 1)
-    resp = s3.get_object(Bucket=bucket, Key=key)
+    resp = read_manifest_with_retry(bucket, key)
     return json.loads(resp["Body"].read().decode("utf-8"))
 
 def write_s3_text(bucket, key, text, content_type="application/json"):
@@ -71,7 +83,7 @@ def read_parquet_rows_from_s3_uris(s3_uris):
     Requires pyarrow and s3fs in the container.
     """
     if not PYARROW_AVAILABLE:
-        raise RuntimeError("pyarrow and s3fs are required to read Parquet files in the worker container")
+        raise RuntimeError("[DEDUP_JOB_DEF] pyarrow and s3fs are required to read Parquet files in the worker container")
 
     fs = s3fs.S3FileSystem()
     for uri in s3_uris:
@@ -93,7 +105,7 @@ def read_parquet_rows_from_s3_uris(s3_uris):
                         for row in table.to_pylist():
                             yield row
             except Exception as e:
-                logger.exception("Failed to read parquet file %s: %s", uri, e)
+                logger.exception("[DEDUP_JOB_DEF] Failed to read parquet file %s: %s", uri, e)
                 raise
 
 def read_json_or_csv_rows_from_s3_uris(s3_uris):
@@ -102,7 +114,7 @@ def read_json_or_csv_rows_from_s3_uris(s3_uris):
     """
     for uri in s3_uris:
         bucket, key = uri.replace("s3://", "").split("/", 1)
-        resp = s3.get_object(Bucket=bucket, Key=key)
+        resp = read_manifest_with_retry(bucket, key)
         body = resp["Body"].read().decode("utf-8")
         # try JSON lines
         try:
@@ -120,7 +132,7 @@ def read_json_or_csv_rows_from_s3_uris(s3_uris):
                 else:
                     yield arr
             except Exception:
-                logger.warning("Unable to parse file %s as JSON/JSONL", uri)
+                logger.warning("[DEDUP_JOB_DEF] Unable to parse file %s as JSON/JSONL", uri)
 
 def pick_representative(group):
     """
@@ -162,7 +174,7 @@ def batch_get_dynamodb_items(table_name, keys):
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 8.0)
             except Exception as e:
-                logger.exception("DynamoDB batch_get_item failed: %s", e)
+                logger.exception("[DEDUP_JOB_DEF] DynamoDB batch_get_item failed: %s", e)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 8.0)
     return results
@@ -198,7 +210,7 @@ def process_manifest(manifest):
         groups[sha].append(r)
 
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
+            raise RuntimeError(f"[DEDUP_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
 
     processed_rows = []
     representatives = []  # list of (sha, rep_image_id)
@@ -212,7 +224,7 @@ def process_manifest(manifest):
 
         if len(group) > MAX_GROUP_SIZE:
             logger.warning(
-                f"SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
+                f"[DEDUP_JOB_DEF] SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
             )
 
         rep = pick_representative(group)
@@ -291,7 +303,7 @@ def write_processed_outputs(job_id, shard_name, processed_rows, summary):
 def main():
     start = time.time()
     if not MANIFEST_S3_KEY:
-        raise RuntimeError("MANIFEST_S3_KEY not set in environment")
+        raise RuntimeError("[DEDUP_JOB_DEF] MANIFEST_S3_KEY not set in environment")
 
     manifest = s3_read_json(MANIFEST_S3_KEY)
     shard_name = manifest.get("shard_prefix", "shard")
@@ -300,17 +312,17 @@ def main():
     try:
         processed_rows, summary = process_manifest(manifest)
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"Batch worker failed processing manifest {MANIFEST_S3_KEY}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker failed processing manifest {MANIFEST_S3_KEY}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     try:
         outputs = write_processed_outputs(JOB_ID, shard_name, processed_rows, summary)
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"Batch worker failed writing outputs for shard {shard_name}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker failed writing outputs for shard {shard_name}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     elapsed = time.time() - start
-    log(JOB_ID, USER, EVENT_TYPE, f"Batch worker completed shard {shard_name}: rows_read={summary['rows_read']}, internal_duplicates={summary['internal_duplicates']}, external_duplicates={summary['external_duplicates']}, time_s={elapsed:.1f}", LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker completed shard {shard_name}: rows_read={summary['rows_read']}, internal_duplicates={summary['internal_duplicates']}, external_duplicates={summary['external_duplicates']}, time_s={elapsed:.1f}", LOG_FIREHOSE_STREAM_NAME)
 
 if __name__ == "__main__":
     main()

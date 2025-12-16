@@ -18,7 +18,7 @@ def normalize_record(record_body):
     try:
         obj = json.loads(record_body)
     except Exception:
-        print(f'Could not load json record_body {record_body}')
+        print(f'[FIREHOSE_LOG_TRANSFORMER] Could not load json record_body {record_body}')
         # not JSON, wrap raw text as message
         obj = {"message": record_body}
 
@@ -56,11 +56,11 @@ def handler(event, context):
         try:
             raw = base64.b64decode(rec.get("data")).decode("utf-8")
         except Exception as e:
-            print(f"Issue decoding, setting raw = empty string for rec = {rec}, error = {e}")
+            print(f"[FIREHOSE_LOG_TRANSFORMER] Issue decoding, setting raw = empty string for rec = {rec}, error = {e}")
             raw = ""
 
         normalized = normalize_record(raw)
-        print("Normalized record = ", normalized) # for debugging
+        print("[FIREHOSE_LOG_TRANSFORMER] Normalized record = ", normalized) # for debugging
 
         # Firehose JSON->Parquet conversion expects JSON lines; send back a JSON string per record.
         out_data = json.dumps(normalized) + "\n"

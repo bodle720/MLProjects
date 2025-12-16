@@ -59,8 +59,8 @@ def _start_athena_count(job_id):
 
 def _drop_ctas_table_if_exists(job_id):
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"dedup_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS {table_name}'
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
@@ -69,26 +69,48 @@ def _drop_ctas_table_if_exists(job_id):
     return resp["QueryExecutionId"]
 
 def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
-    """
-    Run CTAS to export upload_staging rows for job_id to export_s3_prefix,
-    adding sha_prefix = substr(sha256_hash,1,prefix_len) for partitioning.
-    Returns QueryExecutionId.
-    """
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE}"'
 
     safe_job_id = job_id.replace("'", "''")
-    # sanitize table name for CTAS (replace non-alnum with underscore)
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
-    tmp_table = f"dedup_export_{sanitized_job_id}"
 
-    sql = (
-        f"CREATE TABLE {tmp_table} "
-        f"WITH (format='PARQUET', external_location = '{export_location}') AS "
-        f"SELECT *, substr(sha256_hash, 1, {prefix_len}) AS sha_prefix "
-        f"FROM {table} "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
+    tmp_table = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
+
+    sql = f"""
+    CREATE TABLE {tmp_table}
+    WITH (
+        format = 'PARQUET',
+        external_location = '{export_location}'
+    ) AS
+    SELECT
+        job_id,
+        image_id,
+        temp_source_ref,
+        copy_to,
+        img_type,
+        img_height,
+        img_width,
+        num_channels,
+        dtype,
+        file_size_mb,
+        CAST(uploaded_at AS timestamp(3)) AS uploaded_at,
+        source,
+        sha256_hash,
+        temp_string_labels_path,
+        temp_bbox_path,
+        temp_semantic_mask_path,
+        temp_instance_annotation_path,
+        validation_status,
+        validation_error,
+        dedup_status,
+        matched_image_id,
+        merge_action,
+        substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
+    FROM {table}
+    WHERE job_id = '{safe_job_id}'
+    """
+
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
@@ -147,7 +169,7 @@ def _list_export_files(export_prefix):
                     sha_prefix = p.split("=", 1)[1]
                     break
             if not sha_prefix:
-                raise RuntimeError(f"Unable to extract sha_prefix from export key: {key}")
+                raise RuntimeError(f"[DEDUP_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
     return files_by_prefix
 
@@ -200,6 +222,27 @@ def _choose_prefix_length(total_rows, job_memory_mb=JOB_MEMORY_MB, avg_row_kb=AV
     # fallback to max_prefix_len
     return max_prefix_len, target
 
+def _delete_s3_prefix(bucket, prefix):
+    paginator = s3.get_paginator("list_objects_v2")
+    to_delete = []
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            to_delete.append({"Key": obj["Key"]})
+
+            if len(to_delete) == 1000:
+                s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={"Objects": to_delete}
+                )
+                to_delete = []
+
+    if to_delete:
+        s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": to_delete}
+        )
+
 def handler(event, context):
     # Validate input
     try:
@@ -210,9 +253,9 @@ def handler(event, context):
         label_types = job_input["label_types"] # a list
         source = job_input.get("source", "unknown")
     except KeyError as e:
-        raise RuntimeError(f"Batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
 
-    log(job_id, user, event_type, f"Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Prepare prefixes
     export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/export"
@@ -222,18 +265,18 @@ def handler(event, context):
     try:
         count_qid = _start_athena_count(job_id)
     except Exception as e:
-        err = f"Failed to start Athena COUNT for job {job_id}: {e}"
+        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     ok, meta_or_reason = _wait_for_athena(count_qid, poll_interval=2, timeout_seconds=300)
     if not ok:
-        err = f"Athena COUNT failed for job {job_id}: {meta_or_reason}"
+        err = f"[DEDUP_FILE_BATCHING] Athena COUNT failed for job {job_id}: {meta_or_reason}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
-    log(job_id, user, event_type, f"Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
 
     # 1) choose prefix length P dynamically
     prefix_len, target_rows = _choose_prefix_length(
@@ -246,42 +289,44 @@ def handler(event, context):
         max_prefix_len=int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
     )
 
-    log(job_id, user, event_type, f"Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
 
     # 2) Run CTAS to export partitioned files with sha_prefix
     try:
         drop_qid = _drop_ctas_table_if_exists(job_id)
         ok, meta_or_reason = _wait_for_athena(drop_qid)
         if not ok:
-            err = f"Failed to drop CTAS temp table for job_id={job_id}: {meta_or_reason}"
+            err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS temp table for job_id={job_id}: {meta_or_reason}"
             log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
             raise RuntimeError(err)
+
+        _delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
 
         qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
 
     except Exception as e:
-        err = f"Failed to start Athena CTAS for job {job_id}: {e}"
+        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena CTAS for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     success, meta_or_reason = _wait_for_athena(qid)
     if not success:
-        err = f"Athena CTAS failed for job {job_id}: {meta_or_reason}"
+        err = f"[DEDUP_FILE_BATCHING] Athena CTAS failed for job {job_id}: {meta_or_reason}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
         raise RuntimeError(err)
 
-    log(job_id, user, event_type, f"Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
 
     # 3) List exported files and group by sha_prefix
     try:
         files_by_prefix = _list_export_files(export_prefix_base)
     except Exception as e:
-        err = f"Failed listing export files for job {job_id}: {e}"
+        err = f"[DEDUP_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     if not files_by_prefix:
-        err = f"No exported files found for job {job_id} under prefix {export_prefix_base}"
+        err = f"[DEDUP_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
@@ -300,7 +345,7 @@ def handler(event, context):
             if len(files) <= split_size_files:
                 manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
                 manifest_keys.append(manifest_s3_uri)
-                log(job_id, user, event_type, f"Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+                log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
             else:
                 # split into multiple manifests for this shard_prefix
                 for i in range(0, len(files), split_size_files):
@@ -308,9 +353,9 @@ def handler(event, context):
                     sub_name = f"{shard_prefix}-{i//split_size_files+1}"
                     manifest_s3_uri = _write_manifest(job_id, sub_name, chunk, manifest_prefix)
                     manifest_keys.append(manifest_s3_uri)
-                    log(job_id, user, event_type, f"Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+                    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
     except Exception as e:
-        err = f"Failed writing manifests for job {job_id}: {e}"
+        err = f"[DEDUP_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
@@ -324,6 +369,6 @@ def handler(event, context):
         "manifests": manifest_keys
     }
 
-    log(job_id, user, event_type, f"Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
 
     return result

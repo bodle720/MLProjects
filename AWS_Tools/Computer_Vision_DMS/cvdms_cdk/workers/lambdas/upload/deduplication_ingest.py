@@ -90,7 +90,7 @@ def _athena_count_job_rows(job_id: str) -> int:
     qid = q["QueryExecutionId"]
     ok, meta = _wait_for_athena(qid)
     if not ok:
-        raise RuntimeError(f"Athena count query failed: {meta}")
+        raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed: {meta}")
     # fetch results
     res = athena.get_query_results(QueryExecutionId=qid, MaxResults=1)
     rows = res.get("ResultSet", {}).get("Rows", [])
@@ -192,8 +192,8 @@ def _read_all_processed_rows(bucket: str, jsonl_keys: List[str]):
 
 def _drop_ctas_table_if_exists(job_id):
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"dedup_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS "{table_name}"'
+    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS {table_name}'
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
@@ -210,29 +210,29 @@ def handler(event, context):
         manifests = event["manifests"]
     except KeyError as e:
         raise RuntimeError(
-            f"Missing key in dedup ingest lambda: {e}, event={json.dumps(event)}"
+            f"[DEDUP_INGEST] Missing key in dedup ingest lambda: {e}, event={json.dumps(event)}"
         )
 
     if not job_id or job_id == "unknown":
-        raise RuntimeError("Dedup reingest Lambda failed: missing job_id in event")
+        raise RuntimeError("[DEDUP_INGEST] Dedup reingest Lambda failed: missing job_id in event")
 
     if not manifests:
-        raise RuntimeError("Reingest Lambda failed: missing manifests in event")
+        raise RuntimeError("[DEDUP_INGEST] Reingest Lambda failed: missing manifests in event")
     if not isinstance(manifests, list):
-        raise RuntimeError("Reingest Lambda failed: manifests must be a list of s3 URIs")
+        raise RuntimeError("[DEDUP_INGEST] Reingest Lambda failed: manifests must be a list of s3 URIs")
 
-    log(job_id, user, event_type, f"Starting dedup reingest for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_INGEST] Starting dedup reingest for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # 1) Collect processed shard outputs and verify completeness
     try:
         collected = _collect_processed_shards(job_id, manifests)
     except Exception as e:
-        log(job_id, user, event_type, f"Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     missing = collected["missing_shards"]
     if missing:
-        err = f"Missing processed outputs for shards: {missing}"
+        err = f"[DEDUP_INGEST] Missing processed outputs for shards: {missing}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
@@ -240,20 +240,20 @@ def handler(event, context):
     total_processed_rows = collected["total_processed_rows"]
     processed_jsonl_keys = collected["processed_jsonl_keys"]
 
-    log(job_id, user, event_type, f"Collected {len(processed_jsonl_keys)} processed shard files. rows_read={total_rows_read}, processed_rows={total_processed_rows}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_INGEST] Collected {len(processed_jsonl_keys)} processed shard files. rows_read={total_rows_read}, processed_rows={total_processed_rows}", LOG_FIREHOSE_STREAM_NAME)
 
     # 2) Verify original count via Athena
     try:
         original_count = _athena_count_job_rows(job_id)
     except Exception as e:
-        log(job_id, user, event_type, f"Athena count failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Athena count failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    log(job_id, user, event_type, f"Athena original_count={original_count} for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_INGEST] Athena original_count={original_count} for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Basic sanity check: rows_read should equal original_count (or at least >= number of processed rows)
     if total_rows_read != original_count:
-        err = f"Row count mismatch: Athena original_count={original_count}, workers rows_read={total_rows_read}"
+        err = f"[DEDUP_INGEST] Row count mismatch: Athena original_count={original_count}, workers rows_read={total_rows_read}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
@@ -264,9 +264,9 @@ def handler(event, context):
                                                      UPLOAD_STAGING_TABLE_NAME,
                                                      ATHENA_OUTPUT_S3,
                                                      ATHENA_WORKGROUP)
-        log(job_id, user, event_type, f"Deleted upload_staging partition for job {job_id}, result={delete_result}", LOG_FIREHOSE_STREAM_NAME)
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Deleted upload_staging partition for job {job_id}, result={delete_result}", LOG_FIREHOSE_STREAM_NAME)
     except Exception as e:
-        log(job_id, user, event_type, f"Failed to delete upload_staging partition for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Failed to delete upload_staging partition for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     # 4) Read processed rows and insert back into upload_staging in chunks
@@ -286,7 +286,7 @@ def handler(event, context):
                                                                        ATHENA_OUTPUT_S3,
                                                                        chunk_size=chunk_size)
                 if all_failed:
-                    raise RuntimeError(f"chunked insert failed for a chunk; last_error={last_error}")
+                    raise RuntimeError(f"[DEDUP_INGEST] chunked insert failed for a chunk; last_error={last_error}")
                 inserted_rows += len(chunk)
                 chunk = []
         # final chunk
@@ -298,30 +298,30 @@ def handler(event, context):
                                                                    ATHENA_OUTPUT_S3,
                                                                    chunk_size=chunk_size)
             if all_failed:
-                raise RuntimeError(f"chunked insert failed for final chunk; last_error={last_error}")
+                raise RuntimeError(f"[DEDUP_INGEST] chunked insert failed for final chunk; last_error={last_error}")
             inserted_rows += len(chunk)
     except Exception as e:
-        log(job_id, user, event_type, f"Failed inserting processed rows for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Failed inserting processed rows for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     # 5) Optional verification: count rows after insert
     try:
         new_count = _athena_count_job_rows(job_id)
     except Exception as e:
-        log(job_id, user, event_type, f"Athena count after insert failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, f"[DEDUP_INGEST] Athena count after insert failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    log(job_id, user, event_type, f"Reingest complete for job {job_id}: inserted_rows={inserted_rows}, new_count={new_count}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_INGEST] Reingest complete for job {job_id}: inserted_rows={inserted_rows}, new_count={new_count}", LOG_FIREHOSE_STREAM_NAME)
 
     drop_qid = _drop_ctas_table_if_exists(job_id)
     dropped, meta_or_reason = _wait_for_athena(drop_qid)
     if not dropped:
-        err = f"Failed to drop our created CTAS temp table for our current job id = {job_id}, reason = {meta_or_reason}"
+        err = f"[DEDUP_INGEST] Failed to drop our created CTAS temp table for our current job id = {job_id}, reason = {meta_or_reason}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
 
     skipped = total_processed_rows - inserted_rows
     log(job_id, user, event_type,
-        f"Filtered out {skipped} non-survivor rows during dedup reingest",
+        f"[DEDUP_INGEST] Filtered out {skipped} non-survivor rows during dedup reingest",
         LOG_FIREHOSE_STREAM_NAME)
 
     return {

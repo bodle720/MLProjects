@@ -25,14 +25,14 @@ def handler(event, context):
         user = event["user"]
         event_type = event["event_type"]
     except KeyError as e:
-        raise RuntimeError(f"Missing key in the cleanup lambda: {e}, event = {event}")
+        raise RuntimeError(f"[CLEANUP] Missing key in the cleanup lambda: {e}, event = {event}")
 
-    log(job_id, user, event_type, f"Starting cleanup lambda for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[CLEANUP] Starting cleanup lambda for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # 1. Delete S3 temp files
     prefix = f"temp/image-upload/{job_id}/"
     delete_s3_prefix(FILE_BUCKET_NAME, prefix)
-    log(job_id, user, event_type, f"Done deleting s3 temp files in cleanup lambda", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[CLEANUP] Done deleting s3 temp files in cleanup lambda", LOG_FIREHOSE_STREAM_NAME)
 
     # 2. Delete staging table rows im iceberg table
     delete_result = delete_iceberg_partition_rows(job_id,
@@ -41,7 +41,7 @@ def handler(event, context):
                                                   ATHENA_OUTPUT_S3,
                                                   ATHENA_WORKGROUP
                                                   )
-    log(job_id, user, event_type, f"Done deleting iceberg staging row, results = {delete_result}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[CLEANUP] Done deleting iceberg staging row, results = {delete_result}", LOG_FIREHOSE_STREAM_NAME)
 
     # 3. make sure job status table is marked COMPLETED
     update_success, update_msg = update_job_status(job_id,
@@ -51,7 +51,7 @@ def handler(event, context):
                                                   user=user,
                                                   event_type=event_type,
                                                   error_msg=None)
-    log(job_id, user, event_type, f"Done updating job status to COMPLETED. Success = {update_success}, msg = {update_msg}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[CLEANUP] Done updating job status to COMPLETED. Success = {update_success}, msg = {update_msg}", LOG_FIREHOSE_STREAM_NAME)
 
     # 4. Unlock the infrastructure
     release_success, release_msg = release_lock(job_id,
@@ -60,7 +60,7 @@ def handler(event, context):
                                                  user=user,
                                                  event_type=event_type)
 
-    log(job_id, user, event_type, f"Done release lock attempt. Success = {release_success}, msg = {release_msg}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[CLEANUP] Done release lock attempt. Success = {release_success}, msg = {release_msg}", LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,

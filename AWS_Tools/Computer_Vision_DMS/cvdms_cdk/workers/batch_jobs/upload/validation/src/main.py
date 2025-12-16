@@ -99,7 +99,7 @@ def process_image(image_key):
     try:
         obj = s3.get_object(Bucket=FILE_BUCKET_NAME, Key=image_key)
     except ClientError as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"Error getting s3 image key: {image_key}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Error getting s3 image key: {image_key}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
         row["validation_status"] = "failed"
         row["validation_error"] = str(e)
         return row
@@ -119,14 +119,14 @@ def process_image(image_key):
         img = Image.open(buf)
         img.load()
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"Error using PIL to open image key: {image_key}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Error using PIL to open image key: {image_key}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
         row["validation_status"] = "failed"
         row["validation_error"] = f"Cannot open image {image_key} in validation batch job: {e}"
         return row
 
     bands = len(img.getbands())
     if bands not in (1, 3):
-        log(JOB_ID, USER, EVENT_TYPE, f"Invalid band count for image key: {image_key}, count = {bands}, must be 1 or 3.", LOG_FIREHOSE_STREAM_NAME, error=f"Invalid band count: {bands}", level='error')
+        log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Invalid band count for image key: {image_key}, count = {bands}, must be 1 or 3.", LOG_FIREHOSE_STREAM_NAME, error=f"Invalid band count: {bands}", level='error')
         row["validation_status"] = "failed"
         row["validation_error"] = f"Invalid band count for image key: {image_key}, count = {bands}, must be 1 or 3."
         return row
@@ -145,7 +145,7 @@ def process_image(image_key):
     label_presence_errors = validate_labels_presence(image_uuid)
 
     if label_presence_errors:
-        log(JOB_ID, USER, EVENT_TYPE, f"Error validating label presence for {image_key}", LOG_FIREHOSE_STREAM_NAME, error=", ".join(label_presence_errors), level='error')
+        log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Error validating label presence for {image_key}", LOG_FIREHOSE_STREAM_NAME, error=", ".join(label_presence_errors), level='error')
         row["validation_status"] = "failed"
         row["validation_error"] = ", ".join(label_presence_errors)
         return row
@@ -160,14 +160,25 @@ def process_image(image_key):
 
     return row
 
+def read_manifest_with_retry(bucket, key, retries=5, delay=2):
+    for attempt in range(retries):
+        try:
+            return s3.get_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    continue
+            raise
+
 def main():
 
     bucket, key = MANIFEST_S3_KEY.replace("s3://", "").split("/", 1)
-    obj = s3.get_object(Bucket=bucket, Key=key)
+    obj = read_manifest_with_retry(bucket, key)
     manifest = json.loads(obj["Body"].read())
     images = manifest["images"]
     num_images = len(images)
-    log(JOB_ID, USER, EVENT_TYPE, f"Validation batch job starting: Job {JOB_ID} with manifest of {num_images} images, manifest located at {MANIFEST_S3_KEY}", LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Validation batch job starting: Job {JOB_ID} with manifest of {num_images} images, manifest located at {MANIFEST_S3_KEY}", LOG_FIREHOSE_STREAM_NAME)
 
     rows = []
     failed = 0
@@ -177,7 +188,7 @@ def main():
         if row["validation_status"] != "passed":
             failed += 1
 
-    msg = f"Image count that failed to process in validation batch job: {failed} images."
+    msg = f"[VAL_JOB_DEF] Image count that failed to process in validation batch job: {failed} images."
     log(JOB_ID, USER, EVENT_TYPE, msg, LOG_FIREHOSE_STREAM_NAME)
 
     if failed == len(images):
@@ -193,14 +204,14 @@ def main():
 
         if last_error:
             log(JOB_ID, USER, EVENT_TYPE,
-                f"Athena insert failed for an image, and the last error was: {last_error}",
+                f"[VAL_JOB_DEF] Athena insert failed for an image, and the last error was: {last_error}",
                 LOG_FIREHOSE_STREAM_NAME, error=str(last_error), level='error')
 
         if all_failed:
             # Send to global DLQ.
-            raise Exception(f"Validation batch job failed for all images, total failed = {len(rows)}")
+            raise Exception(f"[VAL_JOB_DEF] Validation batch job failed for all images, total failed = {len(rows)}")
 
-    log(JOB_ID, USER, EVENT_TYPE, f"Completed processing: {len(rows)} rows written, {failed} failed", LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, f"[VAL_JOB_DEF] Completed processing: {len(rows)} rows written, {failed} failed", LOG_FIREHOSE_STREAM_NAME)
 
 if __name__ == "__main__":
     main()

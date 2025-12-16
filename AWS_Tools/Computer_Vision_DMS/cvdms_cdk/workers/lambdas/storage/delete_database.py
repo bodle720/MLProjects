@@ -12,14 +12,14 @@ def handler(event, context):
     for page in paginator.paginate(DatabaseName=db_name):
         for table in page.get("TableList", []):
             tname = table["Name"]
-            print(f"Deleting table {tname}")
+            print(f"[DELETE_ICEBERG_DB] Deleting table {tname}")
             glue.delete_table(DatabaseName=db_name, Name=tname)
 
     # Delete the database itself
     try:
         glue.delete_database(Name=db_name)
-        print(f"Deleted database {db_name}")
+        print(f"[DELETE_ICEBERG_DB] Deleted database {db_name}")
     except glue.exceptions.EntityNotFoundException:
-        print(f"Database {db_name} not found, nothing to delete")
+        print(f"[DELETE_ICEBERG_DB] Database {db_name} not found, nothing to delete")
 
     return {"status": "ok"}

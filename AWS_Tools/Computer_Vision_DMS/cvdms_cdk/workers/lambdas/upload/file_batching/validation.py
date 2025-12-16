@@ -28,10 +28,10 @@ def handler(event, context):
         label_types = job_input["label_types"] # a list
         source = job_input.get("source", "unknown")
     except KeyError as e:
-        raise RuntimeError(f"Validation batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"[VAL_FILE_BATCHING] Validation batching Lambda failed: missing required key {e}")
 
 
-    log(job_id, user, event_type, f"Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 
     # Images are assumed to be under temp/image-upload/{job_id}/images/
     image_keys = []
@@ -51,7 +51,7 @@ def handler(event, context):
         continuation_token = resp["NextContinuationToken"]
 
     if len(image_keys) == 0:
-        err_msg = f"No images found under {prefix}"
+        err_msg = f"[VAL_FILE_BATCHING] No images found under {prefix}"
         log(job_id, user, event_type, err_msg, LOG_FIREHOSE_STREAM_NAME, error = err_msg, level="error")
         raise
 
@@ -75,7 +75,7 @@ def handler(event, context):
 
         manifest_keys.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
 
-    msg = f"Done batching {len(image_keys)} total images for image upload validation: label types = {label_types}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
+    msg = f"[VAL_FILE_BATCHING] Done batching {len(image_keys)} total images for image upload validation: label types = {label_types}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
     log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
 
     return {

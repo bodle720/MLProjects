@@ -80,7 +80,6 @@ class BatchingStage(Construct):
             handler=config.file_batching.handler,
             code=_lambda.Code.from_asset(config.file_batching.path),
             layers=[common_utils_layer],
-            dead_letter_queue=global_dlq,
             memory_size=config.file_batching.memory_size,
             timeout=Duration.minutes(config.file_batching.timeout_min),
             environment=lambda_env
@@ -92,15 +91,48 @@ class BatchingStage(Construct):
 
         batching_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket","s3:GetBucketLocation"],
-            resources=[file_bucket.bucket_arn]
+            resources=[file_bucket.bucket_arn,
+                       iceberg_bucket.bucket_arn]
         ))
+
+        batching_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"],
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"]
+        ))
+
         batching_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["athena:StartQueryExecution","athena:GetQueryExecution","athena:GetQueryResults"],
             resources=[f"arn:aws:athena:{region}:{account}:workgroup/primary"]
         ))
+
         batching_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
             resources=[firehose_delivery_stream_attr_arn]
+        ))
+
+        batching_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+
+        batching_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase",
+                "glue:GetDatabases",
+                "glue:GetTable",
+                "glue:GetTables",
+                "glue:GetPartition",
+                "glue:GetPartitions",
+                "glue:GetTableVersion",
+                "glue:GetTableVersions",
+                "glue:CreateTable",
+                "glue:DeleteTable"
+            ],
+            resources=[
+                f"arn:aws:glue:{region}:{account}:catalog",
+                f"arn:aws:glue:{region}:{account}:database/{iceberg_database_name}",
+                f"arn:aws:glue:{region}:{account}:table/{iceberg_database_name}/*"
+            ]
         ))
 
         if extra_permissions:
@@ -119,7 +151,7 @@ class BatchingStage(Construct):
 
         # if the batching Lambda fails, Step Functions will capture the error info under $.errorInfo and transition to the DLQ state.
         batching_task.add_catch(
-            handler=dlq_chain_factory(),  # fresh chain instance
+            handler=dlq_chain_factory(),
             errors=["States.ALL"],
             result_path="$.errorInfo",
         )
@@ -282,7 +314,7 @@ class BatchingStage(Construct):
         )
 
         batch_task.add_catch(
-            handler=dlq_chain_factory(),  # fresh chain instance
+            handler=dlq_chain_factory(),
             errors=["States.ALL"],
             result_path="$.errorInfo",
         )
@@ -403,8 +435,8 @@ class ImageUploadStack(Stack):
             .next(validation_stage.map_state) \
             .next(deduplication_stage.batching_task) \
             .next(deduplication_stage.map_state) \
-            .next(dedup_ingest_task) \
-            .next(cleanup_task)
+            .next(dedup_ingest_task)
+            # .next(cleanup_task)
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
@@ -437,8 +469,10 @@ class ImageUploadStack(Stack):
         make_dlq_message = sfn.Pass(
             self, f"MakeDLQMessage_{suffix}",
             parameters={
+                "source": "stepfunctions",
                 "job_id.$": "$.job_id",
                 "user.$": "$.user",
+                "event_type.$": "$.event_type",
                 "error.$": "$.errorInfo"
             },
             result_path="$.dlqMessage"
@@ -450,14 +484,12 @@ class ImageUploadStack(Stack):
             action="sendMessage",
             parameters={
                 "QueueUrl": self.global_dlq.queue_url,
-                "MessageBody.$": "$.dlqMessage"
+                "MessageBody.$": "States.JsonToString($.dlqMessage)"
             },
             iam_resources=[self.global_dlq.queue_arn],
         )
 
-        send_to_dlq_fail = sfn.Fail(self, f"SendToDLQFail_{suffix}", cause="StepFailed", error="StepError")
-
-        return sfn.Chain.start(make_dlq_message).next(send_to_dlq).next(send_to_dlq_fail)
+        return sfn.Chain.start(make_dlq_message).next(send_to_dlq)
 
     def _make_compute_env(self,
                           ce_config: ComputeEnvConfig):
@@ -538,7 +570,6 @@ class ImageUploadStack(Stack):
             handler=cleanup_config.handler,
             code=_lambda.Code.from_asset(cleanup_config.path),
             layers = [self.common_utils_layer],
-            dead_letter_queue=self.global_dlq,
             memory_size=cleanup_config.memory_size,
             timeout=Duration.seconds(cleanup_config.timeout_sec),
             environment={
@@ -661,14 +692,14 @@ class ImageUploadStack(Stack):
                 handler=kickoff_config.handler,
                 code=_lambda.Code.from_asset(kickoff_config.path),
                 layers=[self.common_utils_layer],
-                dead_letter_queue=self.global_dlq,
                 memory_size=kickoff_config.memory_size,
                 timeout=Duration.seconds(kickoff_config.timeout_sec),
                 environment={
                     "JOB_TABLE_NAME": self.job_table.table_name,
                     "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
                     "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn,
-                    "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref
+                    "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+                    "GLOBAL_DLQ_URL": self.global_dlq.queue_url
                 }
             )
 
@@ -709,7 +740,6 @@ class ImageUploadStack(Stack):
             handler=dedup_ingest_config.handler,
             code=_lambda.Code.from_asset(dedup_ingest_config.path),
             layers = [self.common_utils_layer],
-            dead_letter_queue=self.global_dlq,
             memory_size=dedup_ingest_config.memory_size,
             timeout=Duration.seconds(dedup_ingest_config.timeout_sec),
             environment={
