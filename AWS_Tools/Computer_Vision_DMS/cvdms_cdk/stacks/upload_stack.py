@@ -313,12 +313,6 @@ class BatchingStage(Construct):
             integration_pattern=sfn.IntegrationPattern.RUN_JOB
         )
 
-        batch_task.add_catch(
-            handler=dlq_chain_factory(),
-            errors=["States.ALL"],
-            result_path="$.errorInfo",
-        )
-
         # Map state (wired to Batch task)
         params = {
                 "manifest.$": "$$.Map.Item.Value",
@@ -337,6 +331,12 @@ class BatchingStage(Construct):
             items_path=f"$.{stage_name}.manifests",
             item_selector=params,
             max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus)))),
+        )
+
+        map_state.add_catch(
+            handler=dlq_chain_factory(),
+            errors=["States.ALL"],
+            result_path="$.errorInfo",
         )
 
         per_item = sfn.Chain.start(batch_task)
@@ -489,7 +489,9 @@ class ImageUploadStack(Stack):
             iam_resources=[self.global_dlq.queue_arn],
         )
 
-        return sfn.Chain.start(make_dlq_message).next(send_to_dlq)
+        fail = sfn.Fail(self, f"WorkflowFailed_{suffix}", cause="SentToGlobalDLQ", error="WorkflowError")
+
+        return sfn.Chain.start(make_dlq_message).next(send_to_dlq).next(fail)
 
     def _make_compute_env(self,
                           ce_config: ComputeEnvConfig):

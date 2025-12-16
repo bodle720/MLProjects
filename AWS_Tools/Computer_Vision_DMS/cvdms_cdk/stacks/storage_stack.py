@@ -371,8 +371,7 @@ class StorageStack(Stack):
 
         upload_events_queue = sqs.Queue(self, "UploadEventsQueue",
                                         visibility_timeout=Duration.minutes(5),
-                                        retention_period=Duration.days(4),
-                                        dead_letter_queue=sqs.DeadLetterQueue(max_receive_count=1, queue=dlq))
+                                        retention_period=Duration.days(4))
 
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
