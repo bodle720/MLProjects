@@ -262,7 +262,7 @@ class UploadClient:
         except Exception as e:
             return False, f"delete_error: {e}"
 
-    def upload_files_to_s3(self, job_id: str, source: str = "") -> Tuple[bool, str]:
+    def upload_files_to_s3(self, job_id: str, data_source: str = "") -> Tuple[bool, str]:
         """
         Uploads all files referenced in self.df to the appropriate S3 temp folder for the given job_id.
         Returns (True, "success") or (False, error_message).
@@ -271,7 +271,6 @@ class UploadClient:
             return False, "No DataFrame loaded. Run start_upload_job_from_csv first."
 
         prefix = f"temp/image-upload/{job_id}"
-        manifest_prefix = "temp/image-upload"
         try:
             for _, row in self.df.iterrows():
                 image_path = row["path"]
@@ -326,11 +325,11 @@ class UploadClient:
                 "job_id": job_id,
                 "user": self.user,
                 "num_images": len(self.df),
-                "source":source,
+                "data_source":data_source,
                 "event_type": self.event_type,
                 "label_types": [col for col in self.df.columns if col in VALID_LABEL_COLUMNS and col != "mask_map"]
             }
-            manifest_key = f"{manifest_prefix}/job.json"
+            manifest_key = f"{prefix}/job.json"
             self.s3.put_object(
                 Bucket=self.file_bucket_name,
                 Key=manifest_key,
@@ -352,7 +351,7 @@ class UploadClient:
                                   csv_path: str,
                                   *,
                                   summary: str = "",
-                                  source: str = "") -> Tuple[bool, Dict]:
+                                  data_source: str = "") -> Tuple[bool, Dict]:
         """
         High-level operation a caller will use. Steps:
           1) try to acquire lock
@@ -393,7 +392,7 @@ class UploadClient:
 
         # At this point we have job_id, PENDING row, and self.df to upload to temp folder.
         logging.info("CSV loaded in and validated. Uploading to S3...")
-        ok, msg = self.upload_files_to_s3(job_id, source=source)
+        ok, msg = self.upload_files_to_s3(job_id, data_source=data_source)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
             self.update_job_status(job_id, "FAILED", error_msg=msg)
@@ -446,6 +445,10 @@ class LogClient:
         return self.athena.get_query_results(QueryExecutionId=qid)
 
     def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict, Optional[pd.DataFrame]]:
+
+        if not job_id:
+            return False, {"error": "Job id is None"}, None
+
         try:
             # Step 1: repair partitions so new data is visible
             self._run_query(f"MSCK REPAIR TABLE {self.glue_table_name}")

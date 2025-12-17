@@ -25,7 +25,7 @@ MANIFEST_S3_KEY = os.environ["MANIFEST_S3_KEY"]
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPES = json.loads(os.environ["LABEL_TYPES"]) # now list of strs, indicating the label types in this upload
-SOURCE = os.environ["SOURCE"]
+DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 
 s3 = boto3.client("s3")
@@ -84,7 +84,7 @@ def process_image(image_key):
            "dtype": None,
            "file_size_mb": 0.0, # a double value
            "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), # Athena preferred format.
-           "source": SOURCE,
+           "data_source": DATA_SOURCE,
            "sha256_hash": None,
            "temp_string_labels_path": None,
            "temp_bbox_path": None,

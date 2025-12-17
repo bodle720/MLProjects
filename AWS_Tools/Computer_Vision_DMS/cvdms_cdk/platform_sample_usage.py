@@ -20,12 +20,13 @@ app = CvdmsApp(app_name="cvdmsv1",
 
 upload_ok, upload_attempt_info = app.upload_imagery("sample/sample.csv",
                                                      summary="my first test with the new infrastructure",
-                                                     source='FashionMNIST') # summary of the job for the job table
+                                                     data_source='FashionMNIST')
 
-if upload_ok:
-    job_id = upload_attempt_info["job_id"]
-    log_retrieval_success, log_info, log_df_results = app.get_logs_by_job_id(job_id)
+job_id = upload_attempt_info.get("job_id")
+log_retrieval_success, log_info, log_df_results = app.get_logs_by_job_id(job_id)
 
-    if log_retrieval_success:
-        log_df_results.to_csv(f'logs_{job_id}.csv', index=False)
-        pretty_print_wrapped(log_df_results, width = 60, max_rows = 600)
+# log_df_results is a df you can save if wanted, but note it takes time for logs to show up.
+# log_df_results.to_csv(f'logs_{job_id}.csv', index=False)
+
+# Pretty print the logs so far. Re-run get_logs_by_job_id above to update logs.
+pretty_print_wrapped(log_df_results, width = 60, max_rows = 600)

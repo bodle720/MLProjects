@@ -151,7 +151,7 @@ def chunked_insert_upload_staging(rows,
     columns = [
         "job_id", "image_id", "temp_source_ref", "copy_to",
         "img_type", "img_height", "img_width", "num_channels", "dtype",
-        "file_size_mb", "uploaded_at", "source", "sha256_hash",
+        "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
         "temp_string_labels_path", "temp_bbox_path", "temp_semantic_mask_path",
         "temp_instance_annotation_path", "validation_status", "validation_error",
         "dedup_status", "matched_image_id", "merge_action"
@@ -355,7 +355,7 @@ def _normalize_label_types(raw) -> List[str]:
 def get_job_input(event: Any) -> Dict[str, Any]:
     """
     Return a normalized dict with keys:
-      job_id, user, label_types (list), source, event_type
+      job_id, user, label_types (list), data_source, event_type
     """
     # 1) Try container env extraction (ECS/Batch job detail)
     env_map = _extract_from_container_env(event)
@@ -363,13 +363,13 @@ def get_job_input(event: Any) -> Dict[str, Any]:
         job_id = env_map.get("JOB_ID") or env_map.get("job_id")
         user = env_map.get("USER") or env_map.get("user")
         label_types_raw = env_map.get("LABEL_TYPES") or env_map.get("label_types")
-        source = env_map.get("SOURCE") or env_map.get("source")
+        data_source = env_map.get("DATA_SOURCE") or env_map.get("data_source")
         event_type = env_map.get("EVENT_TYPE") or env_map.get("event_type")
         return {
             "job_id": job_id,
             "user": user,
             "label_types": _normalize_label_types(label_types_raw),
-            "source": source,
+            "data_source": data_source,
             "event_type": event_type
         }
 
@@ -377,7 +377,7 @@ def get_job_input(event: Any) -> Dict[str, Any]:
     job_id = _dig_for_key(event, "job_id")
     user = _dig_for_key(event, "user")
     label_types_raw = _dig_for_key(event, "label_types") or _dig_for_key(event, "labelTypes")
-    source = _dig_for_key(event, "source")
+    data_source = _dig_for_key(event, "data_source")
     event_type = _dig_for_key(event, "event_type") or _dig_for_key(event, "eventType")
 
     # 3) recursive fallback (bounded)
@@ -387,8 +387,8 @@ def get_job_input(event: Any) -> Dict[str, Any]:
         user = find_key_recursively(event, "user")
     if label_types_raw is None:
         label_types_raw = find_key_recursively(event, "label_types") or find_key_recursively(event, "labelTypes")
-    if source is None:
-        source = find_key_recursively(event, "source")
+    if data_source is None:
+        data_source = find_key_recursively(event, "data_source")
     if event_type is None:
         event_type = find_key_recursively(event, "event_type") or find_key_recursively(event, "eventType")
 
@@ -401,6 +401,6 @@ def get_job_input(event: Any) -> Dict[str, Any]:
         "job_id": job_id or "unknown",
         "user": user or "unknown",
         "label_types": _normalize_label_types(label_types_raw),
-        "source": source or "unknown",
+        "data_source": data_source or "unknown",
         "event_type": event_type or "unknown"
     }

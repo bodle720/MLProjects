@@ -1,6 +1,5 @@
 import os
 import json
-import logging
 from datetime import datetime
 from urllib.parse import unquote_plus
 
@@ -20,6 +19,9 @@ sqs = boto3.client("sqs")
 
 def send_to_dlq(job_id, user, event_type, error):
     job_id = job_id or 'unknown'
+    user = user or 'unknown'
+    event_type = event_type or "IMAGE_UPLOAD"
+
     try:
         sqs.send_message(
             QueueUrl=GLOBAL_DLQ_URL,
@@ -33,8 +35,6 @@ def send_to_dlq(job_id, user, event_type, error):
         )
     except Exception as e:
         log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Failed to send to DLQ: {str(error)}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-
-    raise RuntimeError(str(error))
 
 def list_keys(bucket, prefix):
     keys = []
@@ -113,8 +113,14 @@ def validate_labels(bucket, job_id, label_types, user, event_type):
 
         log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Found {len(image_bases)} images and labels for label type = {label_type}", LOG_FIREHOSE_STREAM_NAME)
 
-def handler(event, context):
+def fail(job_id, user, event_type, msg):
+    job_id = job_id or "unknown"
+    user = user or "unknown"
+    event_type = event_type or "IMAGE_UPLOAD"
+    send_to_dlq(job_id, user, event_type, msg)
+    return {"status": "failed", "job_id": job_id, "user": user, "event_type": event_type}
 
+def handler(event, context):
     job_id = "unknown"
     user = "unknown"
     event_type = "IMAGE_UPLOAD"
@@ -122,7 +128,7 @@ def handler(event, context):
     # Guard: ensure there's at least one record
     records = event.get("Records", [])
     if not records:
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: No Records in event")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: No Records in event")
 
     # Use the first SQS record (batch_size=1 configured)
     sqs_rec = records[0]
@@ -130,25 +136,33 @@ def handler(event, context):
     # SQS message body contains the S3 notification JSON as a string
     body = sqs_rec.get("body")
     if not body:
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: SQS record missing body")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: SQS record missing")
 
     try:
         body_json = json.loads(body)
     except Exception as e:
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Failed to parse SQS body as JSON: {str(e)}")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Failed to parse SQS body as JSON: {str(e)}")
 
     # Expect the S3 notification inside body_json["Records"][0]["s3"]
     s3_records = body_json.get("Records", [])
     if not s3_records:
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: No S3 Records inside SQS body")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: No S3 Records inside SQS body")
 
     s3_rec = s3_records[0]
     s3_info = s3_rec.get("s3", {})
     bucket = s3_info.get("bucket", {}).get("name")
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
+    # key: "temp/image-upload/<job_id>/job.json"
+    if not key.endswith("job.json"):
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Unexpected key: {key}")
+
+    parts = key.split("/")
+    if len(parts) >= 3 and parts[0] == "temp" and parts[1] == "image-upload":
+        job_id = parts[2]  # use this even before reading the manifest
+
     if bucket != FILE_BUCKET_NAME:
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Bucket mismatch in upload kickoff lambda")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Bucket mismatch in upload kickoff lambda")
 
     # Now proceed with your existing logic to fetch job.json, validate, etc.
     try:
@@ -157,18 +171,21 @@ def handler(event, context):
         job_id = job_data["job_id"]
         user = job_data["user"]
         num_images = job_data["num_images"]
-        source = job_data["source"]
+        data_source = job_data["data_source"]
         label_types = job_data["label_types"]
         event_type = job_data["event_type"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, num_images, source, event_type, and label_types from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        send_to_dlq(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
+        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, num_images, data_source, event_type, and label_types from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
+
+    if not isinstance(label_types, list):
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] label_types must be a list, got {type(label_types)}")
 
     try:
         validate_labels(bucket, job_id, label_types, user, event_type)
     except Exception as e:
         log(job_id, user, event_type, "[UPLOAD_KICKOFF] Error validating labels in kickoff lambda.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        send_to_dlq(job_id, user, event_type,f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error validating labels: {str(e)}")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error validating labels: {str(e)}")
 
     try:
         response = sf.start_execution(
@@ -178,13 +195,13 @@ def handler(event, context):
                 "job_id": job_id,
                 "user": user,
                 "label_types": json.dumps(label_types),
-                "source":source.lower(),
+                "data_source":data_source.lower(),
                 "event_type":event_type,
             })
         )
     except Exception as e:
         log(job_id, user, event_type, "[UPLOAD_KICKOFF] Error starting state machine for upload workflow.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        send_to_dlq(job_id, user, event_type,f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
 
     log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda started state machine execution {response['executionArn']}", LOG_FIREHOSE_STREAM_NAME)
 
@@ -193,5 +210,5 @@ def handler(event, context):
             "user": user,
             "label_types": label_types,
             "num_images":num_images,
-            "source":source,
+            "data_source":data_source,
             "event_type": event_type}

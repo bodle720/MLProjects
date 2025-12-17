@@ -376,7 +376,7 @@ class StorageStack(Stack):
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
             s3n.SqsDestination(upload_events_queue),
-            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="job.json")
+            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="/job.json")
         )
 
         # Make a lambda that polls the dlq and processes the messages

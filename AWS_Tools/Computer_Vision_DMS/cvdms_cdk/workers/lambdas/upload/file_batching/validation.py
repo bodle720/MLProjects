@@ -26,10 +26,9 @@ def handler(event, context):
         user = job_input["user"]
         event_type = job_input["event_type"]
         label_types = job_input["label_types"] # a list
-        source = job_input.get("source", "unknown")
+        data_source = job_input.get("data_source", "unknown")
     except KeyError as e:
         raise RuntimeError(f"[VAL_FILE_BATCHING] Validation batching Lambda failed: missing required key {e}")
-
 
     log(job_id, user, event_type, f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 
@@ -82,7 +81,7 @@ def handler(event, context):
         "job_id": job_id,
         "user": user,
         "label_types": json.dumps(label_types),
-        "source":source,
+        "data_source":data_source,
         "event_type": event_type,
         "manifests": manifest_keys
     }

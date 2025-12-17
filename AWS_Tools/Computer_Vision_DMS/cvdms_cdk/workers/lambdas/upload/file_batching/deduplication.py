@@ -81,7 +81,8 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     CREATE TABLE {tmp_table}
     WITH (
         format = 'PARQUET',
-        external_location = '{export_location}'
+        external_location = '{export_location}',
+        partitioned_by = ARRAY['sha_prefix']
     ) AS
     SELECT
         job_id,
@@ -95,7 +96,7 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         dtype,
         file_size_mb,
         CAST(uploaded_at AS timestamp(3)) AS uploaded_at,
-        source,
+        data_source,
         sha256_hash,
         temp_string_labels_path,
         temp_bbox_path,
@@ -156,11 +157,18 @@ def _list_export_files(export_prefix):
     prefix = export_prefix.rstrip("/") + "/"
     files_by_prefix = {}
     kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": prefix}
+    all_keys = []
     for page in paginator.paginate(**kwargs):
         for obj in page.get("Contents", []):
             key = obj["Key"]
+            all_keys.append(key)
+
             if key.endswith("/"):
                 continue
+
+            if key.split("/")[-1].startswith("_") or key.split("/")[-1].startswith("."):
+                continue
+
             # Try to extract sha_prefix from key path like ".../sha_prefix=aa/part-000.parquet"
             sha_prefix = None
             parts = key.split("/")
@@ -171,7 +179,8 @@ def _list_export_files(export_prefix):
             if not sha_prefix:
                 raise RuntimeError(f"[DEDUP_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
-    return files_by_prefix
+
+    return files_by_prefix, all_keys
 
 def _write_manifest(job_id, shard_name, files, manifest_prefix):
     """
@@ -251,7 +260,7 @@ def handler(event, context):
         user = job_input["user"]
         event_type = job_input["event_type"]
         label_types = job_input["label_types"] # a list
-        source = job_input.get("source", "unknown")
+        data_source = job_input.get("data_source", "unknown")
     except KeyError as e:
         raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
 
@@ -319,14 +328,14 @@ def handler(event, context):
 
     # 3) List exported files and group by sha_prefix
     try:
-        files_by_prefix = _list_export_files(export_prefix_base)
+        files_by_prefix, all_keys = _list_export_files(export_prefix_base)
     except Exception as e:
         err = f"[DEDUP_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     if not files_by_prefix:
-        err = f"[DEDUP_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}"
+        err = f"[DEDUP_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys are: {all_keys[:10]}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
@@ -364,7 +373,7 @@ def handler(event, context):
         "job_id": job_id,
         "user": user,
         "label_types": json.dumps(label_types),
-        "source": source,
+        "data_source": data_source,
         "event_type": event_type,
         "manifests": manifest_keys
     }

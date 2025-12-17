@@ -41,7 +41,6 @@ class BatchingStage(Construct):
                  ce_maxv_cpus: int,
                  region: str,
                  account: str,
-                 global_dlq: sqs.Queue,
                  dlq_chain_factory: Callable[[], sfn.Chain],
                  firehose_delivery_stream_name: str,
                  firehose_delivery_stream_attr_arn: str,
@@ -126,7 +125,12 @@ class BatchingStage(Construct):
                 "glue:GetTableVersion",
                 "glue:GetTableVersions",
                 "glue:CreateTable",
-                "glue:DeleteTable"
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:CreatePartition",
+                "glue:BatchCreatePartition",
+                "glue:BatchDeletePartition",
+                "glue:DeletePartition"
             ],
             resources=[
                 f"arn:aws:glue:{region}:{account}:catalog",
@@ -288,9 +292,10 @@ class BatchingStage(Construct):
             "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
             "USER": sfn.JsonPath.string_at("$.user"),
             "LABEL_TYPES": sfn.JsonPath.string_at("$.label_types"),
-            "SOURCE": sfn.JsonPath.string_at("$.source"),
+            "DATA_SOURCE": sfn.JsonPath.string_at("$.data_source"),
             "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
+            "SHA256_TABLE_NAME": sha256_table.table_name,
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
             "ICEBERG_DATABASE_NAME": iceberg_database_name,
@@ -319,7 +324,7 @@ class BatchingStage(Construct):
                 "job_id.$": "$.job_id", # keys ending with .$ tell Step Functions “this value comes from a JSONPath expression.”
                 "user.$": "$.user",
                 "label_types.$": "$.label_types",
-                "source.$": "$.source",
+                "data_source.$": "$.data_source",
                 "event_type.$": "$.event_type"
         }
 
@@ -330,6 +335,8 @@ class BatchingStage(Construct):
             self, f"{stage_name}MapState",
             items_path=f"$.{stage_name}.manifests",
             item_selector=params,
+            result_path=f"$.{stage_name}.batch_results",
+            output_path="$",
             max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus)))),
         )
 
@@ -397,7 +404,6 @@ class ImageUploadStack(Stack):
             ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
-            global_dlq=self.global_dlq,
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
@@ -418,7 +424,6 @@ class ImageUploadStack(Stack):
             ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
-            global_dlq=self.global_dlq,
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
@@ -473,7 +478,7 @@ class ImageUploadStack(Stack):
                 "job_id.$": "$.job_id",
                 "user.$": "$.user",
                 "event_type.$": "$.event_type",
-                "error.$": "$.errorInfo"
+                "error.$": "States.JsonToString($.errorInfo)",
             },
             result_path="$.dlqMessage"
         )
