@@ -211,11 +211,17 @@ class LoggingStack(Stack):
                              )
                         )
 
-        # Glue table depends on bucket and delivery stream indirectly; ensure correct creation order
-        glue_table.add_dependency(glue_db)
-        glue_table.add_dependency(log_bucket.node.default_child)
-        delivery_stream.add_dependency(glue_table)
-        delivery_stream.add_dependency(glue_db)
+        # Removal policies
+        glue_db.apply_removal_policy(RemovalPolicy.DESTROY)
+        glue_table.apply_removal_policy(RemovalPolicy.DESTROY)
+        delivery_stream.apply_removal_policy(RemovalPolicy.DESTROY)
+
+        # Creation / deletion ordering
+        delivery_stream.node.add_dependency(log_bucket)
+        delivery_stream.node.add_dependency(firehose_role)
+        delivery_stream.node.add_dependency(transform_fn)
+
+        glue_table.node.add_dependency(glue_db)
 
         # Outputs
         self.firehose_delivery_stream = delivery_stream
