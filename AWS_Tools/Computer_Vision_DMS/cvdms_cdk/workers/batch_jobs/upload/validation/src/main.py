@@ -10,7 +10,7 @@ from PIL import Image
 import boto3
 from botocore.exceptions import ClientError
 
-from common.utils import log, chunked_insert_upload_staging
+from common.utils import log, chunked_insert
 
 # Env Variables from upload stack
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -92,9 +92,7 @@ def process_image(image_key):
            "temp_instance_annotation_path": None,
            "validation_status": "pending",
            "validation_error": None,
-           "dedup_status": "pending",
-           "matched_image_id": None,
-           "merge_action": None}
+           "dedup_status": "pending"}
 
     try:
         obj = s3.get_object(Bucket=FILE_BUCKET_NAME, Key=image_key)
@@ -195,12 +193,12 @@ def main():
         raise
 
     if rows:
-        all_failed, last_error = chunked_insert_upload_staging(rows,
-                                                               ICEBERG_DB_NAME,
-                                                               UPLOAD_STAGING_TABLE_NAME,
-                                                               ATHENA_WORKGROUP,
-                                                               ATHENA_OUTPUT_S3,
-                                                               chunk_size=200)
+        all_failed, last_error = chunked_insert(rows,
+                                               ICEBERG_DB_NAME,
+                                               UPLOAD_STAGING_TABLE_NAME,
+                                               ATHENA_WORKGROUP,
+                                               ATHENA_OUTPUT_S3,
+                                               chunk_size=200)
 
         if last_error:
             log(JOB_ID, USER, EVENT_TYPE,

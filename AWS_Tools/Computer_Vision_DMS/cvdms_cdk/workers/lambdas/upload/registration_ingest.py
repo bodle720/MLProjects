@@ -23,6 +23,7 @@ ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+CANONICAL_IMAGERY_TABLE_NAME = os.environ["CANONICAL_IMAGERY_TABLE_NAME"]
 
 # Where workers write processed outputs (matches worker behavior)
 PROCESSED_PREFIX_BASE = os.environ.get(
@@ -281,7 +282,7 @@ def handler(event, context):
             if len(chunk) >= chunk_size:
                 all_failed, last_error = chunked_insert(chunk,
                                                        ICEBERG_DATABASE_NAME,
-                                                       UPLOAD_STAGING_TABLE_NAME,
+                                                       CANONICAL_IMAGERY_TABLE_NAME,
                                                        ATHENA_WORKGROUP,
                                                        ATHENA_OUTPUT_S3,
                                                        chunk_size=chunk_size)
@@ -293,7 +294,7 @@ def handler(event, context):
         if chunk:
             all_failed, last_error = chunked_insert(chunk,
                                                    ICEBERG_DATABASE_NAME,
-                                                   UPLOAD_STAGING_TABLE_NAME,
+                                                   CANONICAL_IMAGERY_TABLE_NAME,
                                                    ATHENA_WORKGROUP,
                                                    ATHENA_OUTPUT_S3,
                                                    chunk_size=chunk_size)

@@ -13,7 +13,7 @@ athena = boto3.client("athena")
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-ICEBERG_UPLOAD_STAGING_TABLE_NAME = os.environ["ICEBERG_UPLOAD_STAGING_TABLE_NAME"]
+UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
@@ -37,7 +37,7 @@ def handler(event, context):
     # 2. Delete staging table rows im iceberg table
     delete_result = delete_iceberg_partition_rows(job_id,
                                                   ICEBERG_DB_NAME,
-                                                  ICEBERG_UPLOAD_STAGING_TABLE_NAME,
+                                                  UPLOAD_STAGING_TABLE_NAME,
                                                   ATHENA_OUTPUT_S3,
                                                   ATHENA_WORKGROUP
                                                   )

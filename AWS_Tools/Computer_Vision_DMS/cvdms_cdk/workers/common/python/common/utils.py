@@ -1,11 +1,16 @@
 import time
 import json
+import math
 import logging
+from decimal import Decimal
 from typing import Tuple, Any, Optional, List, Dict
 from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
+
+INT_COLS = {"img_height", "img_width", "num_channels"}
+FLOAT_COLS = {"file_size_mb"}
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -14,6 +19,23 @@ firehose = boto3.client("firehose")
 dynamodb = boto3.resource("dynamodb")
 athena = boto3.client("athena")
 s3 = boto3.client("s3")
+
+UPLOAD_STAGING_COLS = [
+    "job_id", "image_id", "temp_source_ref", "copy_to",
+    "img_type", "img_height", "img_width", "num_channels", "dtype",
+    "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
+    "temp_string_labels_path", "temp_bbox_path", "temp_semantic_mask_path",
+    "temp_instance_annotation_path", "validation_status", "validation_error",
+    "dedup_status"
+]
+
+CANONICAL_IMAGERY_COLS = [
+    "image_id", "source_ref", "img_type",
+    "img_height", "img_width", "num_channels", "dtype",
+    "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
+    "string_labels", "bboxes", "semantic_masks",
+    "instance_annotations"
+]
 
 def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
     entry = {
@@ -127,36 +149,119 @@ def wait_for_athena(query_execution_id,
         except Exception as e:
             raise Exception(f'Exception in wait_for_athena: {e}')
 
+def _escape_sql_string(s: str) -> str:
+    return s.replace("'", "''")
+
+def _coerce_int(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None  # avoid True -> 1 surprises
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        if math.isfinite(v) and v.is_integer():
+            return int(v)
+        return None
+    if isinstance(v, Decimal):
+        try:
+            f = float(v)
+        except Exception:
+            return None
+        return int(f) if (math.isfinite(f) and f.is_integer()) else None
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        if math.isfinite(f) and f.is_integer():
+            return int(f)
+        return None
+    return None
+
+def _coerce_float(v):
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, Decimal)):
+        try:
+            f = float(v)
+        except Exception:
+            return None
+        return f if math.isfinite(f) else None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return f if math.isfinite(f) else None
+    return None
+
 def to_sql_value(r, c):
     v = r.get(c)
 
+    # NULL handling (note: empty string is NOT NULL generally, except uploaded_at below)
     if v is None:
         return "NULL"
-    if c == 'uploaded_at':
-        return f"TIMESTAMP '{v}'"
-    if isinstance(v, (int, float)):
-        return str(v)
+
+    # avoid True -> 1, False -> 0
+    if isinstance(v, bool):
+        return "NULL"
+
+    # int columns
+    if c in INT_COLS:
+        iv = _coerce_int(v)
+        return "NULL" if iv is None else str(iv)
+
+    # float/double columns
+    if c in FLOAT_COLS:
+        fv = _coerce_float(v)
+        return "NULL" if fv is None else str(fv)
+
+    # timestamp column
+    if c == "uploaded_at":
+        if not v:
+            return "NULL"
+        # expect string like "YYYY-MM-DD HH:MM:SS"
+        if isinstance(v, str):
+            return f"TIMESTAMP '{_escape_sql_string(v.strip())}'"
+        return "NULL"
+
+    # numeric (non-special)
+    if isinstance(v, (int, float, Decimal)):
+        fv = float(v)
+        return "NULL" if not math.isfinite(fv) else str(v)
+
+    # arrays
     if isinstance(v, list):
-        return "ARRAY[" + ", ".join("'" + str(x).replace("'", "''") + "'" for x in v) + "]"
+        return "ARRAY[" + ", ".join("'" + _escape_sql_string(str(x)) + "'" for x in v) + "]"
 
-    return "'" + str(v).replace("'", "''") + "'"
+    # default string
+    return "'" + _escape_sql_string(str(v)) + "'"
 
-def chunked_insert_upload_staging(rows,
-                                  iceberg_db_name,
-                                  upload_staging_table_name,
-                                  athena_workgroup,
-                                  athena_output_s3,
-                                  chunk_size=200):
+def chunked_insert(rows,
+                  iceberg_db_name,
+                  table_name,
+                  athena_workgroup,
+                  athena_output_s3,
+                  chunk_size=200):
     """Insert rows into Iceberg in batches. If a batch fails, retry row-by-row."""
-    columns = [
-        "job_id", "image_id", "temp_source_ref", "copy_to",
-        "img_type", "img_height", "img_width", "num_channels", "dtype",
-        "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
-        "temp_string_labels_path", "temp_bbox_path", "temp_semantic_mask_path",
-        "temp_instance_annotation_path", "validation_status", "validation_error",
-        "dedup_status", "matched_image_id", "merge_action"
-    ]
-    table = f'"{iceberg_db_name}"."{upload_staging_table_name}"'
+
+    assert chunk_size > 0
+
+    if table_name == 'upload_staging':
+        columns = UPLOAD_STAGING_COLS
+    elif table_name == 'canonical_imagery':
+        columns = CANONICAL_IMAGERY_COLS
+    else:
+        raise Exception(f'Table name not recognized: {table_name}')
+
+    table = f'"{iceberg_db_name}"."{table_name}"'
     all_failed = False
     fail_count = 0
     last_error = ""

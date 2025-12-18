@@ -393,7 +393,7 @@ class StorageStack(Stack):
                 "JOB_TABLE_NAME": job_table.table_name,
                 "FILE_BUCKET_NAME": file_bucket.bucket_name,
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                "ICEBERG_UPLOAD_STAGING_TABLE_NAME": "upload_staging",
+                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOCK_TABLE_NAME": lock_table.table_name,
                 "ATHENA_WORKGROUP": "primary",
                 "ICEBERG_DATABASE_NAME": iceberg_database_name,
@@ -418,7 +418,7 @@ class StorageStack(Stack):
 
         # 3) S3: Athena results write only to athena-results/
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:PutObject"],
+            actions=["s3:PutObject", "s3:GetObject"],
             resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*"]
         ))
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
@@ -474,6 +474,13 @@ class StorageStack(Stack):
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
             conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+        ))
+
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["glue:DeleteTable"],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/dedup_export_*"
+            ],
         ))
 
         dlq_processor.add_event_source(event_sources.SqsEventSource(dlq, batch_size=10))

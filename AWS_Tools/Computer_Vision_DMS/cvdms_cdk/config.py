@@ -2,7 +2,8 @@ from config_models import (
     AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
     StageConfig, FileBatchingConfig, BatchTaskJobDefConfig,
     KickoffLambdaConfig, CleanupLambdaConfig, StorageConfig,
-    LoggingConfig, DLQProcessorConfig, DedupLambdaConfig
+    LoggingConfig, DLQProcessorConfig, DedupLambdaConfig,
+    RegistrationLambdaConfig
 )
 
 CONFIG = AppConfig(
@@ -60,6 +61,20 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/deduplication/Dockerfile"
         )
     ),
+    registration=StageConfig(
+        file_batching=FileBatchingConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="registration.handler",
+            memory_size=512,
+            timeout_min=15
+        ),
+        batch_task_job_def=BatchTaskJobDefConfig(
+            vcpus=1,
+            memory_limit_mib=2048,
+            directory="workers",
+            file="batch_jobs/upload/registration/Dockerfile"
+        )
+    ),
     kickoff_lambda=KickoffLambdaConfig(
         path="workers/lambdas/upload",
         handler="kickoff.handler",
@@ -75,6 +90,12 @@ CONFIG = AppConfig(
     dedup_ingest_lambda = DedupLambdaConfig(
         path="workers/lambdas/upload",
         handler="deduplication_ingest.handler",
+        memory_size=512,
+        timeout_sec=30
+    ),
+    registration_ingest_lambda=RegistrationLambdaConfig(
+        path="workers/lambdas/upload",
+        handler="registration_ingest.handler",
         memory_size=512,
         timeout_sec=30
     )

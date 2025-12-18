@@ -15,11 +15,24 @@ from common.utils import (
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-ICEBERG_UPLOAD_STAGING_TABLE_NAME = os.environ["ICEBERG_UPLOAD_STAGING_TABLE_NAME"]
+UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
-ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+
+athena = boto3.client("athena")
+
+def drop_ctas_table_if_exists(job_id):
+    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS {table_name}'
+    resp = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
+        WorkGroup=ATHENA_WORKGROUP
+    )
+    return resp["QueryExecutionId"]
 
 def handler(event, context):
     # DLQ messages come in as a batch from SQS
@@ -71,8 +84,8 @@ def handler(event, context):
         # 2. Delete staging table rows im iceberg table
         try:
             delete_result = delete_iceberg_partition_rows(job_id,
-                                                          ICEBERG_DB_NAME,
-                                                          ICEBERG_UPLOAD_STAGING_TABLE_NAME,
+                                                          ICEBERG_DATABASE_NAME,
+                                                          UPLOAD_STAGING_TABLE_NAME,
                                                           ATHENA_OUTPUT_S3,
                                                           ATHENA_WORKGROUP)
         except Exception as e:
@@ -106,6 +119,14 @@ def handler(event, context):
             log(job_id, user, event_type, "[DLQ_PROCESSOR] Release lock failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         else:
             log(job_id, user, event_type, f"[DLQ_PROCESSOR] Done release lock attempt. Success = {release_success}, msg = {release_msg}", LOG_FIREHOSE_STREAM_NAME)
+
+        # 5. Delete the CTAS table if it exists, might have already been done earlier.
+        try:
+            drop_ctas_table_if_exists(job_id)
+        except Exception as e:
+            pass
+        else:
+            log(job_id, user, event_type, f"[DLQ_PROCESSOR] Deleted the CTAS table for image-upload dedup task.", LOG_FIREHOSE_STREAM_NAME)
 
         if update_success and release_success and s3_delete_success and iceberg_job_rows_delete_success:
             num_processed_successfully += 1

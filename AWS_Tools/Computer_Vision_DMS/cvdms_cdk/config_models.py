@@ -74,6 +74,13 @@ class DedupLambdaConfig:
     timeout_sec: int
 
 @dataclass
+class RegistrationLambdaConfig:
+    path: str
+    handler: str
+    memory_size: int
+    timeout_sec: int
+
+@dataclass
 class AppConfig:
     app_name: str
     logging: LoggingConfig
@@ -83,6 +90,8 @@ class AppConfig:
     upload_state_machine: UploadStateMachineConfig
     validation: StageConfig
     deduplication: StageConfig
+    registration: StageConfig
     kickoff_lambda: KickoffLambdaConfig
     cleanup_lambda: CleanupLambdaConfig
     dedup_ingest_lambda: DedupLambdaConfig
+    registration_ingest_lambda: RegistrationLambdaConfig
