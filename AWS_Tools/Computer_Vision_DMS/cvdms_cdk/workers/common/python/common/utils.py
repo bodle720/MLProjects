@@ -442,38 +442,30 @@ def _dig_for_key(event: Any, key: str) -> Any:
 
     return None
 
-def _normalize_label_types(raw) -> List[str]:
+def _normalize_label_type(raw) -> List[str]:
     if raw is None:
-        return []
-    if isinstance(raw, list):
-        return raw
+        return ""
     if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return parsed
-        except Exception:
-            # not JSON, maybe comma-separated
-            return [s.strip() for s in raw.split(",") if s.strip()]
-    return [str(raw)]
+        return raw
+    return str(raw)
 
 def get_job_input(event: Any) -> Dict[str, Any]:
     """
     Return a normalized dict with keys:
-      job_id, user, label_types (list), data_source, event_type
+      job_id, user, label_type (str), data_source, event_type
     """
     # 1) Try container env extraction (ECS/Batch job detail)
     env_map = _extract_from_container_env(event)
     if env_map:
         job_id = env_map.get("JOB_ID") or env_map.get("job_id")
         user = env_map.get("USER") or env_map.get("user")
-        label_types_raw = env_map.get("LABEL_TYPES") or env_map.get("label_types")
+        label_type_raw = env_map.get("LABEL_TYPE") or env_map.get("label_type")
         data_source = env_map.get("DATA_SOURCE") or env_map.get("data_source")
         event_type = env_map.get("EVENT_TYPE") or env_map.get("event_type")
         return {
             "job_id": job_id,
             "user": user,
-            "label_types": _normalize_label_types(label_types_raw),
+            "label_type": _normalize_label_type(label_type_raw),
             "data_source": data_source,
             "event_type": event_type
         }
@@ -481,7 +473,7 @@ def get_job_input(event: Any) -> Dict[str, Any]:
     # 2) direct keys and stage-nested lookups (fast)
     job_id = _dig_for_key(event, "job_id")
     user = _dig_for_key(event, "user")
-    label_types_raw = _dig_for_key(event, "label_types") or _dig_for_key(event, "labelTypes")
+    label_type_raw = _dig_for_key(event, "label_type") or _dig_for_key(event, "labelType")
     data_source = _dig_for_key(event, "data_source")
     event_type = _dig_for_key(event, "event_type") or _dig_for_key(event, "eventType")
 
@@ -490,8 +482,8 @@ def get_job_input(event: Any) -> Dict[str, Any]:
         job_id = find_key_recursively(event, "job_id")
     if user is None:
         user = find_key_recursively(event, "user")
-    if label_types_raw is None:
-        label_types_raw = find_key_recursively(event, "label_types") or find_key_recursively(event, "labelTypes")
+    if label_type_raw is None:
+        label_type_raw = find_key_recursively(event, "label_type") or find_key_recursively(event, "labelType")
     if data_source is None:
         data_source = find_key_recursively(event, "data_source")
     if event_type is None:
@@ -505,7 +497,7 @@ def get_job_input(event: Any) -> Dict[str, Any]:
     return {
         "job_id": job_id or "unknown",
         "user": user or "unknown",
-        "label_types": _normalize_label_types(label_types_raw),
+        "label_type": _normalize_label_type(label_type_raw),
         "data_source": data_source or "unknown",
         "event_type": event_type or "unknown"
     }

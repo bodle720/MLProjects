@@ -257,7 +257,7 @@ def handler(event, context):
         job_id = job_input["job_id"]
         user = job_input["user"]
         event_type = job_input["event_type"]
-        label_types = job_input["label_types"] # a list
+        label_type = job_input["label_type"] # a str
         data_source = job_input.get("data_source", "unknown")
     except KeyError as e:
         raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
@@ -370,7 +370,7 @@ def handler(event, context):
     result = {
         "job_id": job_id,
         "user": user,
-        "label_types": json.dumps(label_types),
+        "label_type": label_type,
         "data_source": data_source,
         "event_type": event_type,
         "manifests": manifest_keys

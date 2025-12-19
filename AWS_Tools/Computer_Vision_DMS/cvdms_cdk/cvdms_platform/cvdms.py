@@ -8,7 +8,9 @@ import boto3
 from botocore.exceptions import ClientError
 import pandas as pd
 
-from .clients import UploadClient, LogClient
+from .upload_client import UploadClient
+from .log_client import LogClient
+
 
 SSM_PREFIX_TEMPLATE = "/cvdms/{app}/"
 REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name",
@@ -138,8 +140,8 @@ class CvdmsApp:
 
         logging.info('Instantiation complete.')
 
-    def upload_imagery(self, csv_path: str, *, summary: str = "", data_source: str = "") -> Tuple[bool, Dict]:
-        return self._upload_client.start_upload_job_from_csv(csv_path, summary=summary, data_source=data_source)
+    def start_upload_job(self, csv_path: str, *, summary: str = "", data_source: str = "") -> Dict:
+        return self._upload_client.start_upload_job(csv_path, summary=summary, data_source=data_source)
 
-    def get_logs_by_job_id(self, job_id: str) -> Tuple[bool, Dict, Optional[pd.DataFrame]]:
+    def get_logs_by_job_id(self, job_id: str) -> Dict:
         return self._log_client.get_logs_by_job_id(job_id)

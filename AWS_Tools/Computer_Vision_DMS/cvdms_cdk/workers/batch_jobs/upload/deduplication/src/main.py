@@ -25,7 +25,6 @@ from common.utils import log
 MANIFEST_S3_KEY = os.environ.get("MANIFEST_S3_KEY")
 JOB_ID = os.environ.get("JOB_ID", "unknown")
 USER = os.environ.get("USER", "unknown")
-LABEL_TYPES = os.environ.get("LABEL_TYPES", "[]")
 DATA_SOURCE = os.environ.get("DATA_SOURCE", "unknown")
 EVENT_TYPE = os.environ.get("EVENT_TYPE", "unknown")
 FILE_BUCKET_NAME = os.environ.get("FILE_BUCKET_NAME")

@@ -51,7 +51,7 @@ class BatchingStage(Construct):
 
         '''
         Batching param explanation:
-        The batching Lambda returns a dict with manifests, job_id, user, label_types. The Map state iterates over manifests,
+        The batching Lambda returns a dict with manifests, job_id, user, label_type. The Map state iterates over manifests,
         builds a per‑item input with those values, and the Batch task pulls them into container environment variables via
         JsonPath.string_at
         '''
@@ -285,7 +285,7 @@ class BatchingStage(Construct):
             "MANIFEST_S3_KEY": sfn.JsonPath.string_at("$.manifest"), # means Step Functions will substitute the values from the per‑item input into environment variables for the container, see below
             "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
             "USER": sfn.JsonPath.string_at("$.user"),
-            "LABEL_TYPES": sfn.JsonPath.string_at("$.label_types"),
+            "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
             "DATA_SOURCE": sfn.JsonPath.string_at("$.data_source"),
             "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
@@ -318,7 +318,7 @@ class BatchingStage(Construct):
                 "manifest.$": "$$.Map.Item.Value",
                 "job_id.$": "$.job_id", # keys ending with .$ tell Step Functions “this value comes from a JSONPath expression.”
                 "user.$": "$.user",
-                "label_types.$": "$.label_types",
+                "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
                 "event_type.$": "$.event_type"
         }

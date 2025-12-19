@@ -24,7 +24,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 MANIFEST_S3_KEY = os.environ["MANIFEST_S3_KEY"]
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
-LABEL_TYPES = json.loads(os.environ["LABEL_TYPES"]) # now list of strs, indicating the label types in this upload
+LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 
@@ -48,25 +48,27 @@ def infer_dtype(img):
 
 def validate_labels_presence(image_uuid):
     errors = []
-    for label_type in LABEL_TYPES:
-        if label_type in ("string_labels", "bounding_boxes", "instance_annotations"):
-            label_json = f"temp/image-upload/{JOB_ID}/{label_type}/{image_uuid}.json"
+    if LABEL_TYPE in ("string_labels", "bounding_boxes", "instance_annotations"):
+        label_json = f"temp/image-upload/{JOB_ID}/{LABEL_TYPE}/{image_uuid}.json"
+        try:
+            s3.head_object(Bucket=FILE_BUCKET_NAME, Key=label_json)
+        except ClientError as e:
+            errors.append(f"Missing {LABEL_TYPE} for {image_uuid}: {e}")
+    elif LABEL_TYPE == "semantic_masks":
+        mask_png = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.png"
+        mask_json = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.json"
+        for k in (mask_png, mask_json):
             try:
-                s3.head_object(Bucket=FILE_BUCKET_NAME, Key=label_json)
+                s3.head_object(Bucket=FILE_BUCKET_NAME, Key=k)
             except ClientError as e:
-                errors.append(f"Missing {label_type} for {image_uuid}: {e}")
-        elif label_type == "semantic_masks":
-            mask_png = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.png"
-            mask_json = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.json"
-            for k in (mask_png, mask_json):
-                try:
-                    s3.head_object(Bucket=FILE_BUCKET_NAME, Key=k)
-                except ClientError as e:
-                    errors.append(f"Missing semantic mask companion {k}: {e}")
-        else:
-            errors.append(f"Unrecognized label type in validation batch job: {label_type}")
+                errors.append(f"Missing semantic mask companion {k}: {e}")
+    else:
+        errors.append(f"Unrecognized label type in validation batch job: {LABEL_TYPE}")
 
     return errors
+
+# def get_classes_present():
+#     pass
 
 # Main image processor
 def process_image(image_key):
@@ -90,6 +92,7 @@ def process_image(image_key):
            "temp_bbox_path": None,
            "temp_semantic_mask_path": None,
            "temp_instance_annotation_path": None,
+           "classes_present": None,
            "validation_status": "pending",
            "validation_error": None,
            "dedup_status": "pending"}
@@ -149,12 +152,15 @@ def process_image(image_key):
         return row
 
     row["validation_status"] = "passed"
-    row["temp_string_labels_path"] = f"temp/image-upload/{JOB_ID}/string_labels/{image_uuid}.json" if "string_labels" in LABEL_TYPES else None
-    row["temp_bbox_path"] = f"temp/image-upload/{JOB_ID}/bounding_boxes/{image_uuid}.json" if "bounding_boxes" in LABEL_TYPES else None
-    row["temp_semantic_mask_path"] = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.png" if "semantic_masks" in LABEL_TYPES else None
-    row["temp_instance_annotation_path"] = f"temp/image-upload/{JOB_ID}/instance_annotations/{image_uuid}.json" if "instance_annotations" in LABEL_TYPES else None
+    row["temp_string_labels_path"] = f"temp/image-upload/{JOB_ID}/string_labels/{image_uuid}.json" if LABEL_TYPE == "string_labels" else None
+    row["temp_bbox_path"] = f"temp/image-upload/{JOB_ID}/bounding_boxes/{image_uuid}.json" if LABEL_TYPE == "bounding_boxes" else None
+    row["temp_semantic_mask_path"] = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.png" if LABEL_TYPE == "semantic_masks" else None
+    row["temp_instance_annotation_path"] = f"temp/image-upload/{JOB_ID}/instance_annotations/{image_uuid}.json" if LABEL_TYPE == "instance_annotations" else None
 
     row["copy_to"] = f"s3://{FILE_BUCKET_NAME}/canonical/imagery/{os.path.basename(image_key)}"
+
+    # get classes present
+    row['classes_present'] = get_classes_present()
 
     return row
 
@@ -170,7 +176,6 @@ def read_manifest_with_retry(bucket, key, retries=5, delay=2):
             raise
 
 def main():
-
     bucket, key = MANIFEST_S3_KEY.replace("s3://", "").split("/", 1)
     obj = read_manifest_with_retry(bucket, key)
     manifest = json.loads(obj["Body"].read())

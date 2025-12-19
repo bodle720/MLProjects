@@ -62,7 +62,7 @@ def require_no_duplicates(name_list, kind):
     if dups:
         raise ValueError(f"[UPLOAD_KICKOFF] Duplicate {kind} detected for basenames: {dups}")
 
-def validate_labels(bucket, job_id, label_types, user, event_type):
+def validate_labels(bucket, job_id, label_type, user, event_type):
     image_keys = list_keys(bucket, f"temp/image-upload/{job_id}/images/")
     image_bases = basenames_from_keys(
         image_keys, allowed_exts={".jpg", ".jpeg", ".png"}
@@ -73,45 +73,44 @@ def validate_labels(bucket, job_id, label_types, user, event_type):
 
     require_no_duplicates(image_bases, "images")
 
-    for label_type in label_types:
-        if label_type in ["string_labels", "bounding_boxes", "instance_annotations"]:
-            label_prefix = f"temp/image-upload/{job_id}/{label_type}/"
-            label_keys = list_keys(bucket, label_prefix)
-            label_bases = basenames_from_keys(label_keys, allowed_exts={".json"})
-            require_no_duplicates(label_bases, f"{label_type}")
+    if label_type in ["string_labels", "bounding_boxes", "instance_annotations"]:
+        label_prefix = f"temp/image-upload/{job_id}/{label_type}/"
+        label_keys = list_keys(bucket, label_prefix)
+        label_bases = basenames_from_keys(label_keys, allowed_exts={".json"})
+        require_no_duplicates(label_bases, f"{label_type}")
 
-            if set(image_bases) != set(label_bases):
-                missing_in_labels = sorted(set(image_bases) - set(label_bases))
-                extra_in_labels = sorted(set(label_bases) - set(image_bases))
-                error_msg = f"[UPLOAD_KICKOFF] Mismatch for {label_type}. Missing labels for: {missing_in_labels}. Extra labels for: {extra_in_labels}"
-                raise ValueError(error_msg)
+        if set(image_bases) != set(label_bases):
+            missing_in_labels = sorted(set(image_bases) - set(label_bases))
+            extra_in_labels = sorted(set(label_bases) - set(image_bases))
+            error_msg = f"[UPLOAD_KICKOFF] Mismatch for {label_type}. Missing labels for: {missing_in_labels}. Extra labels for: {extra_in_labels}"
+            raise ValueError(error_msg)
 
-            if len(image_bases) != len(label_bases):
-                error_msg = f"[UPLOAD_KICKOFF] Count mismatch for {label_type}. images={len(image_bases)} labels={len(label_bases)}"
-                raise ValueError(error_msg)
+        if len(image_bases) != len(label_bases):
+            error_msg = f"[UPLOAD_KICKOFF] Count mismatch for {label_type}. images={len(image_bases)} labels={len(label_bases)}"
+            raise ValueError(error_msg)
 
-        elif label_type == "semantic_masks":
-            mask_prefix = f"temp/image-upload/{job_id}/semantic_masks/"
-            mask_keys = list_keys(bucket, mask_prefix)
+    elif label_type == "semantic_masks":
+        mask_prefix = f"temp/image-upload/{job_id}/semantic_masks/"
+        mask_keys = list_keys(bucket, mask_prefix)
 
-            mask_png_bases = basenames_from_keys(mask_keys, allowed_exts={".png"})
-            mask_json_bases = basenames_from_keys(mask_keys, allowed_exts={".json"})
-            require_no_duplicates(mask_png_bases, "semantic mask PNGs")
-            require_no_duplicates(mask_json_bases, "semantic mask JSONs")
+        mask_png_bases = basenames_from_keys(mask_keys, allowed_exts={".png"})
+        mask_json_bases = basenames_from_keys(mask_keys, allowed_exts={".json"})
+        require_no_duplicates(mask_png_bases, "semantic mask PNGs")
+        require_no_duplicates(mask_json_bases, "semantic mask JSONs")
 
-            if set(image_bases) != set(mask_png_bases) or set(image_bases) != set(mask_json_bases):
-                missing_png = sorted(set(image_bases) - set(mask_png_bases))
-                extra_png = sorted(set(mask_png_bases) - set(image_bases))
-                missing_json = sorted(set(image_bases) - set(mask_json_bases))
-                extra_json = sorted(set(mask_json_bases) - set(image_bases))
-                error_msg = f"[UPLOAD_KICKOFF] Semantic masks mismatch. PNG missing: {missing_png}, PNG extra: {extra_png}, JSON missing: {missing_json}, JSON extra: {extra_json}"
-                raise ValueError(error_msg)
+        if set(image_bases) != set(mask_png_bases) or set(image_bases) != set(mask_json_bases):
+            missing_png = sorted(set(image_bases) - set(mask_png_bases))
+            extra_png = sorted(set(mask_png_bases) - set(image_bases))
+            missing_json = sorted(set(image_bases) - set(mask_json_bases))
+            extra_json = sorted(set(mask_json_bases) - set(image_bases))
+            error_msg = f"[UPLOAD_KICKOFF] Semantic masks mismatch. PNG missing: {missing_png}, PNG extra: {extra_png}, JSON missing: {missing_json}, JSON extra: {extra_json}"
+            raise ValueError(error_msg)
 
-            if len(image_bases) != len(mask_png_bases) or len(image_bases) != len(mask_json_bases):
-                error_msg = f"[UPLOAD_KICKOFF] Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
-                raise ValueError(error_msg)
+        if len(image_bases) != len(mask_png_bases) or len(image_bases) != len(mask_json_bases):
+            error_msg = f"[UPLOAD_KICKOFF] Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
+            raise ValueError(error_msg)
 
-        log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Found {len(image_bases)} images and labels for label type = {label_type}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Found {len(image_bases)} images and labels for label type = {label_type}", LOG_FIREHOSE_STREAM_NAME)
 
 def fail(job_id, user, event_type, msg):
     job_id = job_id or "unknown"
@@ -170,19 +169,18 @@ def handler(event, context):
         job_data = json.loads(obj["Body"].read().decode("utf-8"))
         job_id = job_data["job_id"]
         user = job_data["user"]
-        num_images = job_data["num_images"]
         data_source = job_data["data_source"]
-        label_types = job_data["label_types"]
+        label_type = job_data["label_type"]
         event_type = job_data["event_type"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, num_images, data_source, event_type, and label_types from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and label_type from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
-    if not isinstance(label_types, list):
-        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] label_types must be a list, got {type(label_types)}")
+    if not isinstance(label_type, str):
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] label_type must be a str, got {type(label_type)}")
 
     try:
-        validate_labels(bucket, job_id, label_types, user, event_type)
+        validate_labels(bucket, job_id, label_type, user, event_type)
     except Exception as e:
         log(job_id, user, event_type, "[UPLOAD_KICKOFF] Error validating labels in kickoff lambda.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error validating labels: {str(e)}")
@@ -194,7 +192,7 @@ def handler(event, context):
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
-                "label_types": json.dumps(label_types),
+                "label_type": label_type,
                 "data_source":data_source.lower(),
                 "event_type":event_type,
             })
@@ -208,7 +206,6 @@ def handler(event, context):
     return {"status": "ok",
             "job_id": job_id,
             "user": user,
-            "label_types": label_types,
-            "num_images":num_images,
+            "label_type": label_type,
             "data_source":data_source,
             "event_type": event_type}
