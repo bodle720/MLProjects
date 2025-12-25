@@ -6,12 +6,10 @@ and in parallel.
 import os
 import json
 import math
-import time
 
 import boto3
-from botocore.exceptions import ClientError
 
-from common.utils import log, get_job_input
+from common.utils import log, wait_for_athena
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -88,7 +86,6 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         job_id,
         image_id,
         temp_source_ref,
-        copy_to,
         img_type,
         img_height,
         img_width,
@@ -98,13 +95,18 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         CAST(uploaded_at AS timestamp(3)) AS uploaded_at,
         data_source,
         sha256_hash,
-        temp_string_labels_path,
-        temp_bbox_path,
-        temp_semantic_mask_path,
-        temp_instance_annotation_path,
+        string_labels,
+        temp_source_ref_bbox_meta,
+        temp_source_ref_semantic_png,
+        temp_source_ref_semantic_meta,
+        temp_source_ref_instance_png,
+        temp_source_ref_instance_meta,
+        classes_present,
         validation_status,
         validation_error,
         dedup_status,
+        dedup_error,
+        matched_image_id,
         substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
     FROM {table}
     WHERE job_id = '{safe_job_id}'
@@ -116,20 +118,6 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         WorkGroup=ATHENA_WORKGROUP
     )
     return resp["QueryExecutionId"]
-
-def _wait_for_athena(qid, poll_interval=3, timeout_seconds=900):
-    start = time.time()
-    while True:
-        resp = athena.get_query_execution(QueryExecutionId=qid)
-        state = resp["QueryExecution"]["Status"]["State"]
-        if state == "SUCCEEDED":
-            return True, resp
-        if state in ("FAILED", "CANCELLED"):
-            reason = resp["QueryExecution"]["Status"].get("StateChangeReason", "")
-            return False, reason
-        if time.time() - start > timeout_seconds:
-            return False, f"timeout after {timeout_seconds}s"
-        time.sleep(poll_interval)
 
 def _read_count_from_athena_result(qid):
     """Read the single-row count result from Athena query execution output."""
@@ -253,12 +241,11 @@ def _delete_s3_prefix(bucket, prefix):
 def handler(event, context):
     # Validate input
     try:
-        job_input = get_job_input(event)
-        job_id = job_input["job_id"]
-        user = job_input["user"]
-        event_type = job_input["event_type"]
-        label_type = job_input["label_type"] # a str
-        data_source = job_input.get("data_source", "unknown")
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
+        label_type = event["label_type"] # a str
+        data_source = event["data_source"]
     except KeyError as e:
         raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
 
@@ -276,10 +263,11 @@ def handler(event, context):
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    ok, meta_or_reason = _wait_for_athena(count_qid, poll_interval=2, timeout_seconds=300)
-    if not ok:
-        err = f"[DEDUP_FILE_BATCHING] Athena COUNT failed for job {job_id}: {meta_or_reason}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
+    athena_res = wait_for_athena(count_qid, poll=2.0, timeout=300)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        err = f"[DEDUP_FILE_BATCHING] Athena COUNT failed for job {job_id}. Response = {resp}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
@@ -301,9 +289,10 @@ def handler(event, context):
     # 2) Run CTAS to export partitioned files with sha_prefix
     try:
         drop_qid = _drop_ctas_table_if_exists(job_id)
-        ok, meta_or_reason = _wait_for_athena(drop_qid)
-        if not ok:
-            err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS temp table for job_id={job_id}: {meta_or_reason}"
+        athena_res = wait_for_athena(drop_qid, poll=3.0, timeout=900)
+        if athena_res['state'] != 'SUCCEEDED':
+            resp = athena_res['metadata']
+            err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
             log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
             raise RuntimeError(err)
 
@@ -316,10 +305,11 @@ def handler(event, context):
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    success, meta_or_reason = _wait_for_athena(qid)
-    if not success:
-        err = f"[DEDUP_FILE_BATCHING] Athena CTAS failed for job {job_id}: {meta_or_reason}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
+    athena_res = wait_for_athena(qid, poll=3.0, timeout=900)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        err = f"[DEDUP_FILE_BATCHING] Athena CTAS failed for job {job_id}. Response = {resp}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)

@@ -6,7 +6,7 @@ from urllib.parse import unquote_plus
 import boto3
 
 # Lambda layer imports
-from common.utils import log
+from common.utils import log, s3_list_keys
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
@@ -36,14 +36,6 @@ def send_to_dlq(job_id, user, event_type, error):
     except Exception as e:
         log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Failed to send to DLQ: {str(error)}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
 
-def list_keys(bucket, prefix):
-    keys = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            keys.append(obj["Key"])
-    return keys
-
 def basenames_from_keys(keys, allowed_exts=None):
     files = []
     for k in keys:
@@ -63,7 +55,7 @@ def require_no_duplicates(name_list, kind):
         raise ValueError(f"[UPLOAD_KICKOFF] Duplicate {kind} detected for basenames: {dups}")
 
 def validate_labels(bucket, job_id, label_type, user, event_type):
-    image_keys = list_keys(bucket, f"temp/image-upload/{job_id}/images/")
+    image_keys = s3_list_keys(bucket, f"temp/image-upload/{job_id}/images/")
     image_bases = basenames_from_keys(
         image_keys, allowed_exts={".jpg", ".jpeg", ".png"}
     )
@@ -75,7 +67,7 @@ def validate_labels(bucket, job_id, label_type, user, event_type):
 
     if label_type in ["string_labels", "bounding_boxes", "instance_annotations"]:
         label_prefix = f"temp/image-upload/{job_id}/{label_type}/"
-        label_keys = list_keys(bucket, label_prefix)
+        label_keys = s3_list_keys(bucket, label_prefix)
         label_bases = basenames_from_keys(label_keys, allowed_exts={".json"})
         require_no_duplicates(label_bases, f"{label_type}")
 
@@ -91,7 +83,7 @@ def validate_labels(bucket, job_id, label_type, user, event_type):
 
     elif label_type == "semantic_masks":
         mask_prefix = f"temp/image-upload/{job_id}/semantic_masks/"
-        mask_keys = list_keys(bucket, mask_prefix)
+        mask_keys = s3_list_keys(bucket, mask_prefix)
 
         mask_png_bases = basenames_from_keys(mask_keys, allowed_exts={".png"})
         mask_json_bases = basenames_from_keys(mask_keys, allowed_exts={".json"})

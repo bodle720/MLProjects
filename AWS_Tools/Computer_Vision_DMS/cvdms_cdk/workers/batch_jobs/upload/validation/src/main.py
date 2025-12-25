@@ -2,7 +2,6 @@ import os
 import io
 import json
 import hashlib
-import logging
 import time
 from datetime import datetime, timezone
 
@@ -16,7 +15,7 @@ from common.utils import log, chunked_insert
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
-ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
@@ -157,8 +156,6 @@ def process_image(image_key):
     row["temp_semantic_mask_path"] = f"temp/image-upload/{JOB_ID}/semantic_masks/{image_uuid}.png" if LABEL_TYPE == "semantic_masks" else None
     row["temp_instance_annotation_path"] = f"temp/image-upload/{JOB_ID}/instance_annotations/{image_uuid}.json" if LABEL_TYPE == "instance_annotations" else None
 
-    row["copy_to"] = f"s3://{FILE_BUCKET_NAME}/canonical/imagery/{os.path.basename(image_key)}"
-
     # get classes present
     row['classes_present'] = get_classes_present()
 
@@ -199,7 +196,7 @@ def main():
 
     if rows:
         all_failed, last_error = chunked_insert(rows,
-                                               ICEBERG_DB_NAME,
+                                               ICEBERG_DATABASE_NAME,
                                                UPLOAD_STAGING_TABLE_NAME,
                                                ATHENA_WORKGROUP,
                                                ATHENA_OUTPUT_S3,

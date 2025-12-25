@@ -1,17 +1,10 @@
-'''
-This Lambda dynamically shards upload_staging rows by SHA prefix, exports them via Athena CTAS into Parquet, writes
-internal dedup manifests, and feeds those manifests into a Step Functions Map so dedup Batch workers can run safely
-and in parallel.
-'''
 import os
 import json
 import math
-import time
 
 import boto3
-from botocore.exceptions import ClientError
 
-from common.utils import log, get_job_input
+from common.utils import log, wait_for_athena
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -35,8 +28,8 @@ MAX_PREFIX_LENGTH = 3
 # Job memory (MB) used to compute target rows per shard. Default to 512 to match the job def.
 JOB_MEMORY_MB = 512
 
-# S3 layout base for dedup exports and manifests
-EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/deduplication-step/...
+# S3 layout base for exports and manifests
+EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/registration-step/...
 
 s3 = boto3.client("s3")
 athena = boto3.client("athena")
@@ -59,7 +52,7 @@ def _start_athena_count(job_id):
 
 def _drop_ctas_table_if_exists(job_id):
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    table_name = f"{ICEBERG_DATABASE_NAME}.registration_export_{sanitized_job_id}"
     sql = f'DROP TABLE IF EXISTS {table_name}'
     resp = athena.start_query_execution(
         QueryString=sql,
@@ -74,7 +67,7 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     safe_job_id = job_id.replace("'", "''")
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
 
-    tmp_table = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    tmp_table = f"{ICEBERG_DATABASE_NAME}.registration_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
 
     sql = f"""
@@ -88,7 +81,6 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         job_id,
         image_id,
         temp_source_ref,
-        copy_to,
         img_type,
         img_height,
         img_width,
@@ -98,13 +90,18 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         CAST(uploaded_at AS timestamp(3)) AS uploaded_at,
         data_source,
         sha256_hash,
-        temp_string_labels_path,
-        temp_bbox_path,
-        temp_semantic_mask_path,
-        temp_instance_annotation_path,
+        string_labels,
+        temp_source_ref_bbox_meta,
+        temp_source_ref_semantic_png,
+        temp_source_ref_semantic_meta,
+        temp_source_ref_instance_png,
+        temp_source_ref_instance_meta,
+        classes_present,
         validation_status,
         validation_error,
-        dedup_status,
+        REG_status,
+        REG_error,
+        matched_image_id,
         substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
     FROM {table}
     WHERE job_id = '{safe_job_id}'
@@ -116,20 +113,6 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         WorkGroup=ATHENA_WORKGROUP
     )
     return resp["QueryExecutionId"]
-
-def _wait_for_athena(qid, poll_interval=3, timeout_seconds=900):
-    start = time.time()
-    while True:
-        resp = athena.get_query_execution(QueryExecutionId=qid)
-        state = resp["QueryExecution"]["Status"]["State"]
-        if state == "SUCCEEDED":
-            return True, resp
-        if state in ("FAILED", "CANCELLED"):
-            reason = resp["QueryExecution"]["Status"].get("StateChangeReason", "")
-            return False, reason
-        if time.time() - start > timeout_seconds:
-            return False, f"timeout after {timeout_seconds}s"
-        time.sleep(poll_interval)
 
 def _read_count_from_athena_result(qid):
     """Read the single-row count result from Athena query execution output."""
@@ -175,7 +158,7 @@ def _list_export_files(export_prefix):
                     sha_prefix = p.split("=", 1)[1]
                     break
             if not sha_prefix:
-                raise RuntimeError(f"[DEDUP_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
+                raise RuntimeError(f"[REG_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
     return files_by_prefix, all_keys
@@ -251,59 +234,59 @@ def _delete_s3_prefix(bucket, prefix):
         )
 
 def handler(event, context):
-    # Validate input
     try:
-        job_input = get_job_input(event)
-        job_id = job_input["job_id"]
-        user = job_input["user"]
-        event_type = job_input["event_type"]
-        label_type = job_input["label_type"] # a str
-        data_source = job_input.get("data_source", "unknown")
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
+        label_type = event["label_type"]
+        data_source = event["data_source"]
     except KeyError as e:
-        raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"[REG_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
 
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Starting registration batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Prepare prefixes
-    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/export"
-    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/manifests"
+    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration-step/export"
+    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration-step/manifests"
 
     # 0) Run COUNT(*) to estimate rows
     try:
         count_qid = _start_athena_count(job_id)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
+        err = f"[REG_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    ok, meta_or_reason = _wait_for_athena(count_qid, poll_interval=2, timeout_seconds=300)
-    if not ok:
-        err = f"[DEDUP_FILE_BATCHING] Athena COUNT failed for job {job_id}: {meta_or_reason}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
+    athena_res = wait_for_athena(count_qid, poll=2.0, timeout=300)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        err = f"[REG_FILE_BATCHING] Athena COUNT failed for job {job_id}. Response = {resp}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
 
     # 1) choose prefix length P dynamically
     prefix_len, target_rows = _choose_prefix_length(
         total_rows,
-        job_memory_mb=int(os.environ.get("DEDUP_JOB_MEMORY_MB", JOB_MEMORY_MB)),
-        avg_row_kb=float(os.environ.get("DEDUP_AVG_ROW_KB", AVG_ROW_KB)),
-        safety_factor=float(os.environ.get("DEDUP_MEMORY_SAFETY_FACTOR", MEMORY_SAFETY_FACTOR)),
-        min_rows=int(os.environ.get("DEDUP_MIN_ROWS_PER_SHARD", MIN_ROWS_PER_SHARD)),
-        max_rows=int(os.environ.get("DEDUP_MAX_ROWS_PER_SHARD", MAX_ROWS_PER_SHARD)),
-        max_prefix_len=int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
+        job_memory_mb=int(os.environ.get("REG_JOB_MEMORY_MB", JOB_MEMORY_MB)),
+        avg_row_kb=float(os.environ.get("REG_AVG_ROW_KB", AVG_ROW_KB)),
+        safety_factor=float(os.environ.get("REG_MEMORY_SAFETY_FACTOR", MEMORY_SAFETY_FACTOR)),
+        min_rows=int(os.environ.get("REG_MIN_ROWS_PER_SHARD", MIN_ROWS_PER_SHARD)),
+        max_rows=int(os.environ.get("REG_MAX_ROWS_PER_SHARD", MAX_ROWS_PER_SHARD)),
+        max_prefix_len=int(os.environ.get("REG_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
     )
 
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
 
     # 2) Run CTAS to export partitioned files with sha_prefix
     try:
         drop_qid = _drop_ctas_table_if_exists(job_id)
-        ok, meta_or_reason = _wait_for_athena(drop_qid)
-        if not ok:
-            err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS temp table for job_id={job_id}: {meta_or_reason}"
+        athena_res = wait_for_athena(drop_qid, poll=2.0, timeout=300)
+        if athena_res['state'] != 'SUCCEEDED':
+            resp = athena_res['metadata']
+            err = f"[REG_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
             log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
             raise RuntimeError(err)
 
@@ -312,28 +295,29 @@ def handler(event, context):
         qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
 
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena CTAS for job {job_id}: {e}"
+        err = f"[REG_FILE_BATCHING] Failed to start Athena CTAS for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    success, meta_or_reason = _wait_for_athena(qid)
-    if not success:
-        err = f"[DEDUP_FILE_BATCHING] Athena CTAS failed for job {job_id}: {meta_or_reason}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(meta_or_reason), level="error")
+    athena_res = wait_for_athena(qid, poll=3.0, timeout=900)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        err = f"[REG_FILE_BATCHING] Athena CTAS failed for job {job_id}. Response = {resp}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
 
     # 3) List exported files and group by sha_prefix
     try:
         files_by_prefix, all_keys = _list_export_files(export_prefix_base)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
+        err = f"[REG_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     if not files_by_prefix:
-        err = f"[DEDUP_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys are: {all_keys[:10]}"
+        err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys are: {all_keys[:10]}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
@@ -352,7 +336,7 @@ def handler(event, context):
             if len(files) <= split_size_files:
                 manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
                 manifest_keys.append(manifest_s3_uri)
-                log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+                log(job_id, user, event_type, f"[REG_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
             else:
                 # split into multiple manifests for this shard_prefix
                 for i in range(0, len(files), split_size_files):
@@ -360,9 +344,9 @@ def handler(event, context):
                     sub_name = f"{shard_prefix}-{i//split_size_files+1}"
                     manifest_s3_uri = _write_manifest(job_id, sub_name, chunk, manifest_prefix)
                     manifest_keys.append(manifest_s3_uri)
-                    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+                    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
+        err = f"[REG_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
@@ -376,6 +360,6 @@ def handler(event, context):
         "manifests": manifest_keys
     }
 
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
 
     return result

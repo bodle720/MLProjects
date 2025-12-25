@@ -32,11 +32,11 @@ LOG_FIREHOSE_STREAM_NAME = os.environ.get("LOG_FIREHOSE_STREAM_NAME")
 SHA256_TABLE_NAME = os.environ.get("SHA256_TABLE_NAME")
 
 if not FILE_BUCKET_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] FILE_BUCKET_NAME not set")
+    raise RuntimeError("[REG_JOB_DEF] FILE_BUCKET_NAME not set")
 if not LOG_FIREHOSE_STREAM_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
+    raise RuntimeError("[REG_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
 if not SHA256_TABLE_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] SHA256_TABLE_NAME not set")
+    raise RuntimeError("[REG_JOB_DEF] SHA256_TABLE_NAME not set")
 
 # Output prefix base (processed outputs will be written under this + /{job_id}/)
 PROCESSED_PREFIX_BASE = os.environ.get(
@@ -136,7 +136,7 @@ def read_parquet_rows_from_s3_uris(s3_uris):
                 for row in batch.to_pylist():
                     yield normalize_row(row)
         except Exception as e:
-            logger.error("[DEDUP_JOB_DEF] Failed to read parquet from %s: %s", uri, e)
+            logger.error("[REG_JOB_DEF] Failed to read parquet from %s: %s", uri, e)
             raise
 
 def pick_representative(group):
@@ -151,7 +151,7 @@ def pick_representative(group):
 
     def key_fn(r):
         ts = r.get("uploaded_at") or "9999-12-31 23:59:59"
-        return (ts, r.get("image_id") or "")
+        return ts, r.get("image_id") or ""
 
     return min(group, key=key_fn)
 
@@ -188,7 +188,7 @@ def batch_get_dynamodb_items(table_name, keys):
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 8.0)
         else:
-            raise RuntimeError(f"[DEDUP_JOB_DEF] DynamoDB batch_get_item exceeded retries for table {table_name}")
+            raise RuntimeError(f"[REG_JOB_DEF] DynamoDB batch_get_item exceeded retries for table {table_name}")
 
     return results
 
@@ -219,7 +219,7 @@ def process_manifest(manifest):
         groups[sha].append(r)
 
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"[DEDUP_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
+            raise RuntimeError(f"[REG_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
 
     processed_rows = []
     representatives = []  # list of (sha, rep_image_id)
@@ -233,7 +233,7 @@ def process_manifest(manifest):
 
         if len(group) > MAX_GROUP_SIZE:
             logger.warning(
-                f"[DEDUP_JOB_DEF] SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
+                f"[REG_JOB_DEF] SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
             )
 
         rep = pick_representative(group)
@@ -311,7 +311,7 @@ def write_processed_outputs(job_id, shard_name, processed_rows, summary):
 
     body = "\n".join(json.dumps(r) for r in processed_rows)
     if len(body) > 50_000_000:
-        raise RuntimeError("[DEDUP_JOB_DEF] JSONL too large for put_object; implement multipart upload")
+        raise RuntimeError("[REG_JOB_DEF] JSONL too large for put_object; implement multipart upload")
 
     write_s3_text(bucket, jsonl_key, body, content_type="application/x-ndjson")
     write_s3_text(bucket, summary_key, json.dumps(summary), content_type="application/json")
@@ -326,26 +326,26 @@ def write_processed_outputs(job_id, shard_name, processed_rows, summary):
 def main():
     start = time.time()
     if not MANIFEST_S3_KEY:
-        raise RuntimeError("[DEDUP_JOB_DEF] MANIFEST_S3_KEY not set in environment")
+        raise RuntimeError("[REG_JOB_DEF] MANIFEST_S3_KEY not set in environment")
 
     manifest = s3_read_json(MANIFEST_S3_KEY)
     shard_name = manifest.get("shard_prefix", "shard")
-    log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker starting for job {JOB_ID}, shard {shard_name}, manifest {MANIFEST_S3_KEY}, pyarrow={pa.__version__}", LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker starting for job {JOB_ID}, shard {shard_name}, manifest {MANIFEST_S3_KEY}, pyarrow={pa.__version__}", LOG_FIREHOSE_STREAM_NAME)
 
     try:
         processed_rows, summary = process_manifest(manifest)
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker failed processing manifest {MANIFEST_S3_KEY}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker failed processing manifest {MANIFEST_S3_KEY}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     try:
         write_processed_outputs(JOB_ID, shard_name, processed_rows, summary)
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker failed writing outputs for shard {shard_name}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker failed writing outputs for shard {shard_name}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
     elapsed = time.time() - start
-    log(JOB_ID, USER, EVENT_TYPE, f"[DEDUP_JOB_DEF] Batch worker completed shard {shard_name}: rows_read={summary['rows_read']}, internal_duplicates={summary['internal_duplicates']}, external_duplicates={summary['external_duplicates']}, time_s={elapsed:.1f}", LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker completed shard {shard_name}: rows_read={summary['rows_read']}, internal_duplicates={summary['internal_duplicates']}, external_duplicates={summary['external_duplicates']}, time_s={elapsed:.1f}", LOG_FIREHOSE_STREAM_NAME)
 
 if __name__ == "__main__":
     main()

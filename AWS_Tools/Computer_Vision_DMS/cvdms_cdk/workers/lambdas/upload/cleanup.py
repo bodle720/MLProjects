@@ -1,10 +1,7 @@
 import os
-import time
-
 import boto3
-from boto3.dynamodb.conditions import Key
 
-from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows, get_job_input
+from common.utils import log, update_job_status, release_lock, delete_s3_prefix, delete_iceberg_partition_rows
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
@@ -16,7 +13,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
-ICEBERG_DB_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
 def handler(event, context):
@@ -36,7 +33,7 @@ def handler(event, context):
 
     # 2. Delete staging table rows im iceberg table
     delete_result = delete_iceberg_partition_rows(job_id,
-                                                  ICEBERG_DB_NAME,
+                                                  ICEBERG_DATABASE_NAME,
                                                   UPLOAD_STAGING_TABLE_NAME,
                                                   ATHENA_OUTPUT_S3,
                                                   ATHENA_WORKGROUP

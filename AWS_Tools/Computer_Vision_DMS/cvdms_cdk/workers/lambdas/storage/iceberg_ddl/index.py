@@ -3,7 +3,6 @@ import time
 import json
 import random
 from pathlib import Path
-from typing import Optional
 
 import boto3
 

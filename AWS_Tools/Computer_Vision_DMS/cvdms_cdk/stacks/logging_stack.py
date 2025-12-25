@@ -1,11 +1,9 @@
-from datetime import datetime
 from constructs import Construct
 
 from aws_cdk import (
     Stack,
     Duration,
     RemovalPolicy,
-    CfnOutput,
     aws_iam as iam,
     aws_s3 as s3,
     aws_logs as logs,

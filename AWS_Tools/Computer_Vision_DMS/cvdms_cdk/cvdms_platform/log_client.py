@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Tuple, Dict
+from typing import Dict
 
 from botocore.client import BaseClient
 import pandas as pd

@@ -6,15 +6,13 @@ upload_staging and safely cleans up the job-scoped CTAS table.
 import os
 import json
 import time
-import math
 import logging
 from typing import List, Dict
 
 import boto3
-from botocore.exceptions import ClientError
 
 # common utilities used across your project (must exist in common/python and be available at runtime)
-from common.utils import log, delete_iceberg_partition_rows, chunked_insert, get_job_input, find_key_recursively
+from common.utils import log, delete_iceberg_partition_rows, chunked_insert, s3_list_keys, wait_for_athena
 
 # Environment variables (set by CDK)
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -39,16 +37,6 @@ s3 = boto3.client("s3")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def _s3_list_keys(bucket: str, prefix: str) -> List[str]:
-    paginator = s3.get_paginator("list_objects_v2")
-    keys = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith("/"):
-                keys.append(key)
-    return keys
-
 def _s3_read_json(bucket: str, key: str) -> Dict:
     resp = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(resp["Body"].read().decode("utf-8"))
@@ -60,20 +48,6 @@ def _s3_read_jsonl(bucket: str, key: str):
         if not line:
             continue
         yield json.loads(line.decode("utf-8"))
-
-def _wait_for_athena(qid: str, poll_interval: float = 2.0, timeout_seconds: int = 600):
-    start = time.time()
-    while True:
-        resp = athena.get_query_execution(QueryExecutionId=qid)
-        state = resp["QueryExecution"]["Status"]["State"]
-        if state == "SUCCEEDED":
-            return True, resp
-        if state in ("FAILED", "CANCELLED"):
-            reason = resp["QueryExecution"]["Status"].get("StateChangeReason", "")
-            return False, reason
-        if time.time() - start > timeout_seconds:
-            return False, f"timeout after {timeout_seconds}s"
-        time.sleep(poll_interval)
 
 def _athena_count_job_rows(job_id: str) -> int:
     """Run a quick Athena count(*) for upload_staging WHERE job_id = '<job_id>'."""
@@ -88,9 +62,10 @@ def _athena_count_job_rows(job_id: str) -> int:
         WorkGroup=ATHENA_WORKGROUP
     )
     qid = q["QueryExecutionId"]
-    ok, meta = _wait_for_athena(qid)
-    if not ok:
-        raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed: {meta}")
+    athena_res = wait_for_athena(qid, poll=2.0, timeout=600)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed, resp =  {resp}")
     # fetch results
     res = athena.get_query_results(QueryExecutionId=qid)
     rows = res.get("ResultSet", {}).get("Rows", [])
@@ -134,7 +109,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             continue
 
     # List processed keys under processed_prefix
-    processed_keys = _s3_list_keys(bucket, processed_prefix + "/")
+    processed_keys = s3_list_keys(bucket, processed_prefix + "/")
     # Map shard -> keys
     shard_jsonl = {}
     shard_summary = {}
@@ -314,11 +289,12 @@ def handler(event, context):
     log(job_id, user, event_type, f"[DEDUP_INGEST] Reingest complete for job {job_id}: inserted_rows={inserted_rows}, new_count={new_count}", LOG_FIREHOSE_STREAM_NAME)
 
     drop_qid = _drop_ctas_table_if_exists(job_id)
-    dropped, meta_or_reason = _wait_for_athena(drop_qid)
-    if not dropped:
-        err = f"[DEDUP_INGEST] Failed to drop our created CTAS temp table for our current job id = {job_id}, reason = {meta_or_reason}"
+    athena_res = wait_for_athena(drop_qid, poll=2.0, timeout=600)
+    if athena_res['state'] != 'SUCCEEDED':
+        resp = athena_res['metadata']
+        err = f"[DEDUP_INGEST] Failed to drop our created CTAS temp table for our current job id = {job_id}, response = {resp}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise Exception(err)
+        raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed, resp =  {resp}")
 
     skipped = total_processed_rows - inserted_rows
     log(job_id, user, event_type,

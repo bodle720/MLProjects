@@ -1,23 +1,15 @@
-import os
 import json
 import uuid
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict
 
 from botocore.exceptions import ClientError
 from botocore.client import BaseClient
 from boto3.resources.base import ServiceResource
-import pandas as pd
 
-ISO_NOW = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-VALID_LABEL_COLUMNS = {
-    "string_labels",
-    "bounding_boxes",
-    "semantic_masks",
-    "instance_annotations"
-}
+from upload_client_utils import validate_manifest, ALLOWED_LABEL_TYPES
 
 class UploadClient:
     """
@@ -84,7 +76,7 @@ class UploadClient:
             )
             return True, holder
         except ClientError as e:
-            logging.error('Unable to acquire lock for lock id {lock_id}, error message: {e}')
+            logging.error(f"Unable to acquire lock for lock id {lock_id}, error message: {e}")
             code = e.response.get("Error", {}).get("Code", "")
             if code == "ConditionalCheckFailedException":
                 return False, "lock_already_held"
@@ -122,7 +114,7 @@ class UploadClient:
         """
         item = {
             "job_id": job_id,
-            "created_at": ISO_NOW(),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "status": "PENDING",
             "summary": summary,
             "event_type": self.event_type,
@@ -137,102 +129,6 @@ class UploadClient:
             if code == "ConditionalCheckFailedException":
                 return False, "job_already_exists"
             return False, f"dynamodb_error: {e}"
-
-    def _load_and_validate_csv(self, csv_path: str) -> Tuple[bool, Dict]:
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception as e:
-            return False, {"csv_read_error": str(e)}
-
-        if "path" not in df.columns:
-            return False, {"missing_column": "'path' column is required"}
-
-        unexpected_cols = set(df.columns) - VALID_LABEL_COLUMNS - {"path", "mask_map"}
-        if unexpected_cols:
-            return False, {"unexpected_columns": sorted(unexpected_cols)}
-
-        if len(df.columns) > 3:
-            return False, {"unexpected_columns": sorted(unexpected_cols)}
-
-        present = [lt for lt in VALID_LABEL_COLUMNS if lt in df.columns]
-
-        if ("semantic_masks" in df.columns) ^ ("mask_map" in df.columns):
-            return False, {"mask_column_mismatch": "Both 'semantic_masks' and 'mask_map' must be present together"}
-
-        df["path"] = df["path"].astype(str).str.strip()
-        df = df[df["path"].notnull()]
-        df = df.drop_duplicates(subset=["path"])
-        df = df[df["path"].apply(os.path.exists)]
-
-        if "string_labels" in df.columns:
-            df["string_labels"] = (
-                df["string_labels"]
-                .astype(str)  # ensure string type
-                .str.strip()  # remove leading/trailing spaces
-                .str.lower()  # lowercase
-                .str.replace(r"\s+", "_")  # replace internal spaces with underscores
-            )
-
-        image_format_validator = lambda path: os.path.splitext(path)[1].lower() in [".jpg", ".jpeg", ".png"]
-
-        df = df[df["path"].map(image_format_validator)]
-
-        if df.empty:
-            return False, {"no_valid_rows": "CSV is empty or contains no valid image paths after filtering (e.g., extensions must be jpeg, jpg, or png, case insensitive)"}
-
-        error_dict = {}
-
-        for idx, row in df.iterrows():
-            row_errors = []
-
-            # bounding_boxes
-            if "bounding_boxes" in row and pd.notna(row["bounding_boxes"]):
-                bb_path = str(row["bounding_boxes"]).strip()
-                if not os.path.exists(bb_path):
-                    row_errors.append("bounding_box_missing")
-                elif not bb_path.endswith(".json"):
-                    row_errors.append("bounding_box_not_json")
-
-            # semantic_masks
-            if "semantic_masks" in row and pd.notna(row["semantic_masks"]):
-                mask_path = str(row["semantic_masks"]).strip()
-                if not os.path.exists(mask_path):
-                    row_errors.append("semantic_mask_missing")
-                elif not mask_path.lower().endswith(".png"):
-                    row_errors.append("semantic_mask_not_png")
-
-                # mask_map
-                try:
-                    mask_map_str = str(row["mask_map"]).strip()
-                    mask_map = json.loads(mask_map_str)
-                    if "0" not in mask_map or mask_map["0"] != "bg":
-                        row_errors.append("mask_map_missing_bg")
-                    keys = sorted(map(int, mask_map.keys()))
-                    if keys != list(range(len(keys))):
-                        row_errors.append("mask_map_keys_not_sequential")
-                except Exception:
-                    row_errors.append("mask_map_invalid_json")
-
-            # instance_annotations
-            if "instance_annotations" in row and pd.notna(row["instance_annotations"]):
-                ia_path = str(row["instance_annotations"]).strip()
-                if not os.path.exists(ia_path):
-                    row_errors.append("instance_annotation_missing")
-                elif not ia_path.endswith(".json"):
-                    row_errors.append("instance_annotation_not_json")
-
-            # accumulate errors
-            for err in row_errors:
-                if err not in error_dict:
-                    error_dict[err] = {"rows_affected": 0}
-                error_dict[err]["rows_affected"] += 1
-
-        self.df = df
-
-        if error_dict:
-            return False, error_dict
-
-        return True, {"message": "success"}
 
     def delete_temp_job_folder(self, job_id: str) -> Tuple[bool, str]:
         """
@@ -264,80 +160,48 @@ class UploadClient:
         except Exception as e:
             return False, f"delete_error: {e}"
 
-    def upload_files_to_s3(self, job_id: str, data_source: str = "") -> Tuple[bool, str]:
-        """
-        Uploads all files referenced in self.df to the appropriate S3 temp folder for the given job_id.
-        Returns (True, "success") or (False, error_message).
-        """
-        if not hasattr(self, "df"):
-            return False, "No DataFrame loaded. Run start_upload_job_from_csv first."
+    def upload_files_to_s3(self, job_id: str,
+                           label_type: str,
+                           manifest_path: str,
+                           data_source: str = "") -> Tuple[bool, str]:
 
         prefix = f"temp/image-upload/{job_id}"
+
+        # Upload the local manifest (manifest_path) and job.json to the prefix.
         try:
-            for _, row in self.df.iterrows():
-                image_path = row["path"]
-                base_uuid = str(uuid.uuid4())
-                image_ext = os.path.splitext(image_path)[1].lower()
-                image_key = f"{prefix}/images/{base_uuid}{image_ext}"
-
-                # Upload image
-                self.s3.upload_file(image_path, self.file_bucket_name, image_key)
-
-                # Upload string_labels
-                if "string_labels" in row and pd.notna(row["string_labels"]):
-                    labels = [l.strip() for l in str(row["string_labels"]).split(",") if l.strip()]
-                    label_obj = {"string_labels": labels}
-                    label_key = f"{prefix}/string_labels/{base_uuid}.json"
-                    self.s3.put_object(
-                        Bucket=self.file_bucket_name,
-                        Key=label_key,
-                        Body=json.dumps(label_obj).encode("utf-8"),
-                        ContentType="application/json"
-                    )
-
-                # Upload bounding_boxes
-                if "bounding_boxes" in row and pd.notna(row["bounding_boxes"]):
-                    bb_path = str(row["bounding_boxes"]).strip()
-                    bb_key = f"{prefix}/bounding_boxes/{base_uuid}.json"
-                    self.s3.upload_file(bb_path, self.file_bucket_name, bb_key)
-
-                # Upload semantic_masks and mask_map
-                if "semantic_masks" in row and pd.notna(row["semantic_masks"]):
-                    mask_path = str(row["semantic_masks"]).strip()
-                    mask_key = f"{prefix}/semantic_masks/{base_uuid}.png"
-                    self.s3.upload_file(mask_path, self.file_bucket_name, mask_key)
-
-                    mask_map_str = str(row["mask_map"]).strip()
-                    mask_map_key = f"{prefix}/semantic_masks/{base_uuid}.json"
-                    self.s3.put_object(
-                        Bucket=self.file_bucket_name,
-                        Key=mask_map_key,
-                        Body=mask_map_str.encode("utf-8"),
-                        ContentType="application/json"
-                    )
-
-                # Upload instance_annotations
-                if "instance_annotations" in row and pd.notna(row["instance_annotations"]):
-                    ia_path = str(row["instance_annotations"]).strip()
-                    ia_key = f"{prefix}/instance_annotations/{base_uuid}.json"
-                    self.s3.upload_file(ia_path, self.file_bucket_name, ia_key)
-
-            # Upload job.json manifest
+            # Upload job.json
             job_manifest = {
                 "job_id": job_id,
                 "user": self.user,
-                "num_images": len(self.df),
                 "data_source":data_source,
                 "event_type": self.event_type,
                 "label_type": label_type
             }
-            manifest_key = f"{prefix}/job.json"
+            job_json_key = f"{prefix}/job.json"
             self.s3.put_object(
                 Bucket=self.file_bucket_name,
-                Key=manifest_key,
+                Key=job_json_key,
                 Body=json.dumps(job_manifest).encode("utf-8"),
                 ContentType="application/json"
             )
+
+            logging.info("Upload of job.json success.")
+
+            # Upload manifest_path from local drive to S3.
+            local_manifest = Path(manifest_path)
+            if not local_manifest.exists() or not local_manifest.is_file():
+                raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+
+            manifest_key = f"{prefix}/manifest.jsonl"
+            with local_manifest.open("rb") as mf:
+                self.s3.put_object(
+                    Bucket=self.file_bucket_name,
+                    Key=manifest_key,
+                    Body=mf.read(),
+                    ContentType="application/x-ndjson",  # JSON Lines / NDJSON
+                )
+
+            logging.info(f"Upload of manifest success: s3://{self.file_bucket_name}/{manifest_key}")
 
             return True, "success"
 
@@ -346,23 +210,30 @@ class UploadClient:
 
             if not delete_ok:
                 logging.error(f"Failed to delete temp folder for job {job_id} after a failed upload attempt. Delete error: {delete_msg}, upload error: {e}")
+            else:
+                logging.error(f"Upload failed: {e}")
+                logging.info(f"Cleaned up temp folder for job {job_id}")
 
             return False, f"upload_error: {e}"
 
     def start_upload_job(self,
-                          csv_path: str,
+                          manifest_path: str,
+                          label_type: str,
                           *,
-                          summary: str = "",
+                          job_summary: str = "",
                           data_source: str = "") -> Dict:
         """
         High-level operation a caller will use. Steps:
           1) try to acquire lock
           2) create job row with status=PENDING
-          3) read csv and return job_id for caller to continue (actual file uploads implemented elsewhere)
+          3) read manifest and return job_id for caller to continue
         Returns {"job_id": ...} on success; {"error": ...} on failure.
 
         This method keeps errors explicit so callers can decide to retry or inspect.
         """
+        if label_type not in ALLOWED_LABEL_TYPES:
+            return {"error": f"Invalid label type: {label_type}, must be one of {ALLOWED_LABEL_TYPES}"}
+
         # try to acquire lock
         ok, holder_or_err = self.acquire_lock()
         if not ok:
@@ -373,7 +244,7 @@ class UploadClient:
         logging.info(f"Acquired lock: {job_id}")
 
         # create job row
-        ok, err = self.create_job_row(job_id, summary=summary)
+        ok, err = self.create_job_row(job_id, summary=job_summary)
         if not ok:
             logging.error(f"Failed to create job row: {err}")
             # release lock before returning
@@ -382,26 +253,31 @@ class UploadClient:
 
         logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
 
-        # read csv and assign self.df if ok.
-        ok, errors_dict = self._load_and_validate_csv(csv_path)
-        if not ok:
+        # Validate the manifest. Ensure it has the expected structure and s3 uri's are valid (formatted correctly).
+        validation_dict = validate_manifest(manifest_path, label_type)
+        if not validation_dict.get('success'):
+            err = validation_dict.get('error')
             # mark job failed and release lock
-            logging.error(f"Failed to load and validate csv: {errors_dict}")
-            msg = json.dumps(errors_dict)
-            self.update_job_status(job_id, "FAILED", error_msg=msg)
+            logging.error(f"Failed to load and validate manifest: {err}")
+            self.update_job_status(job_id, "FAILED", error_msg=err)
             self.release_lock(expected_holder=job_id)
-            return {"error": errors_dict}
+            return {"error": err}
+        else:
+            manifest_path = validation_dict['local_path']
 
-        # At this point we have job_id, PENDING row, and self.df to upload to temp folder.
-        logging.info("CSV loaded in and validated. Uploading to S3...")
-        ok, msg = self.upload_files_to_s3(job_id, data_source=data_source)
+        # At this point we have job_id, PENDING row, and manifest json loaded in.
+        logging.info("Manifest validated. Uploading to S3...")
+        ok, msg = self.upload_files_to_s3(job_id,
+                                          label_type,
+                                          manifest_path,
+                                          data_source=data_source)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
             self.update_job_status(job_id, "FAILED", error_msg=msg)
             self.release_lock(expected_holder=job_id)
             return {"error": f"Failed upload step: {msg}"}
 
-        logging.info("Done uploading files to S3.")
+        logging.info("Done uploading manifest and job.json to S3.")
         self.update_job_status(job_id, "IN_PROGRESS", error_msg=msg)
 
         return {"submission_status": "success", "job_id": job_id}

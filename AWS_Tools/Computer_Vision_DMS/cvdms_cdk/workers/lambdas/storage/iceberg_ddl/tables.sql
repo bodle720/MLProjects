@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     job_id string,
     image_id string,
     temp_source_ref string,
-    canonical_copy_to string,
     img_type string,
     img_height int,
     img_width int,
@@ -76,15 +75,16 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     sha256_hash string,
     string_labels array<string>,
     temp_source_ref_bbox_meta string,
-    temp_source_ref_mask_png string,
-    temp_source_ref_mask_meta string,
-    temp_source_ref_instance_annotation_png string,
-    temp_source_ref_instance_annotation_meta string,
-    classes_present array<string> COMMENT 'Relevant for semantic masks, bboxes, and instance annotations',
+    temp_source_ref_semantic_png string,
+    temp_source_ref_semantic_meta string,
+    temp_source_ref_instance_png string,
+    temp_source_ref_instance_meta string,
+    classes_present array<string> COMMENT 'String class names in this image label pair.',
     validation_status string,
     validation_error string,
-    dedup_status string
-    dedup_error string
+    dedup_status string,
+    dedup_error string,
+    matched_image_id string
 )
 PARTITIONED BY (job_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/upload_staging/'

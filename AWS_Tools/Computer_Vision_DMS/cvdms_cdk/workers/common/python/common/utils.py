@@ -3,7 +3,7 @@ import json
 import math
 import logging
 from decimal import Decimal
-from typing import Tuple, Any, Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from datetime import datetime, timezone
 
 import boto3
@@ -21,20 +21,21 @@ athena = boto3.client("athena")
 s3 = boto3.client("s3")
 
 UPLOAD_STAGING_COLS = [
-    "job_id", "image_id", "temp_source_ref", "copy_to",
+    "job_id", "image_id", "temp_source_ref",
     "img_type", "img_height", "img_width", "num_channels", "dtype",
     "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
-    "temp_string_labels_path", "temp_bbox_path", "temp_semantic_mask_path",
-    "temp_instance_annotation_path", "validation_status", "validation_error",
-    "dedup_status"
+    "string_labels", "temp_source_ref_bbox_meta", "temp_source_ref_semantic_png",
+    "temp_source_ref_semantic_meta", "temp_source_ref_instance_png", "temp_source_ref_instance_meta",
+    "classes_present", "validation_status", "validation_error",
+    "dedup_status", "dedup_error", "matched_image_id"
 ]
 
 CANONICAL_IMAGERY_COLS = [
     "image_id", "source_ref", "img_type",
     "img_height", "img_width", "num_channels", "dtype",
     "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
-    "string_labels", "bboxes", "semantic_masks",
-    "instance_annotations"
+    "string_labels", "bbox_annotation_ids", "semantic_mask_ids",
+    "instance_annotation_ids"
 ]
 
 def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
@@ -131,6 +132,22 @@ def release_lock(job_id,
         if code == "ConditionalCheckFailedException":
             return False, f"lock_not_held_by_job_id: {job_id}"
         return False, f"dynamodb_error: {e}"
+
+def delete_s3_prefix(bucket: str, prefix: str):
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            s3.delete_object(Bucket=bucket, Key=obj["Key"])
+
+def s3_list_keys(bucket: str, prefix: str) -> List[str]:
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.endswith("/"):
+                keys.append(key)
+    return keys
 
 def wait_for_athena(query_execution_id,
                     poll=1.5,
@@ -356,12 +373,6 @@ def delete_iceberg_partition_rows(job_id: str,
         })
 
     return result
-
-def delete_s3_prefix(bucket: str, prefix: str):
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            s3.delete_object(Bucket=bucket, Key=obj["Key"])
 
 # Helpers to extract event keys we will need regardless of input type.
 def find_key_recursively(obj: Any, target_key: str, max_depth: int = 6, max_nodes: int = 10000) -> Optional[Any]:

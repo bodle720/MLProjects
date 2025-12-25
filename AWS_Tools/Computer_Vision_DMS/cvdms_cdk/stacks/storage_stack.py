@@ -1,11 +1,9 @@
-import uuid
 from re import sub
 from constructs import Construct
 
 from aws_cdk import (
     Stack,
     Duration,
-    CfnOutput,
     RemovalPolicy,
     CustomResource,
     aws_iam as iam,

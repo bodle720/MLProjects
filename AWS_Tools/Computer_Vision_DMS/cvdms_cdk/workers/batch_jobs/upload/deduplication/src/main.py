@@ -18,7 +18,7 @@ import s3fs
 import boto3
 from botocore.exceptions import ClientError
 
-# Your logging helper must be available in the image or layer
+# The logging helper must be available in the image or layer
 from common.utils import log
 
 # Environment variables (provided by BatchingStage)
@@ -151,7 +151,7 @@ def pick_representative(group):
 
     def key_fn(r):
         ts = r.get("uploaded_at") or "9999-12-31 23:59:59"
-        return (ts, r.get("image_id") or "")
+        return ts, r.get("image_id") or ""
 
     return min(group, key=key_fn)
 
@@ -213,6 +213,7 @@ def process_manifest(manifest):
             r["validation_status"] = r.get("validation_status", "failed")
             r["validation_error"] = r.get("validation_error", "missing sha256_hash")
             r["dedup_status"] = r.get("dedup_status", "pending")
+            r["dedup_error"] = r.get("dedup_error", "")
             groups[f"__MISSING_SHA__{total_rows}"].append(r)
             continue
 
@@ -277,7 +278,7 @@ def process_manifest(manifest):
         rep_row = rep_index.get((sha, rep_image_id))
         if rep_row:
             rep_row["dedup_status"] = "external_duplicate"
-            # rep_row["matched_image_id"] = matched_image_id # removed
+            rep_row["matched_image_id"] = matched_image_id
             external_dup_count += 1
 
     summary = {
