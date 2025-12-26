@@ -274,7 +274,7 @@ class BatchingStage(Construct):
         )
 
         container_env = {
-            "MANIFEST_S3_KEY": sfn.JsonPath.string_at("$.manifest"), # means Step Functions will substitute the values from the per‑item input into environment variables for the container, see below
+            "MANIFEST_S3_URI": sfn.JsonPath.string_at("$.manifest"), # means Step Functions will substitute the values from the per‑item input into environment variables for the container, see below
             "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
             "USER": sfn.JsonPath.string_at("$.user"),
             "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
@@ -310,9 +310,9 @@ class BatchingStage(Construct):
                 "manifest.$": "$$.Map.Item.Value",
                 "job_id.$": "$.job_id", # keys ending with .$ tell Step Functions “this value comes from a JSONPath expression.”
                 "user.$": "$.user",
+                "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
-                "data_source.$": "$.data_source",
-                "event_type.$": "$.event_type"
+                "data_source.$": "$.data_source"
         }
 
         if extra_map_state_params:

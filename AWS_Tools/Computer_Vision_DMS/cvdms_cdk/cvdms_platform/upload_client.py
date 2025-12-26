@@ -160,7 +160,8 @@ class UploadClient:
         except Exception as e:
             return False, f"delete_error: {e}"
 
-    def upload_files_to_s3(self, job_id: str,
+    def upload_files_to_s3(self,
+                           job_id: str,
                            label_type: str,
                            manifest_path: str,
                            data_source: str = "") -> Tuple[bool, str]:
@@ -169,30 +170,12 @@ class UploadClient:
 
         # Upload the local manifest (manifest_path) and job.json to the prefix.
         try:
-            # Upload job.json
-            job_manifest = {
-                "job_id": job_id,
-                "user": self.user,
-                "data_source":data_source,
-                "event_type": self.event_type,
-                "label_type": label_type
-            }
-            job_json_key = f"{prefix}/job.json"
-            self.s3.put_object(
-                Bucket=self.file_bucket_name,
-                Key=job_json_key,
-                Body=json.dumps(job_manifest).encode("utf-8"),
-                ContentType="application/json"
-            )
-
-            logging.info("Upload of job.json success.")
-
             # Upload manifest_path from local drive to S3.
             local_manifest = Path(manifest_path)
             if not local_manifest.exists() or not local_manifest.is_file():
                 raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
 
-            manifest_key = f"{prefix}/manifest.jsonl"
+            manifest_key = f"{prefix}/{job_id}.manifest"
             with local_manifest.open("rb") as mf:
                 self.s3.put_object(
                     Bucket=self.file_bucket_name,
@@ -202,6 +185,25 @@ class UploadClient:
                 )
 
             logging.info(f"Upload of manifest success: s3://{self.file_bucket_name}/{manifest_key}")
+
+            # Upload job.json
+            job_manifest = {
+                "job_id": job_id,
+                "user": self.user,
+                "event_type": self.event_type,
+                "label_type": label_type,
+                "data_source":data_source,
+                "original_manifest_s3_uri": f"s3://{self.file_bucket_name}/{manifest_key}"
+            }
+            job_json_key = f"{prefix}/job.json"
+            self.s3.put_object(
+                Bucket=self.file_bucket_name,
+                Key=job_json_key,
+                Body=json.dumps(job_manifest).encode("utf-8"),
+                ContentType="application/json"
+            )
+
+            logging.info(f"Upload of job.json success: s3://{self.file_bucket_name}/{job_json_key}")
 
             return True, "success"
 

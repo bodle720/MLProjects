@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     validation_error string,
     dedup_status string,
     dedup_error string,
+    registration_status string,
+    registration_error string,
     matched_image_id string
 )
 PARTITIONED BY (job_id)

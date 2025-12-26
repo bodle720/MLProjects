@@ -4,9 +4,10 @@ from datetime import datetime
 from urllib.parse import unquote_plus
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Lambda layer imports
-from common.utils import log, s3_list_keys
+from common.utils import log
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
@@ -16,6 +17,14 @@ GLOBAL_DLQ_URL = os.environ["GLOBAL_DLQ_URL"]
 sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
+
+ALLOWED_LABEL_TYPES = {
+    "single-label",
+    "multi-label",
+    "object-detection",
+    "semantic-segmentation",
+    "instance-segmentation",
+}
 
 def send_to_dlq(job_id, user, event_type, error):
     job_id = job_id or 'unknown'
@@ -36,80 +45,22 @@ def send_to_dlq(job_id, user, event_type, error):
     except Exception as e:
         log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Failed to send to DLQ: {str(error)}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
 
-def basenames_from_keys(keys, allowed_exts=None):
-    files = []
-    for k in keys:
-        if k.endswith("/"):
-            continue
-        base, ext = os.path.splitext(os.path.basename(k))
-        if allowed_exts is None or ext.lower() in allowed_exts:
-            files.append(base)
-    return files
-
-def require_no_duplicates(name_list, kind):
-    counts = {}
-    for n in name_list:
-        counts[n] = counts.get(n, 0) + 1
-    dups = [n for n, c in counts.items() if c > 1]
-    if dups:
-        raise ValueError(f"[UPLOAD_KICKOFF] Duplicate {kind} detected for basenames: {dups}")
-
-def validate_labels(bucket, job_id, label_type, user, event_type):
-    image_keys = s3_list_keys(bucket, f"temp/image-upload/{job_id}/images/")
-    image_bases = basenames_from_keys(
-        image_keys, allowed_exts={".jpg", ".jpeg", ".png"}
-    )
-
-    if not image_bases:
-        raise ValueError("[UPLOAD_KICKOFF] No images found for job")
-
-    require_no_duplicates(image_bases, "images")
-
-    if label_type in ["string_labels", "bounding_boxes", "instance_annotations"]:
-        label_prefix = f"temp/image-upload/{job_id}/{label_type}/"
-        label_keys = s3_list_keys(bucket, label_prefix)
-        label_bases = basenames_from_keys(label_keys, allowed_exts={".json"})
-        require_no_duplicates(label_bases, f"{label_type}")
-
-        if set(image_bases) != set(label_bases):
-            missing_in_labels = sorted(set(image_bases) - set(label_bases))
-            extra_in_labels = sorted(set(label_bases) - set(image_bases))
-            error_msg = f"[UPLOAD_KICKOFF] Mismatch for {label_type}. Missing labels for: {missing_in_labels}. Extra labels for: {extra_in_labels}"
-            raise ValueError(error_msg)
-
-        if len(image_bases) != len(label_bases):
-            error_msg = f"[UPLOAD_KICKOFF] Count mismatch for {label_type}. images={len(image_bases)} labels={len(label_bases)}"
-            raise ValueError(error_msg)
-
-    elif label_type == "semantic_masks":
-        mask_prefix = f"temp/image-upload/{job_id}/semantic_masks/"
-        mask_keys = s3_list_keys(bucket, mask_prefix)
-
-        mask_png_bases = basenames_from_keys(mask_keys, allowed_exts={".png"})
-        mask_json_bases = basenames_from_keys(mask_keys, allowed_exts={".json"})
-        require_no_duplicates(mask_png_bases, "semantic mask PNGs")
-        require_no_duplicates(mask_json_bases, "semantic mask JSONs")
-
-        if set(image_bases) != set(mask_png_bases) or set(image_bases) != set(mask_json_bases):
-            missing_png = sorted(set(image_bases) - set(mask_png_bases))
-            extra_png = sorted(set(mask_png_bases) - set(image_bases))
-            missing_json = sorted(set(image_bases) - set(mask_json_bases))
-            extra_json = sorted(set(mask_json_bases) - set(image_bases))
-            error_msg = f"[UPLOAD_KICKOFF] Semantic masks mismatch. PNG missing: {missing_png}, PNG extra: {extra_png}, JSON missing: {missing_json}, JSON extra: {extra_json}"
-            raise ValueError(error_msg)
-
-        if len(image_bases) != len(mask_png_bases) or len(image_bases) != len(mask_json_bases):
-            error_msg = f"[UPLOAD_KICKOFF] Semantic masks count mismatch. images={len(image_bases)}, pngs={len(mask_png_bases)} jsons={len(mask_json_bases)}"
-            raise ValueError(error_msg)
-
-    log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Found {len(image_bases)} images and labels for label type = {label_type}", LOG_FIREHOSE_STREAM_NAME)
-
 def fail(job_id, user, event_type, msg):
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "IMAGE_UPLOAD"
     send_to_dlq(job_id, user, event_type, msg)
     return {"status": "failed", "job_id": job_id, "user": user, "event_type": event_type}
+
+def _parse_s3_uri(uri: str):
+    # uri: s3://bucket/key
+    rest = uri[5:]
+
+    if "/" in rest:
+        b, k = rest.split("/", 1)
+        return b, k
+    else:
+        return None, None
 
 def handler(event, context):
     job_id = "unknown"
@@ -161,22 +112,43 @@ def handler(event, context):
         job_data = json.loads(obj["Body"].read().decode("utf-8"))
         job_id = job_data["job_id"]
         user = job_data["user"]
-        data_source = job_data["data_source"]
+        event_type = job_data.get("event_type", "IMAGE_UPLOAD")
         label_type = job_data["label_type"]
-        event_type = job_data["event_type"]
+        data_source = job_data["data_source"]
+        original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and label_type from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
-    if not isinstance(label_type, str):
-        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] label_type must be a str, got {type(label_type)}")
+    if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Invalid label_type: {label_type}")
 
+    if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Invalid S3 URI original_manifest_s3_uri: {original_manifest_s3_uri}")
+
+    manifest_bucket, manifest_key = _parse_s3_uri(original_manifest_s3_uri)
+
+    if manifest_bucket is None:
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Manifest missing key: {original_manifest_s3_uri}")
+
+    if manifest_bucket != FILE_BUCKET_NAME:
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Manifest bucket mismatch in upload kickoff lambda, manifest is in bucket: {manifest_bucket}, expected {FILE_BUCKET_NAME}")
+
+    if manifest_key != f"temp/image-upload/{job_id}/{job_id}.manifest":
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Manifest key incorrect: got {manifest_key}, expected temp/image-upload/{job_id}/{job_id}.manifest")
+
+    # Make sure we have <job id>.manifest located next to job.json: "temp/image-upload/<job_id>/<job_id>.manifest"
     try:
-        validate_labels(bucket, job_id, label_type, user, event_type)
-    except Exception as e:
-        log(job_id, user, event_type, "[UPLOAD_KICKOFF] Error validating labels in kickoff lambda.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
-        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error validating labels: {str(e)}")
+        head = s3.head_object(Bucket=manifest_bucket, Key=manifest_key)
+        if head.get("ContentLength", 0) <= 0:
+            return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Manifest is empty: {original_manifest_s3_uri}")
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Missing manifest next to job.json: {original_manifest_s3_uri}")
+        return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] head_object failed for manifest: {original_manifest_s3_uri}: {e}")
 
+    # Start the upload step function.
     try:
         response = sf.start_execution(
             stateMachineArn=UPLOAD_STATE_MACHINE_ARN,
@@ -184,9 +156,10 @@ def handler(event, context):
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
+                "event_type": event_type,
                 "label_type": label_type,
-                "data_source":data_source.lower(),
-                "event_type":event_type,
+                "data_source": str(data_source).lower(),
+                "original_manifest_s3_uri": original_manifest_s3_uri,
             })
         )
     except Exception as e:
@@ -195,9 +168,12 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda started state machine execution {response['executionArn']}", LOG_FIREHOSE_STREAM_NAME)
 
-    return {"status": "ok",
-            "job_id": job_id,
-            "user": user,
-            "label_type": label_type,
-            "data_source":data_source,
-            "event_type": event_type}
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "user": user,
+        "label_type": label_type,
+        "event_type": event_type,
+        "data_source": data_source,
+        "original_manifest_s3_uri": original_manifest_s3_uri
+    }

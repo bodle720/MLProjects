@@ -2,11 +2,10 @@ import os
 import sys
 import logging
 from functools import lru_cache
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict
 
 import boto3
 from botocore.exceptions import ClientError
-import pandas as pd
 
 from .upload_client import UploadClient
 from .log_client import LogClient

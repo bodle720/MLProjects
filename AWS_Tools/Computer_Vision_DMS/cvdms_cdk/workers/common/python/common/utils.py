@@ -27,7 +27,7 @@ UPLOAD_STAGING_COLS = [
     "string_labels", "temp_source_ref_bbox_meta", "temp_source_ref_semantic_png",
     "temp_source_ref_semantic_meta", "temp_source_ref_instance_png", "temp_source_ref_instance_meta",
     "classes_present", "validation_status", "validation_error",
-    "dedup_status", "dedup_error", "matched_image_id"
+    "dedup_status", "dedup_error", "registration_status", "registration_error", "matched_image_id"
 ]
 
 CANONICAL_IMAGERY_COLS = [

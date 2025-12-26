@@ -106,6 +106,8 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         validation_error,
         dedup_status,
         dedup_error,
+        registration_status,
+        registration_error,
         matched_image_id,
         substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
     FROM {table}

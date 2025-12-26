@@ -25,61 +25,63 @@ def handler(event, context):
         event_type = event["event_type"]
         label_type = event["label_type"]
         data_source = event["data_source"]
+        original_manifest_s3_uri = event["original_manifest_s3_uri"]
     except KeyError as e:
         raise RuntimeError(f"[VAL_FILE_BATCHING] Validation batching Lambda failed: missing required key {e}")
 
     log(job_id, user, event_type, f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
 
-    # Images are assumed to be under temp/image-upload/{job_id}/images/
-    image_keys = []
-    continuation_token = None
-    prefix = f"temp/image-upload/{job_id}/images/"
-    kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": prefix}
-    iteration_cap = 9_000_000 # for safety, likely unneeded
-    iteration_count = 0
-    while True and (iteration_count < iteration_cap):
-        iteration_count += 1
-        if continuation_token:
-            kwargs["ContinuationToken"] = continuation_token
-        resp = s3.list_objects_v2(**kwargs)
-        image_keys.extend([obj["Key"] for obj in resp.get("Contents", []) if not obj["Key"].endswith("/")])
-        if not resp.get("IsTruncated"):
-            break
-        continuation_token = resp["NextContinuationToken"]
+    # Get the json lines from the original manifest
+    # original_manifest_s3_uri: s3://bucket/key
+    if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
+        raise RuntimeError(f"[VAL_FILE_BATCHING] Invalid original_manifest_s3_uri: {original_manifest_s3_uri}")
 
-    if len(image_keys) == 0:
-        err_msg = f"[VAL_FILE_BATCHING] No images found under {prefix}"
-        log(job_id, user, event_type, err_msg, LOG_FIREHOSE_STREAM_NAME, error = err_msg, level="error")
-        raise
+    rest = original_manifest_s3_uri[5:]
+    if "/" not in rest:
+        raise RuntimeError(f"[VAL_FILE_BATCHING] original_manifest_s3_uri missing key: {original_manifest_s3_uri}")
+
+    manifest_bucket, manifest_key = rest.split("/", 1)
+
+    resp = s3.get_object(Bucket=manifest_bucket, Key=manifest_key)
+    raw_text = resp["Body"].read().decode("utf-8-sig")
+
+    # Keep only non-empty lines (client already ensured 1 JSON object per line)
+    json_lines = [ln for ln in raw_text.splitlines() if ln.strip()]
+
+    if not json_lines:
+        raise RuntimeError(f"[VAL_FILE_BATCHING] Original manifest is empty or only blank lines: {original_manifest_s3_uri}")
 
     # Chunk into batches
     batches = [
-        image_keys[i:i + IMAGES_PER_BATCH]
-        for i in range(0, len(image_keys), IMAGES_PER_BATCH)
+        json_lines[i:i + IMAGES_PER_BATCH]
+        for i in range(0, len(json_lines), IMAGES_PER_BATCH)
     ]
 
-    manifest_keys = []
+    manifest_uris = []
     for idx, batch in enumerate(batches, start=1):
-        manifest = {"images": batch}
-        manifest_key = f"temp/image-upload/{job_id}/batches/validation-step/batch-{idx:03d}.json"
+        # make the manifest from the batch (JSONL content)
+        # each element in `batch` is already a JSON string line
+
+        manifest_body = ("\n".join(batch) + "\n").encode("utf-8")
+        manifest_key = f"temp/image-upload/{job_id}/batches/validation/batch-{idx:03d}.jsonl"
 
         s3.put_object(
             Bucket=FILE_BUCKET_NAME,
             Key=manifest_key,
-            Body=json.dumps(manifest).encode("utf-8"),
-            ContentType="application/json"
+            Body=manifest_body,
+            ContentType="application/x-ndjson"
         )
 
-        manifest_keys.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
+        manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
 
-    msg = f"[VAL_FILE_BATCHING] Done batching {len(image_keys)} total images for image upload validation: label type = {label_type}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
+    msg = f"[VAL_FILE_BATCHING] Done batching {len(json_lines)} total images for image upload validation: label type = {label_type}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
     log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,
         "user": user,
+        "event_type": event_type,
         "label_type": label_type,
         "data_source":data_source,
-        "event_type": event_type,
-        "manifests": manifest_keys
+        "manifests": manifest_uris
     }
