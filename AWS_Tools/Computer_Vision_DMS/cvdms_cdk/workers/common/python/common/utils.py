@@ -38,6 +38,10 @@ CANONICAL_IMAGERY_COLS = [
     "instance_annotation_ids"
 ]
 
+CANONICAL_BBOX_COLS = ["bbox_annotation_id", "image_id", "source_ref_meta", "classes_present"]
+CANONICAL_SEMANTIC_COLS = ["semantic_mask_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present"]
+CANONICAL_INSTANCE_COLS = ["instance_annotation_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present"]
+
 def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
     entry = {
         "job_id": job_id,
@@ -325,6 +329,12 @@ def chunked_insert(rows,
         columns = UPLOAD_STAGING_COLS
     elif table_name == 'canonical_imagery':
         columns = CANONICAL_IMAGERY_COLS
+    elif table_name == 'canonical_bounding_boxes':
+        columns = CANONICAL_BBOX_COLS
+    elif table_name == 'canonical_semantic_masks':
+        columns = CANONICAL_SEMANTIC_COLS
+    elif table_name == 'canonical_instance_annotations':
+        columns = CANONICAL_INSTANCE_COLS
     else:
         raise Exception(f'Table name not recognized: {table_name}')
 
@@ -364,19 +374,23 @@ def chunked_insert(rows,
                         ResultConfiguration={"OutputLocation": athena_output_s3},
                         WorkGroup=athena_workgroup
                     )["QueryExecutionId"]
-                    wait_for_athena(qid)
+                    res = wait_for_athena(qid)
 
-                except Exception as last_error:
+                    if res["state"] != "SUCCEEDED":
+                        raise RuntimeError("Row insert failed")
+
+                except Exception as e:
+                    last_error = str(e)
                     fail_count += 1
 
-    if fail_count == len(rows):
+    if fail_count == len(rows) and len(rows) > 0:
         all_failed = True
 
     return all_failed, str(last_error)
 
 def delete_iceberg_partition_rows(job_id: str,
                                     iceberg_db_name,
-                                    image_upload_staging_table_name,
+                                    table_name,
                                     athena_output_s3,
                                     athena_workgroup,
                                     poll_interval: int = 5,
@@ -388,7 +402,7 @@ def delete_iceberg_partition_rows(job_id: str,
     """
     # Escape single quotes in job_id for SQL literal safety
     safe_job_id = job_id.replace("'", "''")
-    full_table = f"{iceberg_db_name}.{image_upload_staging_table_name}"
+    full_table = f"{iceberg_db_name}.{table_name}"
 
     # 1) DELETE statement (Iceberg positional delete files)
     delete_sql = f"DELETE FROM {full_table} WHERE job_id = '{safe_job_id}'"
@@ -423,142 +437,3 @@ def delete_iceberg_partition_rows(job_id: str,
         })
 
     return result
-
-# Helpers to extract event keys we will need regardless of input type.
-def find_key_recursively(obj: Any, target_key: str, max_depth: int = 6, max_nodes: int = 10000) -> Optional[Any]:
-    """
-    Search for target_key anywhere in a nested dict/list structure.
-    Bounded by max_depth and max_nodes to avoid runaway traversal.
-    Returns the first found value or None.
-    """
-    nodes_visited = 0
-
-    def _recurse(o: Any, depth: int) -> Optional[Any]:
-        nonlocal nodes_visited
-        if nodes_visited >= max_nodes:
-            return None
-        nodes_visited += 1
-
-        if depth < 0:
-            return None
-        if isinstance(o, dict):
-            # check direct hit first for deterministic behavior
-            if target_key in o:
-                return o[target_key]
-            for k, v in o.items():
-                # skip trivial scalar values to reduce work
-                if isinstance(v, (dict, list)):
-                    res = _recurse(v, depth - 1)
-                    if res is not None:
-                        return res
-        elif isinstance(o, list):
-            for item in o:
-                if isinstance(item, (dict, list)):
-                    res = _recurse(item, depth - 1)
-                    if res is not None:
-                        return res
-        return None
-
-    return _recurse(obj, max_depth)
-
-def _extract_from_container_env(event: Any) -> Dict[str, str]:
-    """
-    If event is an ECS/Batch job detail or similar with Container.Environment list,
-    return a dict of env vars.
-    """
-    try:
-        job_detail = event[0] if isinstance(event, list) else event
-        env_list = job_detail.get("Container", {}).get("Environment", [])
-        if not env_list:
-            # Some shapes use job_detail['container']['environment'] (lowercase)
-            env_list = job_detail.get("container", {}).get("environment", [])
-        env_map = {e["Name"]: e["Value"] for e in env_list if "Name" in e and "Value" in e}
-        return env_map
-    except Exception:
-        return {}
-
-def _dig_for_key(event: Any, key: str) -> Any:
-    """
-    Try to find `key` in several likely places:
-      - top-level: event[key]
-      - nested under any stage keys (e.g., event['validationStage'][key])
-      - nested under 'detail' (CloudWatch events)
-    Returns None if not found.
-    """
-    if not isinstance(event, dict):
-        return None
-
-    # 1) top-level
-    if key in event:
-        return event[key]
-
-    # 2) under top-level stage keys (common pattern: event['validationStage']['job_id'])
-    for k, v in event.items():
-        if isinstance(v, dict) and key in v:
-            return v[key]
-
-    # 3) under 'detail' (CloudWatch/Batch event)
-    if "detail" in event and isinstance(event["detail"], dict) and key in event["detail"]:
-        return event["detail"][key]
-
-    return None
-
-def _normalize_label_type(raw) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, str):
-        return raw
-    return str(raw)
-
-def get_job_input(event: Any) -> Dict[str, Any]:
-    """
-    Return a normalized dict with keys:
-      job_id, user, label_type (str), data_source, event_type
-    """
-    # 1) Try container env extraction (ECS/Batch job detail)
-    env_map = _extract_from_container_env(event)
-    if env_map:
-        job_id = env_map.get("JOB_ID") or env_map.get("job_id")
-        user = env_map.get("USER") or env_map.get("user")
-        label_type_raw = env_map.get("LABEL_TYPE") or env_map.get("label_type")
-        data_source = env_map.get("DATA_SOURCE") or env_map.get("data_source")
-        event_type = env_map.get("EVENT_TYPE") or env_map.get("event_type")
-        return {
-            "job_id": job_id,
-            "user": user,
-            "label_type": _normalize_label_type(label_type_raw),
-            "data_source": data_source,
-            "event_type": event_type
-        }
-
-    # 2) direct keys and stage-nested lookups (fast)
-    job_id = _dig_for_key(event, "job_id")
-    user = _dig_for_key(event, "user")
-    label_type_raw = _dig_for_key(event, "label_type") or _dig_for_key(event, "labelType")
-    data_source = _dig_for_key(event, "data_source")
-    event_type = _dig_for_key(event, "event_type") or _dig_for_key(event, "eventType")
-
-    # 3) recursive fallback (bounded)
-    if job_id is None:
-        job_id = find_key_recursively(event, "job_id")
-    if user is None:
-        user = find_key_recursively(event, "user")
-    if label_type_raw is None:
-        label_type_raw = find_key_recursively(event, "label_type") or find_key_recursively(event, "labelType")
-    if data_source is None:
-        data_source = find_key_recursively(event, "data_source")
-    if event_type is None:
-        event_type = find_key_recursively(event, "event_type") or find_key_recursively(event, "eventType")
-
-    # log when recursive fallback was used for observability
-    # (only log at debug/info level to avoid noise)
-    logger.debug("get_job_input: used recursive fallback for job_id=%s user=%s", job_id, user)
-
-    # normalize and return defaults
-    return {
-        "job_id": job_id or "unknown",
-        "user": user or "unknown",
-        "label_type": _normalize_label_type(label_type_raw),
-        "data_source": data_source or "unknown",
-        "event_type": event_type or "unknown"
-    }

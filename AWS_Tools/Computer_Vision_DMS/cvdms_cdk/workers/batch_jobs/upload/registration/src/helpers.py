@@ -10,9 +10,6 @@ from botocore.exceptions import ClientError
 
 s3 = boto3.client("s3")
 
-# -------------------------
-# JSON / row normalization
-# -------------------------
 def to_jsonable(v: Any) -> Any:
     if v is None:
         return None
@@ -49,9 +46,6 @@ def normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
         row[k] = to_jsonable(v)
     return row
 
-# -------------------------
-# S3 URI helpers
-# -------------------------
 def parse_s3_uri(uri: str) -> Tuple[str, str]:
     # expects s3://bucket/key
     if not uri or not uri.startswith("s3://"):
@@ -59,7 +53,6 @@ def parse_s3_uri(uri: str) -> Tuple[str, str]:
     bucket_key = uri[len("s3://"):]
     bucket, key = bucket_key.split("/", 1)
     return bucket, key
-
 
 def s3_uri(bucket: str, key: str) -> str:
     return f"s3://{bucket}/{key}"
@@ -77,9 +70,6 @@ def split_ext(filename: str) -> Tuple[str, str]:
 def now_utc_timestamp_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-# -------------------------
-# S3 operations with retry
-# -------------------------
 def s3_copy_with_retry(src_bucket: str, src_key: str, dst_bucket: str, dst_key: str,
                        retries: int = 6, base_delay: float = 0.5) -> None:
     last_err = None
@@ -107,16 +97,6 @@ def s3_delete_best_effort(bucket: str, key: str) -> None:
         # best effort: swallow
         pass
 
-# -------------------------
-# Canonical path builders
-# -------------------------
-@dataclass(frozen=True)
-class CanonicalPaths:
-    image_key: str
-    image_uri: str
-    label_keys: List[str]
-    label_uris: List[str]
-
 def build_canonical_image_dest(file_bucket: str, data_source: str, image_id: str, temp_image_uri: str) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri)
     fname = s3_key_basename(temp_key)
@@ -126,7 +106,8 @@ def build_canonical_image_dest(file_bucket: str, data_source: str, image_id: str
     dst_key = f"canonical/imagery/{data_source}/{image_id}.{ext}"
     return dst_key, s3_uri(file_bucket, dst_key)
 
-def build_canonical_label_dests(file_bucket: str, label_type: str,
+def build_canonical_label_dests(file_bucket: str,
+                               label_type: str,
                                bbox_meta_uri: Optional[str],
                                semantic_png_uri: Optional[str],
                                semantic_meta_uri: Optional[str],
@@ -202,13 +183,11 @@ def cleanup_copied_best_effort(dst_bucket: str, dst_keys: List[str]) -> None:
     for k in dst_keys:
         s3_delete_best_effort(dst_bucket, k)
 
-# -------------------------
-# Table row builders
-# -------------------------
-def build_canonical_imagery_row(file_bucket: str, data_source: str, row: Dict[str, Any],
-                               canonical_image_uri: str,
-                               label_type: str,
-                               label_uuid: Optional[str]) -> Dict[str, Any]:
+def build_canonical_imagery_row(data_source: str,
+                                row: Dict[str, Any],
+                                canonical_image_uri: str,
+                                label_type: str,
+                                label_uuid: Optional[str]) -> Dict[str, Any]:
     image_id = row.get("image_id")
     if not image_id:
         raise RuntimeError("Missing image_id in upload_staging row")
@@ -244,7 +223,9 @@ def build_canonical_imagery_row(file_bucket: str, data_source: str, row: Dict[st
 
     return out
 
-def build_label_table_row(file_bucket: str, label_type: str, image_id: str,
+def build_label_table_row(file_bucket: str,
+                          label_type: str,
+                          image_id: str,
                           label_uuid: str,
                           canonical_label_uris: List[str],
                           classes_present: Optional[List[str]]) -> Optional[Dict[str, Any]]:

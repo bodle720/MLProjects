@@ -20,12 +20,9 @@ from helpers import (
     build_canonical_imagery_row,
     build_label_table_row,
     copy_objects_or_raise,
-    cleanup_copied_best_effort,
+    cleanup_copied_best_effort
 )
 
-# -------------------------
-# Env
-# -------------------------
 MANIFEST_S3_URI = os.environ.get("MANIFEST_S3_URI")
 JOB_ID = os.environ.get("JOB_ID", "unknown")
 USER = os.environ.get("USER", "unknown")
@@ -45,7 +42,7 @@ if not LOG_FIREHOSE_STREAM_NAME:
 # Where to write processed outputs for this shard
 PROCESSED_PREFIX_BASE = os.environ.get("PROCESSED_PREFIX_BASE", "temp/image-upload")
 # This is the “stage processed area” analogous to deduplication-step
-PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/registration-step/processed"
+PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/registration/processed"
 
 # Safety
 MAX_ROWS_IN_MEMORY = int(os.environ.get("REG_MAX_ROWS_IN_MEMORY", "200000"))
@@ -54,10 +51,6 @@ s3 = boto3.client("s3")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-# -------------------------
-# S3 read/write helpers
-# -------------------------
 
 def s3_read_json(uri: str) -> Dict[str, Any]:
     b, k = parse_s3_uri(uri)
@@ -96,9 +89,6 @@ def write_jsonl_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> 
 def write_text_to_s3(bucket: str, key: str, text: str, content_type: str) -> None:
     s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
 
-# -------------------------
-# Core processing
-# -------------------------
 def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """
     Returns:
@@ -206,7 +196,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
 
             # Build canonical imagery + label table rows
             canon_img_row = build_canonical_imagery_row(
-                FILE_BUCKET_NAME, DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, label_uuid
+                DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, label_uuid
             )
             canonical_imagery_rows.append(canon_img_row)
 
