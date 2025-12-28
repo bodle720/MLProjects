@@ -1,15 +1,10 @@
-'''
-This Lambda dynamically shards upload_staging rows by SHA prefix, exports them via Athena CTAS into Parquet, writes
-internal dedup manifests, and feeds those manifests into a Step Functions Map so dedup Batch workers can run safely
-and in parallel.
-'''
 import os
 import json
 import math
 
 import boto3
 
-from common.utils import log, wait_for_athena
+from common.utils import log, wait_for_athena, delete_s3_prefix
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -34,7 +29,7 @@ MAX_PREFIX_LENGTH = 3
 JOB_MEMORY_MB = 512
 
 # S3 layout base for dedup exports and manifests
-EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/deduplication-step/...
+EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/deduplication/...
 
 s3 = boto3.client("s3")
 athena = boto3.client("athena")
@@ -121,20 +116,16 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     )
     return resp["QueryExecutionId"]
 
-def _read_count_from_athena_result(qid):
-    """Read the single-row count result from Athena query execution output."""
-    # Get results
-    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=1)
+def _read_count_from_athena_result(qid: str) -> int:
+    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
     rows = resp.get("ResultSet", {}).get("Rows", [])
-    # First row is header; second row contains the value if present
-    if len(rows) >= 2:
-        # value is in rows[1]['Data'][0]['VarCharValue']
-        val = rows[1]["Data"][0].get("VarCharValue")
-        try:
-            return int(val)
-        except Exception:
-            return 0
-    return 0
+    if len(rows) < 2:
+        return 0
+    val = rows[1]["Data"][0].get("VarCharValue")
+    try:
+        return int(val)
+    except Exception:
+        return 0
 
 def _list_export_files(export_prefix):
     """
@@ -190,9 +181,12 @@ def _write_manifest(job_id, shard_name, files, manifest_prefix):
     s3.put_object(Bucket=FILE_BUCKET_NAME, Key=manifest_key, Body=body.encode("utf-8"), ContentType="application/json")
     return f"s3://{FILE_BUCKET_NAME}/{manifest_key}"
 
-def _choose_prefix_length(total_rows, job_memory_mb=JOB_MEMORY_MB, avg_row_kb=AVG_ROW_KB,
+def _choose_prefix_length(total_rows,
+                          job_memory_mb=JOB_MEMORY_MB,
+                          avg_row_kb=AVG_ROW_KB,
                           safety_factor=MEMORY_SAFETY_FACTOR,
-                          min_rows=MIN_ROWS_PER_SHARD, max_rows=MAX_ROWS_PER_SHARD,
+                          min_rows=MIN_ROWS_PER_SHARD,
+                          max_rows=MAX_ROWS_PER_SHARD,
                           max_prefix_len=MAX_PREFIX_LENGTH):
     """
     Choose smallest prefix length P such that expected_rows_per_shard <= target_rows_per_shard.
@@ -219,26 +213,33 @@ def _choose_prefix_length(total_rows, job_memory_mb=JOB_MEMORY_MB, avg_row_kb=AV
     # fallback to max_prefix_len
     return max_prefix_len, target
 
-def _delete_s3_prefix(bucket, prefix):
-    paginator = s3.get_paginator("list_objects_v2")
-    to_delete = []
+def _start_athena_max_shard(job_id: str, prefix_len: int) -> str:
+    """
+    Returns QueryExecutionId for a query that computes the largest shard size
+    for substr(sha256_hash, 1, prefix_len) within this job_id.
+    Only considers rows that have a non-empty sha256_hash.
+    """
+    table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
+    safe_job_id = job_id.replace("'", "''")
 
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            to_delete.append({"Key": obj["Key"]})
+    sql = f"""
+    SELECT max(cnt) AS max_cnt
+    FROM (
+      SELECT substr(sha256_hash, 1, {prefix_len}) AS sha_prefix, count(*) AS cnt
+      FROM {table}
+      WHERE job_id = '{safe_job_id}'
+        AND sha256_hash IS NOT NULL
+        AND sha256_hash <> ''
+      GROUP BY 1
+    )
+    """
 
-            if len(to_delete) == 1000:
-                s3.delete_objects(
-                    Bucket=bucket,
-                    Delete={"Objects": to_delete}
-                )
-                to_delete = []
-
-    if to_delete:
-        s3.delete_objects(
-            Bucket=bucket,
-            Delete={"Objects": to_delete}
-        )
+    resp = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
+        WorkGroup=ATHENA_WORKGROUP,
+    )
+    return resp["QueryExecutionId"]
 
 def handler(event, context):
     # Validate input
@@ -246,7 +247,7 @@ def handler(event, context):
         job_id = event["job_id"]
         user = event["user"]
         event_type = event["event_type"]
-        label_type = event["label_type"] # a str
+        label_type = event["label_type"]
         data_source = event["data_source"]
     except KeyError as e:
         raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
@@ -254,8 +255,8 @@ def handler(event, context):
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Prepare prefixes
-    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/export"
-    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication-step/manifests"
+    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication/export"
+    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication/manifests"
 
     # 0) Run COUNT(*) to estimate rows
     try:
@@ -286,6 +287,36 @@ def handler(event, context):
         max_prefix_len=int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
     )
 
+    # 1.5) Post-check: ensure max shard size <= target_rows by probing Athena.
+    # This prevents a pathological prefix bucket from creating a huge manifest/shard.
+    probe_prefix_len = prefix_len
+    max_cnt = None
+
+    for p in range(probe_prefix_len, int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH)) + 1):
+        qid = _start_athena_max_shard(job_id, p)
+        res = wait_for_athena(qid, poll=2.0, timeout=300)
+        if res["state"] != "SUCCEEDED":
+            resp = res["metadata"]
+            err = f"[DEDUP_FILE_BATCHING] Athena max-shard probe failed for job {job_id} prefix_len={p}. Response={resp}"
+            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+            raise RuntimeError(err)
+
+        max_cnt = _read_count_from_athena_result(qid)
+        log(job_id, user, event_type,
+            f"[DEDUP_FILE_BATCHING] Probe max shard rows for prefix_len={p}: max_cnt={max_cnt} (target={target_rows})",
+            LOG_FIREHOSE_STREAM_NAME)
+
+        if max_cnt <= target_rows:
+            prefix_len = p
+            break
+
+    # If still too big even at max prefix len, keep max and warn (can still proceed, but shard may be large).
+    if max_cnt is not None and max_cnt > target_rows and prefix_len == int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH)):
+        warn = (f"[DEDUP_FILE_BATCHING] WARNING: even at MAX_PREFIX_LENGTH={prefix_len}, "
+                f"max shard rows={max_cnt} > target_rows={target_rows}. "
+                f"Proceeding; consider increasing MAX_PREFIX_LENGTH or raising target_rows/job memory.")
+        log(job_id, user, event_type, warn, LOG_FIREHOSE_STREAM_NAME, error=warn, level="error")
+
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
 
     # 2) Run CTAS to export partitioned files with sha_prefix
@@ -298,7 +329,7 @@ def handler(event, context):
             log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
             raise RuntimeError(err)
 
-        _delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
+        delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
 
         qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
 
@@ -337,22 +368,13 @@ def handler(event, context):
                 continue
             # If a single shard has too many files/rows, split into sub-manifests of reasonable size.
             # We use file count as a proxy for rows; split_size_files chosen conservatively.
-            split_size_files = int(max(1, math.ceil(len(files) / max(1, math.ceil(total_rows / target_rows))))) if total_rows > 0 else 100
-            # cap split_size_files to avoid huge manifests
-            split_size_files = max(50, min(split_size_files, 2000))
+            # split_size_files = int(max(1, math.ceil(len(files) / max(1, math.ceil(total_rows / target_rows))))) if total_rows > 0 else 100
+            # split_size_files = max(50, min(split_size_files, 2000))
 
-            if len(files) <= split_size_files:
-                manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
-                manifest_keys.append(manifest_s3_uri)
-                log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
-            else:
-                # split into multiple manifests for this shard_prefix
-                for i in range(0, len(files), split_size_files):
-                    chunk = files[i:i + split_size_files]
-                    sub_name = f"{shard_prefix}-{i//split_size_files+1}"
-                    manifest_s3_uri = _write_manifest(job_id, sub_name, chunk, manifest_prefix)
-                    manifest_keys.append(manifest_s3_uri)
-                    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+            manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
+            manifest_keys.append(manifest_s3_uri)
+            log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
+
     except Exception as e:
         err = f"[DEDUP_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
@@ -362,9 +384,9 @@ def handler(event, context):
     result = {
         "job_id": job_id,
         "user": user,
+        "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "event_type": event_type,
         "manifests": manifest_keys
     }
 

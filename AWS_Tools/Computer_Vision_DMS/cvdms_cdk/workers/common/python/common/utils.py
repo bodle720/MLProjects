@@ -133,11 +133,61 @@ def release_lock(job_id,
             return False, f"lock_not_held_by_job_id: {job_id}"
         return False, f"dynamodb_error: {e}"
 
-def delete_s3_prefix(bucket: str, prefix: str):
+def delete_s3_prefix(bucket: str, prefix: str, batch_size: int = 100) -> None:
+    """
+    Delete all objects under s3://{bucket}/{prefix} in batches (default 100).
+    Raises on any AWS error or if S3 reports per-key delete errors.
+
+    Notes:
+      - S3 DeleteObjects supports up to 1000 keys per request; we default to 100.
+      - list_objects_v2 can return pages without "Contents".
+    """
+    if batch_size < 1 or batch_size > 1000:
+        raise ValueError(f"batch_size must be between 1 and 1000, got {batch_size}")
+
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            s3.delete_object(Bucket=bucket, Key=obj["Key"])
+    to_delete: list[dict] = []
+
+    def flush() -> None:
+        nonlocal to_delete
+        if not to_delete:
+            return
+
+        try:
+            resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": to_delete})
+        except ClientError as e:
+            logger.error(
+                f"Failed to delete objects for s3://{bucket}/{prefix} "
+                f"(batch_size={len(to_delete)}): {e}"
+            )
+            raise
+
+        # DeleteObjects can succeed but still report per-key errors.
+        errors = resp.get("Errors", [])
+        if errors:
+            # Log a small sample to avoid huge logs
+            sample = errors[:10]
+            logger.error(
+                f"S3 reported {len(errors)} delete error(s) for s3://{bucket}/{prefix}. "
+                f"Sample: {sample}"
+            )
+            raise RuntimeError(
+                f"S3 delete_objects returned {len(errors)} errors for s3://{bucket}/{prefix}"
+            )
+
+        to_delete = []
+
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                to_delete.append({"Key": obj["Key"]})
+                if len(to_delete) >= batch_size:
+                    flush()
+
+        flush()
+    except ClientError as e:
+        logger.error(f"Error while listing/deleting s3://{bucket}/{prefix}: {e}")
+        raise
 
 def s3_list_keys(bucket: str, prefix: str) -> List[str]:
     paginator = s3.get_paginator("list_objects_v2")
@@ -453,7 +503,7 @@ def _dig_for_key(event: Any, key: str) -> Any:
 
     return None
 
-def _normalize_label_type(raw) -> List[str]:
+def _normalize_label_type(raw) -> str:
     if raw is None:
         return ""
     if isinstance(raw, str):

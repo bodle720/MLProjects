@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-'''
-This deduplication_ingest Lambda correctly finalizes deduplication by enforcing survivor-only semantics in
-upload_staging and safely cleans up the job-scoped CTAS table.
-'''
 import os
 import json
-import time
 import logging
 from typing import List, Dict
 
@@ -251,8 +246,7 @@ def handler(event, context):
         chunk = []
         chunk_size = 200
         for r in rows_iter:
-            if r.get("dedup_status") in ("survivor"):
-                chunk.append(r)
+            chunk.append(r)
             if len(chunk) >= chunk_size:
                 all_failed, last_error = chunked_insert(chunk,
                                                        ICEBERG_DATABASE_NAME,
@@ -260,8 +254,11 @@ def handler(event, context):
                                                        ATHENA_WORKGROUP,
                                                        ATHENA_OUTPUT_S3,
                                                        chunk_size=chunk_size)
-                if all_failed:
-                    raise RuntimeError(f"[DEDUP_INGEST] chunked insert failed for a chunk; last_error={last_error}")
+                if all_failed or last_error:
+                    raise RuntimeError(
+                        f"[DEDUP_INGEST] chunked_insert had failures; "
+                        f"all_failed={all_failed}, last_error={last_error}"
+                    )
                 inserted_rows += len(chunk)
                 chunk = []
         # final chunk
@@ -272,8 +269,11 @@ def handler(event, context):
                                                    ATHENA_WORKGROUP,
                                                    ATHENA_OUTPUT_S3,
                                                    chunk_size=chunk_size)
-            if all_failed:
-                raise RuntimeError(f"[DEDUP_INGEST] chunked insert failed for final chunk; last_error={last_error}")
+            if all_failed or last_error:
+                raise RuntimeError(
+                    f"[DEDUP_INGEST] chunked_insert had failures; "
+                    f"all_failed={all_failed}, last_error={last_error}"
+                )
             inserted_rows += len(chunk)
     except Exception as e:
         log(job_id, user, event_type, f"[DEDUP_INGEST] Failed inserting processed rows for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
@@ -288,6 +288,12 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[DEDUP_INGEST] Reingest complete for job {job_id}: inserted_rows={inserted_rows}, new_count={new_count}", LOG_FIREHOSE_STREAM_NAME)
 
+    if new_count != original_count:
+        raise RuntimeError(
+            f"[DEDUP_INGEST] Post-insert count mismatch: original_count={original_count}, new_count={new_count}. "
+            f"This indicates missing rows."
+        )
+
     drop_qid = _drop_ctas_table_if_exists(job_id)
     athena_res = wait_for_athena(drop_qid, poll=2.0, timeout=600)
     if athena_res['state'] != 'SUCCEEDED':
@@ -295,11 +301,6 @@ def handler(event, context):
         err = f"[DEDUP_INGEST] Failed to drop our created CTAS temp table for our current job id = {job_id}, response = {resp}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed, resp =  {resp}")
-
-    skipped = total_processed_rows - inserted_rows
-    log(job_id, user, event_type,
-        f"[DEDUP_INGEST] Filtered out {skipped} non-survivor rows during dedup reingest",
-        LOG_FIREHOSE_STREAM_NAME)
 
     return {
         "job_id": job_id,

@@ -10,7 +10,7 @@ ALLOWED_LABEL_TYPES = {
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation",
+    "instance-segmentation"
 }
 
 def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:

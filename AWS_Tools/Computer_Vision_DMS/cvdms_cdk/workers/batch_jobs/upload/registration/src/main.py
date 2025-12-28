@@ -1,351 +1,314 @@
 #!/usr/bin/env python3
-'''
-This Batch job reads one dedup shard, deterministically marks internal duplicates, checks survivor hashes against the
-canonical SHA table for external duplicates, and writes shard-local dedup results for later global reconciliation.
-'''
 import os
 import json
 import time
 import logging
-import math
-from decimal import Decimal
-from collections import defaultdict
-from datetime import datetime, date
+from typing import Any, Dict, Iterable, List, Tuple
 
+import boto3
 import pyarrow as pa
 import pyarrow.dataset as ds
 import s3fs
-import boto3
-from botocore.exceptions import ClientError
 
-# Your logging helper must be available in the image or layer
 from common.utils import log
 
-# Environment variables (provided by BatchingStage)
-MANIFEST_S3_KEY = os.environ.get("MANIFEST_S3_KEY")
+from helpers import (
+    normalize_row,
+    parse_s3_uri,
+    build_canonical_image_dest,
+    build_canonical_label_dests,
+    build_canonical_imagery_row,
+    build_label_table_row,
+    copy_objects_or_raise,
+    cleanup_copied_best_effort,
+)
+
+# -------------------------
+# Env
+# -------------------------
+MANIFEST_S3_URI = os.environ.get("MANIFEST_S3_URI")
 JOB_ID = os.environ.get("JOB_ID", "unknown")
 USER = os.environ.get("USER", "unknown")
+LABEL_TYPE = os.environ.get("LABEL_TYPE", "unknown")
 DATA_SOURCE = os.environ.get("DATA_SOURCE", "unknown")
 EVENT_TYPE = os.environ.get("EVENT_TYPE", "unknown")
 FILE_BUCKET_NAME = os.environ.get("FILE_BUCKET_NAME")
 LOG_FIREHOSE_STREAM_NAME = os.environ.get("LOG_FIREHOSE_STREAM_NAME")
-SHA256_TABLE_NAME = os.environ.get("SHA256_TABLE_NAME")
 
+if not MANIFEST_S3_URI:
+    raise RuntimeError("[REG_JOB_DEF] MANIFEST_S3_URI not set")
 if not FILE_BUCKET_NAME:
     raise RuntimeError("[REG_JOB_DEF] FILE_BUCKET_NAME not set")
 if not LOG_FIREHOSE_STREAM_NAME:
     raise RuntimeError("[REG_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
-if not SHA256_TABLE_NAME:
-    raise RuntimeError("[REG_JOB_DEF] SHA256_TABLE_NAME not set")
 
-# Output prefix base (processed outputs will be written under this + /{job_id}/)
-PROCESSED_PREFIX_BASE = os.environ.get(
-    "PROCESSED_PREFIX_BASE",
-    "temp/image-upload"
-)
+# Where to write processed outputs for this shard
+PROCESSED_PREFIX_BASE = os.environ.get("PROCESSED_PREFIX_BASE", "temp/image-upload")
+# This is the “stage processed area” analogous to deduplication-step
+PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/registration-step/processed"
 
-# Derived processed prefix for this job
-PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/deduplication-step/processed"
-
-# DynamoDB batch limits
-DDB_BATCH_GET_MAX = 100
-
-# Safety limits (tunable via env)
-MAX_ROWS_IN_MEMORY = int(os.environ.get("DEDUP_MAX_ROWS_IN_MEMORY", "200000"))
-MAX_GROUP_SIZE = int(os.environ.get("DEDUP_MAX_GROUP_SIZE", "10000"))
+# Safety
+MAX_ROWS_IN_MEMORY = int(os.environ.get("REG_MAX_ROWS_IN_MEMORY", "200000"))
 
 s3 = boto3.client("s3")
-dynamodb = boto3.client("dynamodb")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def to_jsonable(v):
-    if v is None:
-        return None
+# -------------------------
+# S3 read/write helpers
+# -------------------------
 
-    # pandas.Timestamp and similar
-    if hasattr(v, "to_pydatetime"):
-        v = v.to_pydatetime()
-
-    # pyarrow scalar -> python value
-    if hasattr(v, "as_py"):
-        v = v.as_py()
-
-    if isinstance(v, datetime):
-        return v.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-
-    if isinstance(v, date):
-        return v.isoformat()
-
-    if isinstance(v, Decimal):
-        # the schema uses double for file_size_mb; Decimal can be cast safely
-        f = float(v)
-        return None if not math.isfinite(f) else f
-
-    if isinstance(v, float):
-        return None if not math.isfinite(v) else v
-
-    if isinstance(v, (bytes, bytearray)):
-        # safest: decode if we know encoding; otherwise base64
-        return v.decode("utf-8", errors="replace")
-
-    return v
-
-def read_manifest_with_retry(bucket, key, retries=5, delay=2):
-    for attempt in range(retries):
-        try:
-            return s3.get_object(Bucket=bucket, Key=key)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchKey":
-                if attempt < retries - 1:
-                    time.sleep(delay)
-                    continue
-            raise
-
-def s3_read_json(s3_uri):
-    """Read a JSON object from s3://bucket/key and return parsed JSON."""
-    bucket, key = s3_uri.replace("s3://", "").split("/", 1)
-    resp = read_manifest_with_retry(bucket, key)
+def s3_read_json(uri: str) -> Dict[str, Any]:
+    b, k = parse_s3_uri(uri)
+    resp = s3.get_object(Bucket=b, Key=k)
     return json.loads(resp["Body"].read().decode("utf-8"))
 
-def write_s3_text(bucket, key, text, content_type="application/json"):
-    """Write text to S3."""
-    s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
-
-def normalize_row(row: dict) -> dict:
-    for k, v in list(row.items()):
-        row[k] = to_jsonable(v)
-    return row
-
-def read_parquet_rows_from_s3_uris(s3_uris):
+def iter_parquet_rows_from_s3_uris(s3_uris: List[str]) -> Iterable[Dict[str, Any]]:
     """
-    Generator yielding dict rows from a list of s3://... parquet URIs.
-    Requires pyarrow + s3fs in the container.
+    Yield normalized dict rows from a list of parquet s3://... URIs.
+    Uses pyarrow.dataset + s3fs.
     """
     fs = s3fs.S3FileSystem()
     for uri in s3_uris:
-        path = uri.replace("s3://", "")  # IMPORTANT when passing filesystem=
-        try:
-            dataset = ds.dataset(path, filesystem=fs, format="parquet")
-            scanner = dataset.scanner(
-                batch_size=10_000,  # max rows per RecordBatch
-                use_threads=True
-            )
-            for batch in scanner.to_batches():
-                for row in batch.to_pylist():
-                    yield normalize_row(row)
-        except Exception as e:
-            logger.error("[REG_JOB_DEF] Failed to read parquet from %s: %s", uri, e)
-            raise
+        # pyarrow dataset expects path without scheme when filesystem is provided
+        path = uri.replace("s3://", "")
+        dataset = ds.dataset(path, filesystem=fs, format="parquet")
 
-def pick_representative(group):
+        # NOTE: depending on pyarrow version, IDE stubs can complain about scanner args;
+        # runtime is what matters. This pattern is robust across versions:
+        scanner = dataset.scanner(use_threads=True)
+        for batch in scanner.to_batches(batch_size=10_000):
+            for row in batch.to_pylist():
+                yield normalize_row(row)
+
+def write_jsonl_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
     """
-    Deterministic representative selection:
-    1) earliest uploaded_at (string compare works for 'YYYY-MM-DD HH:MM:SS')
-    2) tie-breaker: lexicographically smallest image_id
+    Stream JSONL to S3 via s3fs (avoids building huge strings in memory).
     """
+    fs = s3fs.S3FileSystem()
+    # s3fs path form: "bucket/key"
+    path = f"{bucket}/{key}"
+    with fs.open(path, "wb") as f:
+        for r in rows:
+            f.write((json.dumps(r) + "\n").encode("utf-8"))
 
-    if len(group) == 1:
-        return group[0]
+def write_text_to_s3(bucket: str, key: str, text: str, content_type: str) -> None:
+    s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
 
-    def key_fn(r):
-        ts = r.get("uploaded_at") or "9999-12-31 23:59:59"
-        return ts, r.get("image_id") or ""
-
-    return min(group, key=key_fn)
-
-def batch_get_dynamodb_items(table_name, keys):
-    results = {}
-
-    for i in range(0, len(keys), DDB_BATCH_GET_MAX):
-        chunk = keys[i:i + DDB_BATCH_GET_MAX]
-        request_keys = [{"sha256": {"S": k}} for k in chunk]
-        request_items = {table_name: {"Keys": request_keys}}
-
-        backoff = 1.0
-        for attempt in range(15):  # keep this small
-            try:
-                resp = dynamodb.batch_get_item(RequestItems=request_items)
-
-                for item in resp.get("Responses", {}).get(table_name, []):
-                    sha = item.get("sha256", {}).get("S")
-                    if sha:
-                        results[sha] = item
-
-                unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
-                if not unprocessed:
-                    break  # done with this chunk
-
-                request_items = {table_name: {"Keys": unprocessed}}
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 8.0)
-
-            except ClientError as e:
-                code = e.response.get("Error", {}).get("Code")
-                if code in ("AccessDeniedException", "UnrecognizedClientException"):
-                    raise  # fail fast; don't backoff forever
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 8.0)
-        else:
-            raise RuntimeError(f"[REG_JOB_DEF] DynamoDB batch_get_item exceeded retries for table {table_name}")
-
-    return results
-
-def process_manifest(manifest):
+# -------------------------
+# Core processing
+# -------------------------
+def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """
-    manifest: dict with keys 'job_id', 'shard_prefix', 'files'
-    Returns: processed_rows (list of dicts), summary dict
+    Returns:
+      - updated_upload_rows: list[dict] (all rows, carried forward)
+      - canonical_imagery_rows: list[dict] (only successfully registered eligible rows)
+      - canonical_label_rows: list[dict] (only for successfully registered eligible rows; includes __table)
+      - summary: dict
     """
-    files = manifest.get("files", [])
+    files = manifest.get("files", []) or []
     shard_name = manifest.get("shard_prefix", "shard")
+
     total_rows = 0
-    groups = defaultdict(list)
+    eligible_rows = 0
+    skipped_rows = 0
+    reg_passed = 0
+    reg_failed = 0
 
-    row_iter = read_parquet_rows_from_s3_uris(files)
+    updated_upload_rows: List[Dict[str, Any]] = []
+    canonical_imagery_rows: List[Dict[str, Any]] = []
+    canonical_label_rows: List[Dict[str, Any]] = []
 
-    # Accumulate rows grouped by sha256_hash
-    for r in row_iter:
+    for row in iter_parquet_rows_from_s3_uris(files):
         total_rows += 1
-        sha = r.get("sha256_hash")
-        if not sha:
-            # mark missing sha as validation failure
-            r["validation_status"] = r.get("validation_status", "failed")
-            r["validation_error"] = r.get("validation_error", "missing sha256_hash")
-            r["dedup_status"] = r.get("dedup_status", "pending")
-            groups[f"__MISSING_SHA__{total_rows}"].append(r)
-            continue
-
-        groups[sha].append(r)
-
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"[REG_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
+            raise RuntimeError(f"[REG_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY={MAX_ROWS_IN_MEMORY}")
 
-    processed_rows = []
-    representatives = []  # list of (sha, rep_image_id)
-    internal_dup_count = 0
+        # Carry-forward default: do not touch registration_* unless we actually process the row.
+        # registration_status is expected to be 'pending' until we complete processing for eligible rows.
 
-    for sha, group in groups.items():
-        if sha.startswith("__MISSING_SHA__"):
-            for r in group:
-                processed_rows.append(r)
+        vstat = row.get("validation_status")
+        dstat = row.get("dedup_status")
+
+        if vstat != "passed" or dstat != "passed":
+            skipped_rows += 1
+            updated_upload_rows.append(row)
             continue
 
-        if len(group) > MAX_GROUP_SIZE:
-            logger.warning(
-                f"[REG_JOB_DEF] SHA group {sha} size {len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}"
+        eligible_rows += 1
+
+        # Process eligible row with per-row error capture (do not fail entire shard for one bad row)
+        copied_dst_keys: List[str] = []
+        try:
+            image_id = row.get("image_id")
+            if not image_id:
+                raise RuntimeError("Missing image_id")
+
+            temp_image_uri = row.get("temp_source_ref")
+            if not temp_image_uri:
+                raise RuntimeError("Missing temp_source_ref")
+
+            # Build canonical destinations
+            canonical_image_key, canonical_image_uri = build_canonical_image_dest(
+                FILE_BUCKET_NAME, DATA_SOURCE, image_id, temp_image_uri
+            )
+            copied_dst_keys.append(canonical_image_key)
+
+            label_dst_keys, label_dst_uris, label_uuid = build_canonical_label_dests(
+                FILE_BUCKET_NAME,
+                LABEL_TYPE,
+                row.get("temp_source_ref_bbox_meta"),
+                row.get("temp_source_ref_semantic_png"),
+                row.get("temp_source_ref_semantic_meta"),
+                row.get("temp_source_ref_instance_png"),
+                row.get("temp_source_ref_instance_meta"),
             )
 
-        rep = pick_representative(group)
-        rep_image_id = rep.get("image_id")
-        rep["dedup_status"] = "survivor"
-        processed_rows.append(rep)
+            copied_dst_keys.extend(label_dst_keys)
 
-        if rep_image_id:
-            representatives.append((sha, rep_image_id))
+            # Build copy plan (source URIs -> canonical keys)
+            copy_plan: List[Tuple[str, str, str, str]] = []
 
-        for r in group:
-            if r.get("image_id") == rep_image_id:
-                continue
-            r["dedup_status"] = "internal_duplicate"
-            processed_rows.append(r)
-            internal_dup_count += 1
+            # image copy
+            src_b, src_k = parse_s3_uri(temp_image_uri)
+            copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, canonical_image_key))
 
-    # Query DynamoDB for representatives' sha values
-    sha_list = [s for s, _ in representatives]
-    ddb_map = {}
-    if sha_list:
-        ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list)
+            # label copies (if any)
+            if LABEL_TYPE == "object-detection":
+                src_b, src_k = parse_s3_uri(row.get("temp_source_ref_bbox_meta"))
+                # only one dest
+                copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, label_dst_keys[0]))
 
-    external_dup_count = 0
+            elif LABEL_TYPE == "semantic-segmentation":
+                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_semantic_png"))
+                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_semantic_meta"))
+                # dst keys include png and json
+                dst_png = next(k for k in label_dst_keys if k.endswith(".png"))
+                dst_json = next(k for k in label_dst_keys if k.endswith(".json"))
+                copy_plan.append((src_b1, src_k1, FILE_BUCKET_NAME, dst_png))
+                copy_plan.append((src_b2, src_k2, FILE_BUCKET_NAME, dst_json))
 
-    # Build an index for fast lookup of the representative row
-    # key: (sha256_hash, image_id) -> row dict
-    rep_index = {}
-    for r in processed_rows:
-        if r.get("sha256_hash") and r.get("image_id"):
-            rep_index[(r["sha256_hash"], r["image_id"])] = r
+            elif LABEL_TYPE == "instance-segmentation":
+                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_instance_png"))
+                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_instance_meta"))
+                dst_png = next(k for k in label_dst_keys if k.endswith(".png"))
+                dst_json = next(k for k in label_dst_keys if k.endswith(".json"))
+                copy_plan.append((src_b1, src_k1, FILE_BUCKET_NAME, dst_png))
+                copy_plan.append((src_b2, src_k2, FILE_BUCKET_NAME, dst_json))
 
-    # Apply external duplicate marks in O(R)
-    for sha, rep_image_id in representatives:
-        item = ddb_map.get(sha)
-        if not item:
-            continue
+            else:
+                # single/multi label: no label copies
+                pass
 
-        matched_image_id = item.get("image_id", {}).get("S")
+            # Perform all copies; if any fails, raise and cleanup
+            copy_objects_or_raise(copy_plan)
 
-        rep_row = rep_index.get((sha, rep_image_id))
-        if rep_row:
-            rep_row["dedup_status"] = "external_duplicate"
-            # rep_row["matched_image_id"] = matched_image_id # removed
-            external_dup_count += 1
+            # Build canonical imagery + label table rows
+            canon_img_row = build_canonical_imagery_row(
+                FILE_BUCKET_NAME, DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, label_uuid
+            )
+            canonical_imagery_rows.append(canon_img_row)
+
+            if LABEL_TYPE in ("object-detection", "semantic-segmentation", "instance-segmentation"):
+                if not label_uuid:
+                    raise RuntimeError("label_uuid could not be determined for label-type requiring labels")
+                label_row = build_label_table_row(
+                    FILE_BUCKET_NAME,
+                    LABEL_TYPE,
+                    image_id,
+                    label_uuid,
+                    label_dst_uris,
+                    row.get("classes_present"),
+                )
+                if label_row:
+                    canonical_label_rows.append(label_row)
+
+            # Mark upload staging row as successfully registered
+            row["registration_status"] = "passed"
+            row["registration_error"] = None
+            reg_passed += 1
+
+        except Exception as e:
+            # best-effort cleanup of anything we copied for this row
+            cleanup_copied_best_effort(FILE_BUCKET_NAME, copied_dst_keys)
+
+            row["registration_status"] = "failed"
+            row["registration_error"] = str(e)
+            reg_failed += 1
+
+        updated_upload_rows.append(row)
 
     summary = {
         "job_id": JOB_ID,
         "shard_name": shard_name,
+        "label_type": LABEL_TYPE,
         "rows_read": total_rows,
-        "internal_duplicates": internal_dup_count,
-        "external_duplicates": external_dup_count,
-        "representatives_checked": len(representatives),
-        "processed_rows": len(processed_rows)
+        "eligible_rows": eligible_rows,
+        "skipped_rows": skipped_rows,
+        "registration_passed": reg_passed,
+        "registration_failed": reg_failed,
+        "canonical_imagery_rows": len(canonical_imagery_rows),
+        "canonical_label_rows": len(canonical_label_rows),
     }
 
-    return processed_rows, summary
+    return updated_upload_rows, canonical_imagery_rows, canonical_label_rows, summary
 
-def write_processed_outputs(job_id, shard_name, processed_rows, summary):
-    """
-    Writes:
-      - JSONL file: processed rows
-      - summary JSON
-      - _SUCCESS marker
-    to PROCESSED_PREFIX
-    """
+def write_outputs(shard_name: str,
+                  updated_upload_rows: List[Dict[str, Any]],
+                  canonical_imagery_rows: List[Dict[str, Any]],
+                  canonical_label_rows: List[Dict[str, Any]],
+                  summary: Dict[str, Any]) -> None:
     bucket = FILE_BUCKET_NAME
-    jsonl_key = f"{PROCESSED_PREFIX}/shard-{shard_name}.jsonl"
+
+    upload_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
+    imagery_key = f"{PROCESSED_PREFIX}/canonical_imagery/shard-{shard_name}.jsonl"
+    labels_key = f"{PROCESSED_PREFIX}/canonical_labels/shard-{shard_name}.jsonl"
+
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
-    # stream JSONL content
-    # write in chunks to avoid building a huge string in memory
-    # but boto3 put_object expects full body; for large outputs consider multipart upload
+    write_jsonl_to_s3(bucket, upload_key, updated_upload_rows)
+    write_jsonl_to_s3(bucket, imagery_key, canonical_imagery_rows)
 
-    body = "\n".join(json.dumps(r) for r in processed_rows)
-    if len(body) > 50_000_000:
-        raise RuntimeError("[REG_JOB_DEF] JSONL too large for put_object; implement multipart upload")
+    # always write a labels file (may be empty) for predictable ingest logic
+    write_jsonl_to_s3(bucket, labels_key, canonical_label_rows)
 
-    write_s3_text(bucket, jsonl_key, body, content_type="application/x-ndjson")
-    write_s3_text(bucket, summary_key, json.dumps(summary), content_type="application/json")
-    write_s3_text(bucket, success_key, "", content_type="text/plain")
-
-    return {
-        "jsonl": f"s3://{bucket}/{jsonl_key}",
-        "summary": f"s3://{bucket}/{summary_key}",
-        "success": f"s3://{bucket}/{success_key}"
-    }
+    write_text_to_s3(bucket, summary_key, json.dumps(summary), "application/json")
+    write_text_to_s3(bucket, success_key, "", "text/plain")
 
 def main():
     start = time.time()
-    if not MANIFEST_S3_KEY:
-        raise RuntimeError("[REG_JOB_DEF] MANIFEST_S3_KEY not set in environment")
 
-    manifest = s3_read_json(MANIFEST_S3_KEY)
+    manifest = s3_read_json(MANIFEST_S3_URI)
     shard_name = manifest.get("shard_prefix", "shard")
-    log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker starting for job {JOB_ID}, shard {shard_name}, manifest {MANIFEST_S3_KEY}, pyarrow={pa.__version__}", LOG_FIREHOSE_STREAM_NAME)
+
+    # Start log (one line)
+    log(JOB_ID, USER, EVENT_TYPE,
+        f"[REG_JOB_DEF] Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE} pyarrow={pa.__version__}",
+        LOG_FIREHOSE_STREAM_NAME)
 
     try:
-        processed_rows, summary = process_manifest(manifest)
-    except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker failed processing manifest {MANIFEST_S3_KEY}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
+        updated_upload_rows, canonical_imagery_rows, canonical_label_rows, summary = process_manifest(manifest)
+        write_outputs(shard_name, updated_upload_rows, canonical_imagery_rows, canonical_label_rows, summary)
 
-    try:
-        write_processed_outputs(JOB_ID, shard_name, processed_rows, summary)
-    except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker failed writing outputs for shard {shard_name}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
+        elapsed = time.time() - start
+        # Finish log (one line)
+        log(JOB_ID, USER, EVENT_TYPE,
+            f"[REG_JOB_DEF] Finish shard={shard_name} rows={summary['rows_read']} eligible={summary['eligible_rows']} "
+            f"passed={summary['registration_passed']} failed={summary['registration_failed']} "
+            f"canon_imagery={summary['canonical_imagery_rows']} canon_labels={summary['canonical_label_rows']} "
+            f"time_s={elapsed:.1f}",
+            LOG_FIREHOSE_STREAM_NAME)
 
-    elapsed = time.time() - start
-    log(JOB_ID, USER, EVENT_TYPE, f"[REG_JOB_DEF] Batch worker completed shard {shard_name}: rows_read={summary['rows_read']}, internal_duplicates={summary['internal_duplicates']}, external_duplicates={summary['external_duplicates']}, time_s={elapsed:.1f}", LOG_FIREHOSE_STREAM_NAME)
+    except Exception as e:
+        # Error log (one line)
+        log(JOB_ID, USER, EVENT_TYPE,
+            f"[REG_JOB_DEF] ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
+            LOG_FIREHOSE_STREAM_NAME,
+            error=str(e),
+            level="error")
+        raise
 
 if __name__ == "__main__":
     main()

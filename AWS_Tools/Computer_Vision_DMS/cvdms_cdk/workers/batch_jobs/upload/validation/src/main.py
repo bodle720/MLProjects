@@ -177,49 +177,90 @@ def main():
 
     obj = read_manifest_with_retry(bucket, key)
     if not obj:
-        error_msg = f"[VAL_JOB_DEF] Could not read manifest file with bucket = {bucket} and key = {key}"
+        error_msg = f"[VAL_JOB_DEF] Could not read manifest file with bucket={bucket} key={key}"
         logging.error(error_msg)
         raise RuntimeError(error_msg)
 
-    # Read in the json lines
-    body = obj["Body"].read().decode("utf-8-sig")
-    json_lines = []
-    for raw in body.splitlines():
-        s = raw.strip()
+    body = obj["Body"]
+
+    chunk_size = 200
+    chunk = []
+    total = 0
+    failed = 0
+    any_insert_failed = False
+    last_error = ""
+
+    # stream JSONL lines from S3
+    for line_bytes in body.iter_lines():
+        if not line_bytes:
+            continue
+        s = line_bytes.decode("utf-8-sig").strip()
         if not s:
             continue
-        json_lines.append(json.loads(s))
 
-    if len(json_lines) == 0:
+        try:
+            line = json.loads(s)
+        except Exception as e:
+            # treat malformed json line as a failed row (and keep going),
+            # or raise if you truly want all-or-nothing for a shard
+            logging.error(f"[VAL_JOB_DEF] Bad JSON line in manifest: {e}")
+            raise
+
+        row = process_image(line)
+        total += 1
+        if row["validation_status"] != "passed":
+            failed += 1
+
+        chunk.append(row)
+
+        if len(chunk) >= chunk_size:
+            all_failed, le = chunked_insert(
+                chunk,
+                ICEBERG_DATABASE_NAME,
+                UPLOAD_STAGING_TABLE_NAME,
+                ATHENA_WORKGROUP,
+                ATHENA_OUTPUT_S3,
+                chunk_size=chunk_size,
+            )
+            if le:
+                last_error = le
+            if all_failed:
+                any_insert_failed = True
+                break
+            chunk = []
+
+    # final flush
+    if (not any_insert_failed) and chunk:
+        all_failed, le = chunked_insert(
+            chunk,
+            ICEBERG_DATABASE_NAME,
+            UPLOAD_STAGING_TABLE_NAME,
+            ATHENA_WORKGROUP,
+            ATHENA_OUTPUT_S3,
+            chunk_size=chunk_size,
+        )
+        if le:
+            last_error = le
+        if all_failed:
+            any_insert_failed = True
+
+    if total == 0:
         error_msg = f"[VAL_JOB_DEF] There are no images in {JOB_ID} for this batch job."
         logging.error(error_msg)
         raise RuntimeError(error_msg)
 
-    rows = []
-    failed = 0
-    for line in json_lines:
-        row = process_image(line)
-        rows.append(row)
-        if row["validation_status"] != "passed":
-            failed += 1
-
-    all_failed, last_error = chunked_insert(rows,
-                                           ICEBERG_DATABASE_NAME,
-                                           UPLOAD_STAGING_TABLE_NAME,
-                                           ATHENA_WORKGROUP,
-                                           ATHENA_OUTPUT_S3,
-                                           chunk_size=200)
-
     if last_error:
-        error_msg = f"[VAL_JOB_DEF] Athena insert failed for an image, and the last error was: {last_error}"
-        logging.error(error_msg)
+        logging.error(f"[VAL_JOB_DEF] Athena insert had row failures; last_error={last_error}")
 
-    if all_failed:
-        error_msg = f"[VAL_JOB_DEF] Validation batch job failed to upload to upload staging table for all images, total failed = {len(rows)}"
+    if any_insert_failed:
+        error_msg = (
+            f"[VAL_JOB_DEF] Validation batch job failed to upload to upload_staging. "
+            f"rows_attempted={total}"
+        )
         logging.error(error_msg)
-        raise Exception(error_msg)
+        raise RuntimeError(error_msg)
 
-    logging.info(f"[VAL_JOB_DEF] Completed processing: {len(rows)} rows written, {failed} failed validation")
+    logging.info(f"[VAL_JOB_DEF] Completed processing: {total} rows written, {failed} failed validation")
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,7 @@ import math
 
 import boto3
 
-from common.utils import log, wait_for_athena
+from common.utils import log, wait_for_athena, delete_s3_prefix
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -14,68 +14,96 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-# Tunables (hardcoded)
-# Average row size in KB (conservative metadata estimate). Tune if you have better numbers.
-AVG_ROW_KB = 2.0
-# Safety factor for memory usage (0.0-1.0)
-MEMORY_SAFETY_FACTOR = 0.5
-# Minimum and maximum target rows per shard
-MIN_ROWS_PER_SHARD = 1000
-MAX_ROWS_PER_SHARD = 20000
-# Max prefix length (hex chars). 1 => 16 prefixes, 2 => 256, 3 => 4096, 4 => 65536
-MAX_PREFIX_LENGTH = 3
+# Tunables (defaults; overridable via env)
+AVG_ROW_KB = float(os.environ.get("REG_AVG_ROW_KB", "2.0"))
+MEMORY_SAFETY_FACTOR = float(os.environ.get("REG_MEMORY_SAFETY_FACTOR", "0.5"))
+MIN_ROWS_PER_SHARD = int(os.environ.get("REG_MIN_ROWS_PER_SHARD", "1000"))
+MAX_ROWS_PER_SHARD = int(os.environ.get("REG_MAX_ROWS_PER_SHARD", "20000"))
+JOB_MEMORY_MB = int(os.environ.get("REG_JOB_MEMORY_MB", "512"))
 
-# Job memory (MB) used to compute target rows per shard. Default to 512 to match the job def.
-JOB_MEMORY_MB = 512
+# Hard cap to prevent creating absurdly many partitions
+MAX_SHARDS = int(os.environ.get("REG_MAX_SHARDS", "4096"))
 
-# S3 layout base for exports and manifests
-EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/registration-step/...
+# S3 layout base for registration exports and manifests
+EXPORT_BASE_PREFIX = "temp/image-upload"  # temp/image-upload/{job_id}/batches/registration/...
 
 s3 = boto3.client("s3")
 athena = boto3.client("athena")
 
-def _start_athena_count(job_id):
-    """Run a fast COUNT(*) to estimate number of rows for job_id."""
+def _start_athena_count(job_id: str) -> str:
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-
     safe_job_id = job_id.replace("'", "''")
-    sql = (
-        f"SELECT count(*) as cnt FROM {table} "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
+    sql = f"SELECT count(*) as cnt FROM {table} WHERE job_id = '{safe_job_id}'"
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
+        WorkGroup=ATHENA_WORKGROUP,
     )
     return resp["QueryExecutionId"]
 
-def _drop_ctas_table_if_exists(job_id):
-    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.registration_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS {table_name}'
+def _read_count_from_athena_result(qid: str) -> int:
+    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
+    rows = resp.get("ResultSet", {}).get("Rows", [])
+    if len(rows) < 2:
+        return 0
+    val = rows[1]["Data"][0].get("VarCharValue")
+    try:
+        return int(val)
+    except Exception:
+        return 0
+
+def _drop_ctas_table_if_exists(job_id: str) -> str:
+    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
+    table_name = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
+    sql = f"DROP TABLE IF EXISTS {table_name}"
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
+        WorkGroup=ATHENA_WORKGROUP,
     )
     return resp["QueryExecutionId"]
 
-def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
+def _choose_target_rows_per_shard(total_rows: int) -> int:
+    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
+    usable_kb = usable_mb * 1024.0
+    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
+
+    estimated_rows = int(usable_kb / avg_row_kb)
+    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
+
+    # In pathological small-memory cases, ensure >= 1
+    return max(1, target)
+
+def _compute_num_shards(total_rows: int, target_rows: int) -> int:
+    if total_rows <= 0:
+        return 1
+    n = int(math.ceil(total_rows / float(target_rows)))
+    if n < 1:
+        n = 1
+    if n > MAX_SHARDS:
+        n = MAX_SHARDS
+    return n
+
+def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> str:
+    """
+    Export job_id partition into Parquet files partitioned by shard_id (0..num_shards-1),
+    where shard_id is derived from hashing image_id. No sha256 dependency.
+    """
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-
     safe_job_id = job_id.replace("'", "''")
-    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
 
-    tmp_table = f"{ICEBERG_DATABASE_NAME}.registration_export_{sanitized_job_id}"
+    tmp_table = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
 
+    # NOTE: pmod(abs(xxhash64(image_id)), num_shards) gives deterministic shard assignment.
+    # We left-pad to keep partition folder names nice and consistent.
     sql = f"""
     CREATE TABLE {tmp_table}
     WITH (
         format = 'PARQUET',
         external_location = '{export_location}',
-        partitioned_by = ARRAY['sha_prefix']
+        partitioned_by = ARRAY['shard_id']
     ) AS
     SELECT
         job_id,
@@ -104,7 +132,7 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         registration_status,
         registration_error,
         matched_image_id,
-        substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
+        lpad(CAST(pmod(abs(xxhash64(image_id)), {num_shards}) AS varchar), 6, '0') AS shard_id
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
@@ -112,128 +140,57 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     resp = athena.start_query_execution(
         QueryString=sql,
         ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
+        WorkGroup=ATHENA_WORKGROUP,
     )
     return resp["QueryExecutionId"]
 
-def _read_count_from_athena_result(qid):
-    """Read the single-row count result from Athena query execution output."""
-    # Get results
-    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=1)
-    rows = resp.get("ResultSet", {}).get("Rows", [])
-    # First row is header; second row contains the value if present
-    if len(rows) >= 2:
-        # value is in rows[1]['Data'][0]['VarCharValue']
-        val = rows[1]["Data"][0].get("VarCharValue")
-        try:
-            return int(val)
-        except Exception:
-            return 0
-    return 0
-
-def _list_export_files(export_prefix):
+def _list_export_files_by_shard(export_prefix: str):
     """
-    List objects under the export prefix and group them by sha_prefix partition.
-    Returns dict: {sha_prefix: [s3://.../key, ...], ...}
+    Group exported Parquet files by shard_id partition.
+    Expected key path like: .../shard_id=000123/part-....parquet
+    Returns dict: {shard_id: [s3://.../key, ...], ...}
     """
     paginator = s3.get_paginator("list_objects_v2")
     prefix = export_prefix.rstrip("/") + "/"
-    files_by_prefix = {}
-    kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": prefix}
+    files_by_shard = {}
     all_keys = []
-    for page in paginator.paginate(**kwargs):
+
+    for page in paginator.paginate(Bucket=FILE_BUCKET_NAME, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             all_keys.append(key)
 
             if key.endswith("/"):
                 continue
-
-            if key.split("/")[-1].startswith("_") or key.split("/")[-1].startswith("."):
+            leaf = key.split("/")[-1]
+            if leaf.startswith("_") or leaf.startswith("."):
                 continue
 
-            # Try to extract sha_prefix from key path like ".../sha_prefix=aa/part-000.parquet"
-            sha_prefix = None
-            parts = key.split("/")
-            for p in parts:
-                if p.startswith("sha_prefix="):
-                    sha_prefix = p.split("=", 1)[1]
+            shard_id = None
+            for part in key.split("/"):
+                if part.startswith("shard_id="):
+                    shard_id = part.split("=", 1)[1]
                     break
-            if not sha_prefix:
-                raise RuntimeError(f"[REG_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
-            files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
-    return files_by_prefix, all_keys
+            if not shard_id:
+                raise RuntimeError(f"[REG_FILE_BATCHING] Unable to extract shard_id from export key: {key}")
 
-def _write_manifest(job_id, shard_name, files, manifest_prefix):
-    """
-    Write a manifest JSON for a shard. Returns s3 uri.
-    Manifest shape:
-    {
-      "job_id": "<job_id>",
-      "shard_prefix": "<sha_prefix or composite>",
-      "files": ["s3://...","s3://..."]
-    }
-    """
-    manifest = {
-        "job_id": job_id,
-        "shard_prefix": shard_name,
-        "files": files
-    }
+            files_by_shard.setdefault(shard_id, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
+
+    return files_by_shard, all_keys
+
+def _write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -> str:
+    # Keep same manifest shape as your other stages for reuse in map workers:
+    # shard_prefix is now shard_id
+    manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
     manifest_key = f"{manifest_prefix.rstrip('/')}/manifest-shard-{shard_name}.json"
-    body = json.dumps(manifest)
-    s3.put_object(Bucket=FILE_BUCKET_NAME, Key=manifest_key, Body=body.encode("utf-8"), ContentType="application/json")
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=manifest_key,
+        Body=json.dumps(manifest).encode("utf-8"),
+        ContentType="application/json",
+    )
     return f"s3://{FILE_BUCKET_NAME}/{manifest_key}"
-
-def _choose_prefix_length(total_rows, job_memory_mb=JOB_MEMORY_MB, avg_row_kb=AVG_ROW_KB,
-                          safety_factor=MEMORY_SAFETY_FACTOR,
-                          min_rows=MIN_ROWS_PER_SHARD, max_rows=MAX_ROWS_PER_SHARD,
-                          max_prefix_len=MAX_PREFIX_LENGTH):
-    """
-    Choose smallest prefix length P such that expected_rows_per_shard <= target_rows_per_shard.
-    target_rows_per_shard is computed from memory and avg_row_kb, bounded by min/max.
-    """
-    # compute target rows from memory
-    usable_mb = job_memory_mb * safety_factor
-    # convert MB to KB
-    usable_kb = usable_mb * 1024.0
-    # estimate rows
-    if avg_row_kb <= 0:
-        avg_row_kb = 2.0
-    estimated_rows = int(usable_kb / avg_row_kb)
-    target = max(min_rows, min(estimated_rows, max_rows))
-
-    # compute needed prefixes
-    if total_rows <= 0:
-        return 1, target
-    prefixes_needed = math.ceil(total_rows / target)
-    # find smallest P where 16^P >= prefixes_needed
-    for p in range(1, max_prefix_len + 1):
-        if (16 ** p) >= prefixes_needed:
-            return p, target
-    # fallback to max_prefix_len
-    return max_prefix_len, target
-
-def _delete_s3_prefix(bucket, prefix):
-    paginator = s3.get_paginator("list_objects_v2")
-    to_delete = []
-
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            to_delete.append({"Key": obj["Key"]})
-
-            if len(to_delete) == 1000:
-                s3.delete_objects(
-                    Bucket=bucket,
-                    Delete={"Objects": to_delete}
-                )
-                to_delete = []
-
-    if to_delete:
-        s3.delete_objects(
-            Bucket=bucket,
-            Delete={"Objects": to_delete}
-        )
 
 def handler(event, context):
     try:
@@ -247,121 +204,72 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[REG_FILE_BATCHING] Starting registration batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
-    # Prepare prefixes
-    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration-step/export"
-    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration-step/manifests"
+    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration/export"
+    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration/manifests"
 
-    # 0) Run COUNT(*) to estimate rows
-    try:
-        count_qid = _start_athena_count(job_id)
-    except Exception as e:
-        err = f"[REG_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
-
+    # 0) COUNT(*)
+    count_qid = _start_athena_count(job_id)
     athena_res = wait_for_athena(count_qid, poll=2.0, timeout=300)
-    if athena_res['state'] != 'SUCCEEDED':
-        resp = athena_res['metadata']
+    if athena_res["state"] != "SUCCEEDED":
+        resp = athena_res["metadata"]
         err = f"[REG_FILE_BATCHING] Athena COUNT failed for job {job_id}. Response = {resp}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
+    target_rows = _choose_target_rows_per_shard(total_rows)
+    num_shards = _compute_num_shards(total_rows, target_rows)
 
-    # 1) choose prefix length P dynamically
-    prefix_len, target_rows = _choose_prefix_length(
-        total_rows,
-        job_memory_mb=int(os.environ.get("REG_JOB_MEMORY_MB", JOB_MEMORY_MB)),
-        avg_row_kb=float(os.environ.get("REG_AVG_ROW_KB", AVG_ROW_KB)),
-        safety_factor=float(os.environ.get("REG_MEMORY_SAFETY_FACTOR", MEMORY_SAFETY_FACTOR)),
-        min_rows=int(os.environ.get("REG_MIN_ROWS_PER_SHARD", MIN_ROWS_PER_SHARD)),
-        max_rows=int(os.environ.get("REG_MAX_ROWS_PER_SHARD", MAX_ROWS_PER_SHARD)),
-        max_prefix_len=int(os.environ.get("REG_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
+    log(
+        job_id, user, event_type,
+        f"[REG_FILE_BATCHING] total_rows={total_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}",
+        LOG_FIREHOSE_STREAM_NAME
     )
 
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
+    # 1) CTAS export partitioned by shard_id
+    drop_qid = _drop_ctas_table_if_exists(job_id)
+    drop_res = wait_for_athena(drop_qid, poll=3.0, timeout=900)
+    if drop_res["state"] != "SUCCEEDED":
+        resp = drop_res["metadata"]
+        err = f"[REG_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        raise RuntimeError(err)
 
-    # 2) Run CTAS to export partitioned files with sha_prefix
-    try:
-        drop_qid = _drop_ctas_table_if_exists(job_id)
-        athena_res = wait_for_athena(drop_qid, poll=2.0, timeout=300)
-        if athena_res['state'] != 'SUCCEEDED':
-            resp = athena_res['metadata']
-            err = f"[REG_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
-            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-            raise RuntimeError(err)
+    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
 
-        _delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
-
-        qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
-
-    except Exception as e:
-        err = f"[REG_FILE_BATCHING] Failed to start Athena CTAS for job {job_id}: {e}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
-
-    athena_res = wait_for_athena(qid, poll=3.0, timeout=900)
-    if athena_res['state'] != 'SUCCEEDED':
-        resp = athena_res['metadata']
+    qid = _start_athena_ctas(job_id, export_prefix_base, num_shards)
+    ctas_res = wait_for_athena(qid, poll=3.0, timeout=900)
+    if ctas_res["state"] != "SUCCEEDED":
+        resp = ctas_res["metadata"]
         err = f"[REG_FILE_BATCHING] Athena CTAS failed for job {job_id}. Response = {resp}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
     log(job_id, user, event_type, f"[REG_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
 
-    # 3) List exported files and group by sha_prefix
-    try:
-        files_by_prefix, all_keys = _list_export_files(export_prefix_base)
-    except Exception as e:
-        err = f"[REG_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
-
-    if not files_by_prefix:
-        err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys are: {all_keys[:10]}"
+    # 2) List exported files and group by shard_id
+    files_by_shard, all_keys = _list_export_files_by_shard(export_prefix_base)
+    if not files_by_shard:
+        err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {all_keys[:10]}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
         raise RuntimeError(err)
 
-    # 4) Create manifests. If a single sha_prefix has too many files (edge case), split that prefix into multiple manifests
+    # 3) Write manifests (one per shard_id)
     manifest_keys = []
-    try:
-        for shard_prefix, files in sorted(files_by_prefix.items()):
-            if not files:
-                continue
-            # If a single shard has too many files/rows, split into sub-manifests of reasonable size.
-            # We use file count as a proxy for rows; split_size_files chosen conservatively.
-            split_size_files = int(max(1, math.ceil(len(files) / max(1, math.ceil(total_rows / target_rows))))) if total_rows > 0 else 100
-            # cap split_size_files to avoid huge manifests
-            split_size_files = max(50, min(split_size_files, 2000))
+    for shard_id, files in sorted(files_by_shard.items()):
+        if not files:
+            continue
+        manifest_s3_uri = _write_manifest(job_id, shard_id, files, manifest_prefix)
+        manifest_keys.append(manifest_s3_uri)
 
-            if len(files) <= split_size_files:
-                manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
-                manifest_keys.append(manifest_s3_uri)
-                log(job_id, user, event_type, f"[REG_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
-            else:
-                # split into multiple manifests for this shard_prefix
-                for i in range(0, len(files), split_size_files):
-                    chunk = files[i:i + split_size_files]
-                    sub_name = f"{shard_prefix}-{i//split_size_files+1}"
-                    manifest_s3_uri = _write_manifest(job_id, sub_name, chunk, manifest_prefix)
-                    manifest_keys.append(manifest_s3_uri)
-                    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Wrote manifest for shard {shard_prefix} part {sub_name} with {len(chunk)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
-    except Exception as e:
-        err = f"[REG_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
-        raise
-
-    # 5) Return the expected shape for BatchingStage
     result = {
         "job_id": job_id,
         "user": user,
+        "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "event_type": event_type,
-        "manifests": manifest_keys
+        "manifests": manifest_keys,
     }
 
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
-
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
     return result

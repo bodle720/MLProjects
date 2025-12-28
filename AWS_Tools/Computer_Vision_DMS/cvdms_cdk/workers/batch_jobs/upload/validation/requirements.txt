@@ -1,7 +1,2 @@
-# requirements.txt
 Pillow==10.3.0
 numpy==1.26.4
-scipy==1.14.1
-scikit-image==0.24.0
-imagehash==4.3.1
-boto3
