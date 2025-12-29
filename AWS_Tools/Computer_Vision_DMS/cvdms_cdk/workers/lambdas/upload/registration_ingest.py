@@ -43,11 +43,9 @@ s3 = boto3.client("s3")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-
 def _s3_read_json(bucket: str, key: str) -> Dict:
     resp = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(resp["Body"].read().decode("utf-8"))
-
 
 def _s3_read_jsonl(bucket: str, key: str) -> Iterable[Dict]:
     """Generator yielding parsed JSON objects from an S3 JSONL object."""
@@ -56,7 +54,6 @@ def _s3_read_jsonl(bucket: str, key: str) -> Iterable[Dict]:
         if not line:
             continue
         yield json.loads(line.decode("utf-8"))
-
 
 def _athena_count_job_rows(job_id: str) -> int:
     """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
@@ -82,7 +79,6 @@ def _athena_count_job_rows(job_id: str) -> int:
     val = rows[1]["Data"][0].get("VarCharValue")
     return int(val) if val is not None else 0
 
-
 def _drop_ctas_table_if_exists(job_id: str) -> str:
     """
     Drop the registration CTAS temp table if your batching lambda created one.
@@ -97,7 +93,6 @@ def _drop_ctas_table_if_exists(job_id: str) -> str:
         WorkGroup=ATHENA_WORKGROUP,
     )["QueryExecutionId"]
     return qid
-
 
 def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     expected = []
@@ -121,7 +116,6 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             seen.add(s)
             out.append(s)
     return out
-
 
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -245,7 +239,7 @@ def handler(event, context):
         job_id = event["job_id"]
         user = event["user"]
         event_type = event["event_type"]
-        manifests = event["manifests"]
+        manifests = event["registrationStage"]["manifests"]
         label_type = event.get("label_type", "unknown")
     except KeyError as e:
         raise RuntimeError(f"[REG_INGEST] Missing key in registration ingest lambda: {e}, event={json.dumps(event)}")

@@ -19,7 +19,7 @@ from aws_cdk import (
 )
 
 from config import CONFIG
-from batching_stage_construct import BatchingStage
+from stacks.batching_stage_construct import BatchingStage
 from config_models import ComputeEnvConfig, KickoffLambdaConfig, \
                           CleanupLambdaConfig, DedupLambdaConfig, \
                           RegistrationLambdaConfig

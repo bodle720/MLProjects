@@ -9,7 +9,7 @@ from botocore.exceptions import ClientError
 from botocore.client import BaseClient
 from boto3.resources.base import ServiceResource
 
-from upload_client_utils import validate_manifest, ALLOWED_LABEL_TYPES
+from cvdms_platform.upload_client_utils import validate_manifest, ALLOWED_LABEL_TYPES
 
 class UploadClient:
     """

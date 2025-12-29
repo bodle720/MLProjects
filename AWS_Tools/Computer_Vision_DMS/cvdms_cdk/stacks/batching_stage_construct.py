@@ -58,7 +58,7 @@ class BatchingStage(Construct):
             "ICEBERG_DATABASE_NAME": iceberg_database_name,
             "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
             "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
-            "SHA256_TABLE": sha256_table.table_name,
+            "SHA256_TABLE_NAME": sha256_table.table_name,
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name
         }
 

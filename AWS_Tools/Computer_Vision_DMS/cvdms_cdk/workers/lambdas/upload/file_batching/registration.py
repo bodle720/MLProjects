@@ -255,12 +255,12 @@ def handler(event, context):
         raise RuntimeError(err)
 
     # 3) Write manifests (one per shard_id)
-    manifest_keys = []
+    manifest_uris = []
     for shard_id, files in sorted(files_by_shard.items()):
         if not files:
             continue
         manifest_s3_uri = _write_manifest(job_id, shard_id, files, manifest_prefix)
-        manifest_keys.append(manifest_s3_uri)
+        manifest_uris.append(manifest_s3_uri)
 
     result = {
         "job_id": job_id,
@@ -268,8 +268,9 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "manifests": manifest_keys,
+        "manifests": manifest_uris,
     }
 
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Completed for job {job_id}. Created {len(manifest_uris)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+
     return result

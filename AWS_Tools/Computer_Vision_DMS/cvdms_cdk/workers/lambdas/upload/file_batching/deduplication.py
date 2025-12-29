@@ -361,7 +361,7 @@ def handler(event, context):
         raise RuntimeError(err)
 
     # 4) Create manifests. If a single sha_prefix has too many files (edge case), split that prefix into multiple manifests
-    manifest_keys = []
+    manifest_uris = []
     try:
         for shard_prefix, files in sorted(files_by_prefix.items()):
             if not files:
@@ -372,7 +372,7 @@ def handler(event, context):
             # split_size_files = max(50, min(split_size_files, 2000))
 
             manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
-            manifest_keys.append(manifest_s3_uri)
+            manifest_uris.append(manifest_s3_uri)
             log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}", LOG_FIREHOSE_STREAM_NAME)
 
     except Exception as e:
@@ -387,9 +387,9 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "manifests": manifest_keys
+        "manifests": manifest_uris
     }
 
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_keys)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_uris)} manifests.", LOG_FIREHOSE_STREAM_NAME)
 
     return result

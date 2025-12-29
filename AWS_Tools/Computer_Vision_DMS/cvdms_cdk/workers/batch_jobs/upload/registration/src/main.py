@@ -198,8 +198,8 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
             canon_img_row = build_canonical_imagery_row(
                 DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, label_uuid
             )
-            canonical_imagery_rows.append(canon_img_row)
 
+            label_row = None
             if LABEL_TYPE in ("object-detection", "semantic-segmentation", "instance-segmentation"):
                 if not label_uuid:
                     raise RuntimeError("label_uuid could not be determined for label-type requiring labels")
@@ -211,13 +211,15 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
                     label_dst_uris,
                     row.get("classes_present"),
                 )
-                if label_row:
-                    canonical_label_rows.append(label_row)
 
             # Mark upload staging row as successfully registered
             row["registration_status"] = "passed"
             row["registration_error"] = None
             reg_passed += 1
+
+            canonical_imagery_rows.append(canon_img_row)
+            if label_row:
+                canonical_label_rows.append(label_row)
 
         except Exception as e:
             # best-effort cleanup of anything we copied for this row

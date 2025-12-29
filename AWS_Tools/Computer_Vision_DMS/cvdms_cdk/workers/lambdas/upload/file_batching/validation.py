@@ -1,5 +1,4 @@
 import os
-import json
 
 import boto3
 
@@ -74,10 +73,7 @@ def handler(event, context):
 
         manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
 
-    msg = f"[VAL_FILE_BATCHING] Done batching {len(json_lines)} total images for image upload validation: label type = {label_type}, manifest counts: {len(manifest_keys)} and {IMAGES_PER_BATCH} images per batch."
-    log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
-
-    return {
+    result = {
         "job_id": job_id,
         "user": user,
         "event_type": event_type,
@@ -85,3 +81,8 @@ def handler(event, context):
         "data_source":data_source,
         "manifests": manifest_uris
     }
+
+    msg = f"[VAL_FILE_BATCHING] Done batching {len(json_lines)} total images for image upload validation: label type = {label_type}, {IMAGES_PER_BATCH} images per batch."
+    log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
+
+    return result
