@@ -141,7 +141,12 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"{PROCESSED_PREFIX_BASE}/{job_id}/{PROCESSED_SUFFIX}".rstrip("/")
     expected_shards = _extract_expected_shards_from_manifests(manifests)
+
+    print("INGEST FILE_BUCKET_NAME=", FILE_BUCKET_NAME)
+    print("processed_prefix=", processed_prefix + "/")
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
+    print("processed_keys_count=", len(processed_keys))
+    print("processed_keys_sample=", processed_keys[:20])
 
     # shard -> key maps
     shard_upload = {}
@@ -239,7 +244,7 @@ def handler(event, context):
         job_id = event["job_id"]
         user = event["user"]
         event_type = event["event_type"]
-        manifests = event["registrationStage"]["manifests"]
+        manifests = event["manifests"]
         label_type = event.get("label_type", "unknown")
     except KeyError as e:
         raise RuntimeError(f"[REG_INGEST] Missing key in registration ingest lambda: {e}, event={json.dumps(event)}")
@@ -257,6 +262,9 @@ def handler(event, context):
     except Exception as e:
         log(job_id, user, event_type, f"[REG_INGEST] Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
+
+    print(f"manifests = {manifests}")
+    print(f"collected = {collected}")
 
     missing = collected["missing_shards"]
     if missing:

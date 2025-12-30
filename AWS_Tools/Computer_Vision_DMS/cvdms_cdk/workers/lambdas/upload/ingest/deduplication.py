@@ -177,7 +177,7 @@ def handler(event, context):
         job_id = event["job_id"]
         user = event["user"]
         event_type = event["event_type"]
-        manifests = event["deduplicationStage"]["manifests"]
+        manifests = event["manifests"]
     except KeyError as e:
         raise RuntimeError(
             f"[DEDUP_INGEST] Missing key in dedup ingest lambda: {e}, event={json.dumps(event)}"

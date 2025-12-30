@@ -3,7 +3,7 @@ import json
 import math
 import logging
 from decimal import Decimal
-from typing import Any, Optional, List, Dict
+from typing import List
 from datetime import datetime, timezone
 
 import boto3
@@ -310,10 +310,29 @@ def to_sql_value(r, c):
 
     # arrays
     if isinstance(v, list):
+        if len(v) == 0:
+            # pick type based on column
+            # all your arrays here are array<string>
+            return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
         return "ARRAY[" + ", ".join("'" + _escape_sql_string(str(x)) + "'" for x in v) + "]"
 
     # default string
     return "'" + _escape_sql_string(str(v)) + "'"
+
+def _athena_error_details(qid: str) -> str:
+    qe = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
+    st = qe.get("Status", {})
+    ae = st.get("AthenaError")
+    if ae:
+        return f"{st.get('StateChangeReason','unknown')} | AthenaError={ae}"
+    return st.get("StateChangeReason", "unknown")
+
+def _row_type_summary(r: dict, cols: list[str]) -> str:
+    parts = []
+    for c in cols:
+        v = r.get(c)
+        parts.append(f"{c}={type(v).__name__}")
+    return ", ".join(parts)
 
 def chunked_insert(rows,
                   iceberg_db_name,
@@ -359,9 +378,10 @@ def chunked_insert(rows,
             )["QueryExecutionId"]
 
             wait_res = wait_for_athena(qid)
-            success = wait_res['state'] == 'SUCCEEDED'
-            if not success:
-                raise RuntimeError("Batch insert failed")
+            if wait_res['state'] != 'SUCCEEDED':
+                reason = _athena_error_details(qid)
+                types = _row_type_summary(r, columns)
+                raise RuntimeError(f"Batch insert failed, failed qid={qid}, reason = {reason}, types = {types}")
 
         except Exception as e:
             # Retry row-by-row for this batch if batch insert failed due to a bad row.
@@ -374,10 +394,12 @@ def chunked_insert(rows,
                         ResultConfiguration={"OutputLocation": athena_output_s3},
                         WorkGroup=athena_workgroup
                     )["QueryExecutionId"]
-                    res = wait_for_athena(qid)
 
+                    res = wait_for_athena(qid)
                     if res["state"] != "SUCCEEDED":
-                        raise RuntimeError("Row insert failed")
+                        reason = _athena_error_details(qid)
+                        types = _row_type_summary(r, columns)
+                        raise RuntimeError(f"Row insert failed, failed qid={qid}, reason = {reason}, types = {types}")
 
                 except Exception as e:
                     last_error = str(e)

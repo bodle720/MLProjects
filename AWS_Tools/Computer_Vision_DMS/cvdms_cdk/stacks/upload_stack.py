@@ -19,10 +19,9 @@ from aws_cdk import (
 )
 
 from config import CONFIG
-from stacks.batching_stage_construct import BatchingStage
-from config_models import ComputeEnvConfig, KickoffLambdaConfig, \
-                          CleanupLambdaConfig, DedupLambdaConfig, \
-                          RegistrationLambdaConfig
+from stacks.batching_stage import BatchingStage
+from stacks.ingest_stage import IngestStage
+from config_models import ComputeEnvConfig, LambdaConfig
 
 class ImageUploadStack(Stack):
     def __init__(self,
@@ -120,19 +119,17 @@ class ImageUploadStack(Stack):
         cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
         # Make lambda to add deduped rows to upload staging.
-        dedup_ingest_task = self._make_dedup_ingest_task(CONFIG.dedup_ingest_lambda)
+        # dedup_ingest_task = self._make_dedup_ingest_task(CONFIG.dedup_ingest_lambda)
 
         # Make lambda to add canonical rows after registration.
-        registration_ingest_task = self._make_registration_ingest_task(CONFIG.registration_ingest_lambda)
+        # registration_ingest_task = self._make_registration_ingest_task(CONFIG.registration_ingest_lambda)
 
         workflow_definition = sfn.Chain.start(validation_stage.batching_task) \
             .next(validation_stage.map_state) \
             .next(deduplication_stage.batching_task) \
             .next(deduplication_stage.map_state) \
-            .next(dedup_ingest_task) \
             .next(registration_stage.batching_task) \
             .next(registration_stage.map_state) \
-            .next(registration_ingest_task) \
             .next(cleanup_task)
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
@@ -257,7 +254,7 @@ class ImageUploadStack(Stack):
         return job_queue
 
     def _make_cleanup_task(self,
-                           cleanup_config: CleanupLambdaConfig):
+                           cleanup_config: LambdaConfig):
         cleanup_lambda = _lambda.Function(
             self,
             "CleanupLambda",
@@ -378,7 +375,7 @@ class ImageUploadStack(Stack):
 
     def _make_kickoff_lambda(self,
                             upload_state_machine,
-                            kickoff_config: KickoffLambdaConfig):
+                            kickoff_config: LambdaConfig):
             # Make Kickoff lambda
             kickoff_lambda = _lambda.Function(
                 self,
@@ -426,7 +423,7 @@ class ImageUploadStack(Stack):
             self.upload_events_queue.grant_consume_messages(kickoff_lambda)
 
     def _make_dedup_ingest_task(self,
-                                dedup_ingest_config: DedupLambdaConfig):
+                                dedup_ingest_config: LambdaConfig):
         dedup_ingest_lambda = _lambda.Function(
             self,
             "DedupIngestLambda",
@@ -554,7 +551,10 @@ class ImageUploadStack(Stack):
         return dedup_ingest_task
 
     def _make_registration_ingest_task(self,
-                                registration_ingest_config: RegistrationLambdaConfig):
+                                registration_ingest_config: LambdaConfig):
+
+        timeout_s = registration_ingest_config.timeout_sec  # e.g. 900
+
         registration_ingest_lambda = _lambda.Function(
             self,
             "RegistrationIngestLambda",
@@ -563,7 +563,7 @@ class ImageUploadStack(Stack):
             code=_lambda.Code.from_asset(registration_ingest_config.path),
             layers = [self.common_utils_layer],
             memory_size=registration_ingest_config.memory_size,
-            timeout=Duration.seconds(registration_ingest_config.timeout_sec),
+            timeout=Duration.seconds(timeout_s),
             environment={
                 "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
                 "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
@@ -584,20 +584,16 @@ class ImageUploadStack(Stack):
             actions=["s3:GetObject", "s3:DeleteObject"],
             resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"]
         ))
+
         registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"],
-            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+            actions=["s3:GetBucketLocation", "s3:ListBucket"],
+            resources=[self.file_bucket.bucket_arn],
         ))
 
         # 3) S3: Athena results write only to athena-results/
         registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:PutObject", "s3:GetObject"],
+            actions=["s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload"],
             resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/athena-results/*"]
-        ))
-        registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"]
         ))
 
         # 4) Athena: start and poll queries in the workgroup
@@ -636,27 +632,20 @@ class ImageUploadStack(Stack):
             resources=[
                 f"arn:aws:glue:{self.region}:{self.account}:catalog",
                 f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
-                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/upload_staging",
-            ],
-        ))
-
-        # allow deleting only your CTAS temp tables
-        registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["glue:DeleteTable"],
-            resources=[
-                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/dedup_export_*"
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/*",
             ],
         ))
 
         # 8) S3: read and delete Iceberg files for upload_staging prefix
         registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
-            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*"]
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/*"]
         ))
+
         registration_ingest_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+            conditions={"StringLike": {"s3:prefix": ["canonical/*", "upload_staging/*"]}}
         ))
 
         registration_ingest_task = tasks.LambdaInvoke(
@@ -670,7 +659,8 @@ class ImageUploadStack(Stack):
                 "event_type.$": "$.event_type",
                 "manifests.$": "$.registrationStage.manifests"
             }),
-            payload_response_only=True)
+            payload_response_only=True,
+            timeout=Duration.seconds(timeout_s))
 
         registration_ingest_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
 

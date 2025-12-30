@@ -95,9 +95,8 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
 
     tmp_table = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
+    num_shards = max(1, num_shards)
 
-    # NOTE: pmod(abs(xxhash64(image_id)), num_shards) gives deterministic shard assignment.
-    # We left-pad to keep partition folder names nice and consistent.
     sql = f"""
     CREATE TABLE {tmp_table}
     WITH (
@@ -132,7 +131,7 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
         registration_status,
         registration_error,
         matched_image_id,
-        lpad(CAST(pmod(abs(xxhash64(image_id)), {num_shards}) AS varchar), 6, '0') AS shard_id
+        lpad(CAST(mod(from_base(substr(to_hex(xxhash64(to_utf8(coalesce(image_id, '')))), 1, 8), 16), {num_shards}) AS varchar), 6, '0') AS shard_id
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
@@ -183,6 +182,7 @@ def _write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -
     # Keep same manifest shape as your other stages for reuse in map workers:
     # shard_prefix is now shard_id
     manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
+    print('Manifest = ', manifest)
     manifest_key = f"{manifest_prefix.rstrip('/')}/manifest-shard-{shard_name}.json"
     s3.put_object(
         Bucket=FILE_BUCKET_NAME,
@@ -249,6 +249,7 @@ def handler(event, context):
 
     # 2) List exported files and group by shard_id
     files_by_shard, all_keys = _list_export_files_by_shard(export_prefix_base)
+    print(f"files by shard = {files_by_shard}, all keys = {all_keys}")
     if not files_by_shard:
         err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {all_keys[:10]}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")

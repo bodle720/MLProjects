@@ -15,14 +15,14 @@ from aws_cdk import (
     aws_ecr_assets as ecr_assets
 )
 
-from config_models import StageConfig
+from config_models import BatchingStageConfig
 
 class BatchingStage(Construct):
     def __init__(self,
                  scope: Construct,
                  construct_id: str, *,
                  stage_name: str,
-                 config: StageConfig,
+                 config: BatchingStageConfig,
                  common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
                  iceberg_bucket: s3.Bucket,
@@ -72,7 +72,7 @@ class BatchingStage(Construct):
             code=_lambda.Code.from_asset(config.file_batching.path),
             layers=[common_utils_layer],
             memory_size=config.file_batching.memory_size,
-            timeout=Duration.minutes(config.file_batching.timeout_min),
+            timeout=Duration.seconds(config.file_batching.timeout_sec),
             environment=lambda_env
         )
 
@@ -206,10 +206,10 @@ class BatchingStage(Construct):
             actions=["s3:PutObject"],
             resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*"]
         ))
-        # allow listing only for athena-results prefix on file_bucket
+        # allow listing only for athena-results prefix on all buckets (need to be able to load in images everywhere)
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"]
+            resources=[f"arn:aws:s3:::*"]
         ))
 
         # S3: read/write/delete Iceberg files for upload_staging prefix
@@ -224,11 +224,32 @@ class BatchingStage(Construct):
             conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
         ))
 
-        # Optional: if the batch job needs to read temp files from file_bucket (adjust prefix if different)
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:PutObject"],
             resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
         ))
+
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+            ],
+            resources=[
+                "arn:aws:s3:::*/*",
+            ],
+        ))
+
+        # Allow the Batch job to write to canonical outputs in file bucket
+        job_role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",  # good to include for some SDK behaviors
+            ],
+            resources=[
+                f"arn:aws:s3:::{file_bucket.bucket_name}/canonical/*",
+            ],
+        ))
+
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],

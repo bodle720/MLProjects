@@ -52,6 +52,11 @@ s3 = boto3.client("s3")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+print("JOB_ID=", JOB_ID)
+print("FILE_BUCKET_NAME=", FILE_BUCKET_NAME)
+print("PROCESSED_PREFIX=", PROCESSED_PREFIX)
+print("MANIFEST_S3_URI=", MANIFEST_S3_URI)
+
 def s3_read_json(uri: str) -> Dict[str, Any]:
     b, k = parse_s3_uri(uri)
     resp = s3.get_object(Bucket=b, Key=k)
@@ -68,10 +73,8 @@ def iter_parquet_rows_from_s3_uris(s3_uris: List[str]) -> Iterable[Dict[str, Any
         path = uri.replace("s3://", "")
         dataset = ds.dataset(path, filesystem=fs, format="parquet")
 
-        # NOTE: depending on pyarrow version, IDE stubs can complain about scanner args;
-        # runtime is what matters. This pattern is robust across versions:
-        scanner = dataset.scanner(use_threads=True)
-        for batch in scanner.to_batches(batch_size=10_000):
+        scanner = dataset.scanner(use_threads=True, batch_size=10_000)
+        for batch in scanner.to_batches():
             for row in batch.to_pylist():
                 yield normalize_row(row)
 
@@ -251,6 +254,8 @@ def write_outputs(shard_name: str,
                   canonical_imagery_rows: List[Dict[str, Any]],
                   canonical_label_rows: List[Dict[str, Any]],
                   summary: Dict[str, Any]) -> None:
+
+
     bucket = FILE_BUCKET_NAME
 
     upload_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
@@ -269,11 +274,17 @@ def write_outputs(shard_name: str,
     write_text_to_s3(bucket, summary_key, json.dumps(summary), "application/json")
     write_text_to_s3(bucket, success_key, "", "text/plain")
 
+    print("upload_key=", upload_key)
+    print("imagery_key=", imagery_key)
+    print("labels_key=", labels_key)
+    print("summary_key=", summary_key)
+    print("success_key=", success_key)
+
 def main():
     start = time.time()
 
     manifest = s3_read_json(MANIFEST_S3_URI)
-    shard_name = manifest.get("shard_prefix", "shard")
+    shard_name = manifest["shard_prefix"]
 
     # Start log (one line)
     log(JOB_ID, USER, EVENT_TYPE,

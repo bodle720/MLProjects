@@ -17,11 +17,21 @@ class StorageConfig:
     provider_cleanup_lambda_path: str
 
 @dataclass
-class FileBatchingConfig:
+class UploadStateMachineConfig:
+    duration_hours: int
+
+@dataclass
+class ComputeEnvConfig:
+    minv_cpus: int
+    maxv_cpus: int
+    instance_types: List[str]
+
+@dataclass
+class LambdaConfig:
     path: str
     handler: str
     memory_size: int
-    timeout_min: int
+    timeout_sec: int
 
 @dataclass
 class BatchTaskJobDefConfig:
@@ -31,67 +41,27 @@ class BatchTaskJobDefConfig:
     file: str
 
 @dataclass
-class StageConfig:
-    file_batching: FileBatchingConfig
+class BatchingStageConfig:
+    file_batching: LambdaConfig
     batch_task_job_def: BatchTaskJobDefConfig
 
 @dataclass
-class ComputeEnvConfig:
-    minv_cpus: int
-    maxv_cpus: int
-    instance_types: List[str]
-
-@dataclass
-class UploadStateMachineConfig:
-    duration_hours: int
-
-@dataclass
-class KickoffLambdaConfig:
-    path: str
-    handler: str
-    memory_size: int
-    timeout_sec: int
-
-@dataclass
-class DLQProcessorConfig:
-    path: str
-    handler: str
-    memory_size: int
-    timeout_sec: int
-
-@dataclass
-class CleanupLambdaConfig:
-    path: str
-    handler: str
-    memory_size: int
-    timeout_sec: int
-
-@dataclass
-class DedupLambdaConfig:
-    path: str
-    handler: str
-    memory_size: int
-    timeout_sec: int
-
-@dataclass
-class RegistrationLambdaConfig:
-    path: str
-    handler: str
-    memory_size: int
-    timeout_sec: int
+class IngestStageConfig:
+    pre_ingest_lambda: LambdaConfig
+    post_ingest_lambda: LambdaConfig
 
 @dataclass
 class AppConfig:
     app_name: str
     logging: LoggingConfig
     storage: StorageConfig
-    dlq_processor: DLQProcessorConfig
+    dlq_processor: LambdaConfig
     compute_env: ComputeEnvConfig
     upload_state_machine: UploadStateMachineConfig
-    validation: StageConfig
-    deduplication: StageConfig
-    registration: StageConfig
-    kickoff_lambda: KickoffLambdaConfig
-    cleanup_lambda: CleanupLambdaConfig
-    dedup_ingest_lambda: DedupLambdaConfig
-    registration_ingest_lambda: RegistrationLambdaConfig
+    validation: BatchingStageConfig
+    deduplication: BatchingStageConfig
+    registration: BatchingStageConfig
+    dedup_ingest: IngestStageConfig
+    registration_ingest: IngestStageConfig
+    kickoff_lambda: LambdaConfig
+    cleanup_lambda: LambdaConfig

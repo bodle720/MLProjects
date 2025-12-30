@@ -15,19 +15,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker layer caching
-COPY batch_jobs/upload/deduplication/requirements.txt .
+COPY batch_jobs/upload/registration/requirements.txt .
 
 # Upgrade pip and install dependencies
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY batch_jobs/upload/deduplication/src/ .
+COPY batch_jobs/upload/registration/src/ .
 
 # Copy the python package so /opt/common/common exists
 COPY common/python/ /opt/common/
 
 ENV PYTHONPATH=/opt/common:/usr/local/lib/python3.12/site-packages:/usr/local/lib/python3/site-packages
 
-# Set the default command to run your validation job
+# Set the default command to run your registration job
 CMD ["python", "main.py"]

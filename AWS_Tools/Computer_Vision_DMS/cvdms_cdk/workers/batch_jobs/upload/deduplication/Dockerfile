@@ -29,5 +29,5 @@ COPY common/python/ /opt/common/
 
 ENV PYTHONPATH=/opt/common:/usr/local/lib/python3.12/site-packages:/usr/local/lib/python3/site-packages
 
-# Set the default command to run your validation job
+# Set the default command to run your deduplication job
 CMD ["python", "main.py"]

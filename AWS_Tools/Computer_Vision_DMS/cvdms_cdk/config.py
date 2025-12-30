@@ -1,9 +1,7 @@
 from config_models import (
     AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
-    StageConfig, FileBatchingConfig, BatchTaskJobDefConfig,
-    KickoffLambdaConfig, CleanupLambdaConfig, StorageConfig,
-    LoggingConfig, DLQProcessorConfig, DedupLambdaConfig,
-    RegistrationLambdaConfig
+    BatchingStageConfig, BatchTaskJobDefConfig, StorageConfig,
+    LoggingConfig, LambdaConfig, IngestStageConfig
 )
 
 CONFIG = AppConfig(
@@ -21,11 +19,11 @@ CONFIG = AppConfig(
         provider_ddl_lambda_path="workers/lambdas/storage",
         provider_cleanup_lambda_path = "workers/lambdas/storage"
     ),
-    dlq_processor=DLQProcessorConfig(
+    dlq_processor=LambdaConfig(
             path="workers/lambdas/storage",
             handler="dlq_processor.handler",
             memory_size=512,
-            timeout_sec=30
+            timeout_sec=120
         ),
     compute_env=ComputeEnvConfig(
         minv_cpus=0,
@@ -33,12 +31,12 @@ CONFIG = AppConfig(
         instance_types=["m5.large", "m5.xlarge", "m5.2xlarge"]
     ),
     upload_state_machine=UploadStateMachineConfig(duration_hours=2),
-    validation=StageConfig(
-        file_batching=FileBatchingConfig(
+    validation=BatchingStageConfig(
+        file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="validation.handler",
             memory_size=512,
-            timeout_min=5
+            timeout_sec=300
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
@@ -47,12 +45,12 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/validation/Dockerfile"
         )
     ),
-    deduplication=StageConfig(
-        file_batching=FileBatchingConfig(
+    deduplication=BatchingStageConfig(
+        file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="deduplication.handler",
             memory_size=512,
-            timeout_min=15
+            timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
@@ -61,12 +59,12 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/deduplication/Dockerfile"
         )
     ),
-    registration=StageConfig(
-        file_batching=FileBatchingConfig(
+    registration=BatchingStageConfig(
+        file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="registration.handler",
             memory_size=512,
-            timeout_min=15
+            timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
@@ -75,28 +73,44 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/registration/Dockerfile"
         )
     ),
-    kickoff_lambda=KickoffLambdaConfig(
+    dedup_ingest=IngestStageConfig(
+        pre_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="registration.handler",
+            memory_size=512,
+            timeout_sec=900
+        ),
+        post_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="registration.handler",
+            memory_size=512,
+            timeout_sec=900
+        )
+    ),
+    registration_ingest=IngestStageConfig(
+        pre_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="registration.handler",
+            memory_size=512,
+            timeout_sec=900
+        ),
+        post_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/file_batching",
+            handler="registration.handler",
+            memory_size=512,
+            timeout_sec=900
+        )
+    ),
+    kickoff_lambda=LambdaConfig(
         path="workers/lambdas/upload",
         handler="kickoff.handler",
         memory_size=512,
-        timeout_sec=30
+        timeout_sec=60
     ),
-    cleanup_lambda=CleanupLambdaConfig(
+    cleanup_lambda=LambdaConfig(
         path="workers/lambdas/upload",
         handler="cleanup.handler",
         memory_size=512,
-        timeout_sec=30
-    ),
-    dedup_ingest_lambda = DedupLambdaConfig(
-        path="workers/lambdas/upload",
-        handler="deduplication_ingest.handler",
-        memory_size=512,
-        timeout_sec=30
-    ),
-    registration_ingest_lambda=RegistrationLambdaConfig(
-        path="workers/lambdas/upload",
-        handler="registration_ingest.handler",
-        memory_size=512,
-        timeout_sec=30
+        timeout_sec=500
     )
 )
