@@ -2,17 +2,12 @@
 import os
 import json
 import logging
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 import boto3
 
-from common.utils import (
-    log,
-    delete_iceberg_partition_rows,
-    chunked_insert,
-    s3_list_keys,
-    wait_for_athena
-)
+from common.utils import log, delete_iceberg_partition_rows, chunked_insert, s3_list_keys, wait_for_athena, athena_count_job_rows
+from common.ingest import _s3_read_json, _iter_rows_from_jsonl_keys, _drop_ctas_table_if_exists
 
 # Environment variables (set by CDK)
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -42,57 +37,6 @@ s3 = boto3.client("s3")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-def _s3_read_json(bucket: str, key: str) -> Dict:
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    return json.loads(resp["Body"].read().decode("utf-8"))
-
-def _s3_read_jsonl(bucket: str, key: str) -> Iterable[Dict]:
-    """Generator yielding parsed JSON objects from an S3 JSONL object."""
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    for line in resp["Body"].iter_lines():
-        if not line:
-            continue
-        yield json.loads(line.decode("utf-8"))
-
-def _athena_count_job_rows(job_id: str) -> int:
-    """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
-    safe_job_id = job_id.replace("'", "''")
-    sql = (
-        f"SELECT count(*) as cnt FROM \"{ICEBERG_DATABASE_NAME}\".\"{UPLOAD_STAGING_TABLE_NAME}\" "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
-    qid = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )["QueryExecutionId"]
-
-    res = wait_for_athena(qid, poll=2.0, timeout=600)
-    if res["state"] != "SUCCEEDED":
-        raise RuntimeError(f"[REG_INGEST] Athena count failed: {res['metadata']}")
-
-    out = athena.get_query_results(QueryExecutionId=qid)
-    rows = out.get("ResultSet", {}).get("Rows", [])
-    if len(rows) < 2 or not rows[1].get("Data"):
-        return 0
-    val = rows[1]["Data"][0].get("VarCharValue")
-    return int(val) if val is not None else 0
-
-def _drop_ctas_table_if_exists(job_id: str) -> str:
-    """
-    Drop the registration CTAS temp table if your batching lambda created one.
-    This matches your earlier draft: reg_export_<sanitized_job_id>.
-    """
-    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
-    sql = f"DROP TABLE IF EXISTS {table_name}"
-    qid = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )["QueryExecutionId"]
-    return qid
 
 def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     expected = []
@@ -141,12 +85,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"{PROCESSED_PREFIX_BASE}/{job_id}/{PROCESSED_SUFFIX}".rstrip("/")
     expected_shards = _extract_expected_shards_from_manifests(manifests)
-
-    print("INGEST FILE_BUCKET_NAME=", FILE_BUCKET_NAME)
-    print("processed_prefix=", processed_prefix + "/")
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
-    print("processed_keys_count=", len(processed_keys))
-    print("processed_keys_sample=", processed_keys[:20])
 
     # shard -> key maps
     shard_upload = {}
@@ -234,10 +173,6 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_canon_label_rows": total_canon_label_rows,
     }
 
-def _iter_rows_from_jsonl_keys(bucket: str, keys: List[str]) -> Iterable[Dict]:
-    for key in keys:
-        yield from _s3_read_jsonl(bucket, key)
-
 def handler(event, context):
     # Validate input
     try:
@@ -263,9 +198,6 @@ def handler(event, context):
         log(job_id, user, event_type, f"[REG_INGEST] Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    print(f"manifests = {manifests}")
-    print(f"collected = {collected}")
-
     missing = collected["missing_shards"]
     if missing:
         err = f"[REG_INGEST] Missing processed outputs for shards: {missing}"
@@ -289,7 +221,12 @@ def handler(event, context):
 
     # 2) Verify original count via Athena (upload_staging rows before we delete)
     try:
-        original_count = _athena_count_job_rows(job_id)
+        original_count = athena_count_job_rows(job_id,
+                                               ICEBERG_DATABASE_NAME,
+                                               UPLOAD_STAGING_TABLE_NAME,
+                                               ATHENA_OUTPUT_S3,
+                                               "REG_INGEST",
+                                               athena_workgroup=ATHENA_WORKGROUP)
     except Exception as e:
         log(job_id, user, event_type, f"[REG_INGEST] Athena count failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
@@ -459,7 +396,12 @@ def handler(event, context):
 
     # 7) Verify upload_staging count after reinsertion
     try:
-        new_count = _athena_count_job_rows(job_id)
+        new_count = athena_count_job_rows(job_id,
+                                               ICEBERG_DATABASE_NAME,
+                                               UPLOAD_STAGING_TABLE_NAME,
+                                               ATHENA_OUTPUT_S3,
+                                               "DEDUP_INGEST",
+                                               athena_workgroup=ATHENA_WORKGROUP)
     except Exception as e:
         log(job_id, user, event_type, f"[REG_INGEST] Athena count after insert failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
@@ -478,7 +420,13 @@ def handler(event, context):
         )
 
     # 8) Drop CTAS temp table if used by batching stage (safe no-op if not present)
-    drop_qid = _drop_ctas_table_if_exists(job_id)
+    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
+    table_name = f"reg_export_{sanitized_job_id}"
+
+    drop_qid = _drop_ctas_table_if_exists(ICEBERG_DATABASE_NAME,
+                                          table_name,
+                                          ATHENA_OUTPUT_S3,
+                                          ATHENA_WORKGROUP)
     drop_res = wait_for_athena(drop_qid, poll=2.0, timeout=600)
     if drop_res["state"] != "SUCCEEDED":
         resp = drop_res["metadata"]

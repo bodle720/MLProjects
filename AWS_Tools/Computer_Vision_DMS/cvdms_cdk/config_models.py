@@ -48,6 +48,8 @@ class BatchingStageConfig:
 @dataclass
 class IngestStageConfig:
     pre_ingest_lambda: LambdaConfig
+    map_ingest_lambda: LambdaConfig
+    map_max_concurrency: int
     post_ingest_lambda: LambdaConfig
 
 @dataclass

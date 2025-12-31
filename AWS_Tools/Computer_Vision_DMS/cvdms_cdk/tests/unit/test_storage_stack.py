@@ -1,9 +1,8 @@
 import aws_cdk as cdk
 from aws_cdk.assertions import Template
 import pytest
-import json
 
-from stacks.storage_stack import StorageStack
+from stacks.main_stacks.storage_stack import StorageStack
 
 @pytest.fixture
 def template():

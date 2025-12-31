@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 import os
-import sys
 
 import aws_cdk as cdk
 
 from config import CONFIG
-from stacks.logging_stack import LoggingStack
-from stacks.storage_stack import StorageStack
-from stacks.upload_stack import ImageUploadStack
+from stacks.main_stacks.logging_stack import LoggingStack
+from stacks.main_stacks.storage_stack import StorageStack
+from stacks.main_stacks.upload_stack import ImageUploadStack
 
 APP_NAME = CONFIG.app_name
 

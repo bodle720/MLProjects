@@ -75,28 +75,42 @@ CONFIG = AppConfig(
     ),
     dedup_ingest=IngestStageConfig(
         pre_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="registration.handler",
+            path="workers/lambdas/upload/ingest",
+            handler="deduplication_pre.handler",
             memory_size=512,
             timeout_sec=900
         ),
+        map_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/ingest",
+            handler="deduplication_map.handler",
+            memory_size=512,
+            timeout_sec=900
+        ),
+        map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="registration.handler",
+            path="workers/lambdas/upload/ingest",
+            handler="deduplication_post.handler",
             memory_size=512,
             timeout_sec=900
         )
     ),
     registration_ingest=IngestStageConfig(
         pre_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="registration.handler",
+            path="workers/lambdas/upload/ingest",
+            handler="registration_pre.handler",
             memory_size=512,
             timeout_sec=900
         ),
+        map_ingest_lambda=LambdaConfig(
+                    path="workers/lambdas/upload/ingest",
+                    handler="registration_map.handler",
+                    memory_size=512,
+                    timeout_sec=900
+                ),
+        map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/file_batching",
-            handler="registration.handler",
+            path="workers/lambdas/upload/ingest",
+            handler="registration_post.handler",
             memory_size=512,
             timeout_sec=900
         )

@@ -6,8 +6,8 @@ from typing import List, Dict
 
 import boto3
 
-# common utilities used across your project (must exist in common/python and be available at runtime)
-from common.utils import log, delete_iceberg_partition_rows, chunked_insert, s3_list_keys, wait_for_athena
+from common.utils import log, delete_iceberg_partition_rows, chunked_insert, s3_list_keys, wait_for_athena, athena_count_job_rows
+from common.ingest import _s3_read_json, _read_all_processed_rows, _drop_ctas_table_if_exists
 
 # Environment variables (set by CDK)
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -31,46 +31,6 @@ s3 = boto3.client("s3")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-def _s3_read_json(bucket: str, key: str) -> Dict:
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    return json.loads(resp["Body"].read().decode("utf-8"))
-
-def _s3_read_jsonl(bucket: str, key: str):
-    """Generator yielding parsed JSON objects from an S3 JSONL object."""
-    resp = s3.get_object(Bucket=bucket, Key=key)
-    for line in resp["Body"].iter_lines():
-        if not line:
-            continue
-        yield json.loads(line.decode("utf-8"))
-
-def _athena_count_job_rows(job_id: str) -> int:
-    """Run a quick Athena count(*) for upload_staging WHERE job_id = '<job_id>'."""
-    safe_job_id = job_id.replace("'", "''")
-    sql = (
-        f"SELECT count(*) as cnt FROM \"{ICEBERG_DATABASE_NAME}\".\"{UPLOAD_STAGING_TABLE_NAME}\" "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
-    q = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
-    )
-    qid = q["QueryExecutionId"]
-    athena_res = wait_for_athena(qid, poll=2.0, timeout=600)
-    if athena_res['state'] != 'SUCCEEDED':
-        resp = athena_res['metadata']
-        raise RuntimeError(f"[DEDUP_INGEST] Athena count query failed, resp =  {resp}")
-    # fetch results
-    res = athena.get_query_results(QueryExecutionId=qid)
-    rows = res.get("ResultSet", {}).get("Rows", [])
-
-    # rows[0] = header, rows[1] = data
-    if len(rows) < 2 or not rows[1].get("Data"):
-        return 0
-
-    val = rows[1]["Data"][0].get("VarCharValue")
-    return int(val) if val is not None else 0
 
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -154,23 +114,6 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_processed_rows": total_processed_rows
     }
 
-def _read_all_processed_rows(bucket: str, jsonl_keys: List[str]):
-    """Generator yielding all processed rows from the list of jsonl S3 keys."""
-    for key in jsonl_keys:
-        for row in _s3_read_jsonl(bucket, key):
-            yield row
-
-def _drop_ctas_table_if_exists(job_id):
-    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS {table_name}'
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
-    )
-    return resp["QueryExecutionId"]
-
 def handler(event, context):
     # Validate input
     try:
@@ -214,7 +157,12 @@ def handler(event, context):
 
     # 2) Verify original count via Athena
     try:
-        original_count = _athena_count_job_rows(job_id)
+        original_count = athena_count_job_rows(job_id,
+                                               ICEBERG_DATABASE_NAME,
+                                               UPLOAD_STAGING_TABLE_NAME,
+                                               ATHENA_OUTPUT_S3,
+                                               "DEDUP_INGEST",
+                                               athena_workgroup=ATHENA_WORKGROUP)
     except Exception as e:
         log(job_id, user, event_type, f"[DEDUP_INGEST] Athena count failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
@@ -281,7 +229,12 @@ def handler(event, context):
 
     # 5) Optional verification: count rows after insert
     try:
-        new_count = _athena_count_job_rows(job_id)
+        new_count = athena_count_job_rows(job_id,
+                                           ICEBERG_DATABASE_NAME,
+                                           UPLOAD_STAGING_TABLE_NAME,
+                                           ATHENA_OUTPUT_S3,
+                                           "DEDUP_INGEST",
+                                           athena_workgroup=ATHENA_WORKGROUP)
     except Exception as e:
         log(job_id, user, event_type, f"[DEDUP_INGEST] Athena count after insert failed for job {job_id}: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
@@ -294,7 +247,13 @@ def handler(event, context):
             f"This indicates missing rows."
         )
 
-    drop_qid = _drop_ctas_table_if_exists(job_id)
+    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
+    table_name = f"dedup_export_{sanitized_job_id}"
+
+    drop_qid = _drop_ctas_table_if_exists(ICEBERG_DATABASE_NAME,
+                                          table_name,
+                                          ATHENA_OUTPUT_S3,
+                                          ATHENA_WORKGROUP)
     athena_res = wait_for_athena(drop_qid, poll=2.0, timeout=600)
     if athena_res['state'] != 'SUCCEEDED':
         resp = athena_res['metadata']

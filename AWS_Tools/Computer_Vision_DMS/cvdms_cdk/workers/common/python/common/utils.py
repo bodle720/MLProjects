@@ -459,3 +459,33 @@ def delete_iceberg_partition_rows(job_id: str,
         })
 
     return result
+
+def athena_count_job_rows(job_id: str,
+                           db_name: str,
+                           table_name: str,
+                           athena_output_s3: str,
+                           task_name: str,
+                           athena_workgroup: str = "primary") -> int:
+    """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
+    safe_job_id = job_id.replace("'", "''")
+    sql = (
+        f"SELECT count(*) as cnt FROM \"{db_name}\".\"{table_name}\" "
+        f"WHERE job_id = '{safe_job_id}'"
+    )
+    qid = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": athena_output_s3},
+        WorkGroup=athena_workgroup,
+    )["QueryExecutionId"]
+
+    res = wait_for_athena(qid, poll=2.0, timeout=600)
+    if res["state"] != "SUCCEEDED":
+        raise RuntimeError(f"[{task_name}] Athena count failed: {res['metadata']}")
+
+    out = athena.get_query_results(QueryExecutionId=qid)
+    rows = out.get("ResultSet", {}).get("Rows", [])
+    if len(rows) < 2 or not rows[1].get("Data"):
+        return 0
+    val = rows[1]["Data"][0].get("VarCharValue")
+
+    return int(val) if val is not None else 0
