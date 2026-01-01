@@ -24,9 +24,6 @@ JOB_MEMORY_MB = int(os.environ.get("REG_JOB_MEMORY_MB", "512"))
 # Hard cap to prevent creating absurdly many partitions
 MAX_SHARDS = int(os.environ.get("REG_MAX_SHARDS", "4096"))
 
-# S3 layout base for registration exports and manifests
-EXPORT_BASE_PREFIX = "temp/image-upload"  # temp/image-upload/{job_id}/batches/registration/...
-
 s3 = boto3.client("s3")
 athena = boto3.client("athena")
 
@@ -182,7 +179,6 @@ def _write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -
     # Keep same manifest shape as your other stages for reuse in map workers:
     # shard_prefix is now shard_id
     manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
-    print('Manifest = ', manifest)
     manifest_key = f"{manifest_prefix.rstrip('/')}/manifest-shard-{shard_name}.json"
     s3.put_object(
         Bucket=FILE_BUCKET_NAME,
@@ -204,8 +200,8 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[REG_FILE_BATCHING] Starting registration batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
-    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration/export"
-    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/registration/manifests"
+    export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export"
+    manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests"
 
     # 0) COUNT(*)
     count_qid = _start_athena_count(job_id)
@@ -249,7 +245,7 @@ def handler(event, context):
 
     # 2) List exported files and group by shard_id
     files_by_shard, all_keys = _list_export_files_by_shard(export_prefix_base)
-    print(f"files by shard = {files_by_shard}, all keys = {all_keys}")
+
     if not files_by_shard:
         err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {all_keys[:10]}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")

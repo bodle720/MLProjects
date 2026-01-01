@@ -28,9 +28,6 @@ MAX_PREFIX_LENGTH = 3
 # Job memory (MB) used to compute target rows per shard. Default to 512 to match the job def.
 JOB_MEMORY_MB = 512
 
-# S3 layout base for dedup exports and manifests
-EXPORT_BASE_PREFIX = "temp/image-upload"  # final path: temp/image-upload/{job_id}/batches/deduplication/...
-
 s3 = boto3.client("s3")
 athena = boto3.client("athena")
 
@@ -255,8 +252,8 @@ def handler(event, context):
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Prepare prefixes
-    export_prefix_base = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication/export"
-    manifest_prefix = f"{EXPORT_BASE_PREFIX}/{job_id}/batches/deduplication/manifests"
+    export_prefix_base = f"temp/image-upload/{job_id}/batches/deduplication-step/export"
+    manifest_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/manifests"
 
     # 0) Run COUNT(*) to estimate rows
     try:

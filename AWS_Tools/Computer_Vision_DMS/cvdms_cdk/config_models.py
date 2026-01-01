@@ -63,7 +63,8 @@ class AppConfig:
     validation: BatchingStageConfig
     deduplication: BatchingStageConfig
     registration: BatchingStageConfig
-    dedup_ingest: IngestStageConfig
+    validation_ingest: IngestStageConfig
+    deduplication_ingest: IngestStageConfig
     registration_ingest: IngestStageConfig
     kickoff_lambda: LambdaConfig
     cleanup_lambda: LambdaConfig

@@ -13,6 +13,18 @@ s3 = boto3.client("s3")
 
 LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
 
+def stable_uuid5(seed: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+def _label_uuid(stable_seed: str | None, fallback_prefix: str) -> str:
+    """
+    stable_seed: string that uniquely identifies the image/job/label_type.
+    fallback_prefix: label subtype; included so different label kinds don't collide.
+    """
+    if stable_seed:
+        return stable_uuid5(f"{stable_seed}|{fallback_prefix}")
+    return str(uuid.uuid4())
+
 def read_manifest_with_retry(bucket, key, retries=5, delay=2):
     for attempt in range(retries):
         try:
@@ -25,6 +37,15 @@ def read_manifest_with_retry(bucket, key, retries=5, delay=2):
             raise RuntimeError(f'Unknown exception in loading manifest file: {e}')
 
     return None
+
+def _put_json(key: str, payload: dict, file_bucket_name: str) -> str:
+    s3.put_object(
+        Bucket=file_bucket_name,
+        Key=key,
+        Body=json.dumps(payload).encode("utf-8"),
+        ContentType="application/json",
+    )
+    return f"s3://{file_bucket_name}/{key}"
 
 # Image feature calculation helpers
 def infer_dtype(img):
@@ -51,14 +72,6 @@ def normalize_hex(h: str) -> str:
         return h
     raise ValueError(f"Bad hex color: {h}")
 
-def _put_json(key: str, payload: dict, file_bucket_name: str) -> str:
-    s3.put_object(
-        Bucket=file_bucket_name,
-        Key=key,
-        Body=json.dumps(payload).encode("utf-8"),
-        ContentType="application/json",
-    )
-    return f"s3://{file_bucket_name}/{key}"
 
 def _put_png(key: str, png_bytes: bytes, file_bucket_name: str) -> str:
     s3.put_object(
@@ -69,7 +82,7 @@ def _put_png(key: str, png_bytes: bytes, file_bucket_name: str) -> str:
     )
     return f"s3://{file_bucket_name}/{key}"
 
-def create_and_save_labels(line, label_type, job_id, file_bucket_name):
+def create_and_save_labels(line, label_type, job_id, file_bucket_name, stable_seed: str | None = None):
     try:
         if label_type == "single-label":
             meta = line.get("single-label-metadata", {})
@@ -82,6 +95,11 @@ def create_and_save_labels(line, label_type, job_id, file_bucket_name):
             ml = line.get("multi-label", None)
             meta = line.get("multi-label-metadata", {})
             class_map = meta.get("class-map", None)
+
+            if not ml or not isinstance(ml, list):
+                return [], [], "multi-label missing/empty"
+            if not class_map or not isinstance(class_map, dict):
+                return [], [], "multi-label class-map missing/empty"
 
             out = []
             for idx in ml:
@@ -103,13 +121,13 @@ def create_and_save_labels(line, label_type, job_id, file_bucket_name):
             else:
                 return [], classes_present, None
         elif label_type == "object-detection":
-            paths, classes_present = _create_object_detection_label(line, job_id, file_bucket_name)
+            paths, classes_present = _create_object_detection_label(line, job_id, file_bucket_name, stable_seed)
             return paths, classes_present, None
         elif label_type == "semantic-segmentation":
-            paths, classes_present = _create_semantic_segmentation_label(line, job_id, file_bucket_name)
+            paths, classes_present = _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_seed)
             return paths, classes_present, None
         elif label_type == "instance-segmentation":
-            paths, classes_present = _create_instance_segmentation_label(line, job_id, file_bucket_name)
+            paths, classes_present = _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_seed)
             return paths, classes_present, None
 
         return [], [], f"Unsupported label_type: {label_type}"
@@ -117,7 +135,7 @@ def create_and_save_labels(line, label_type, job_id, file_bucket_name):
     except Exception as e:
         return [], [], f"Error creating and saving label for label type {label_type}: {e}"
 
-def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str]]:
+def _create_object_detection_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
     od = line.get("object-detection", {})
     meta = line.get("object-detection-metadata", {})
     anns = od.get("annotations", None)
@@ -160,12 +178,12 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
             uniq.append(c)
     classes_present = uniq
 
-    label_uuid = str(uuid.uuid4())
+    label_uuid = _label_uuid(stable_seed, "object-detection")
     key = f"temp/image-upload/{job_id}/object-detection/{label_uuid}.json"
     uri = _put_json(key, {"annotations": out_anns}, file_bucket_name)
     return [uri], classes_present
 
-def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str]]:
+def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
     mask_ref = line.get("semantic-segmentation-ref")
     meta = line.get("semantic-segmentation-ref-metadata", {})
     icm = meta.get("internal-color-map", None)
@@ -252,7 +270,7 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
     classes_present = uniq
 
     # Save PNG + meta JSON under same uuid
-    label_uuid = str(uuid.uuid4())
+    label_uuid = _label_uuid(stable_seed, "semantic-segmentation")
     png_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_uuid}.png"
     meta_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_uuid}.json"
 
@@ -267,7 +285,7 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
 
     return [png_uri, meta_uri], classes_present
 
-def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str]]:
+def _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")
 
@@ -356,7 +374,7 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
             uniq.append(c)
     classes_present = uniq
 
-    label_uuid = str(uuid.uuid4())
+    label_uuid = _label_uuid(stable_seed, "instance-segmentation")
     png_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_uuid}.png"
     meta_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_uuid}.json"
 

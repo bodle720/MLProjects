@@ -115,13 +115,10 @@ class ImageUploadStack(Stack):
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn
         )
 
-        # Make cleanup lambda to run once entire upload job is done.
-        cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
-
-        dedup_ingest_stage = IngestStage(
-            self, "deduplicationIngestStage",
-            stage_name="deduplicationIngestStage",
-            config=CONFIG.dedup_ingest,
+        validation_ingest_stage = IngestStage(
+            self, "validationIngestStage",
+            stage_name="validationIngestStage",
+            config=CONFIG.validation_ingest,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -132,7 +129,27 @@ class ImageUploadStack(Stack):
             account=self.account,
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
-            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn
+            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            manifest_path="$.validationStage.manifests",
+            expected_count_path="$.validationStage.expected_count"
+        )
+
+        deduplication_ingest_stage = IngestStage(
+            self, "deduplicationIngestStage",
+            stage_name="deduplicationIngestStage",
+            config=CONFIG.deduplication_ingest,
+            common_utils_layer=self.common_utils_layer,
+            file_bucket=self.file_bucket,
+            iceberg_bucket=self.iceberg_bucket,
+            job_table=self.job_table,
+            lock_table=self.lock_table,
+            iceberg_database_name=self.iceberg_database_name,
+            region=self.region,
+            account=self.account,
+            dlq_chain_factory=self._make_dlq_chain,
+            firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
+            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            manifest_path="$.deduplicationStage.manifests"
         )
 
         registration_ingest_stage = IngestStage(
@@ -149,16 +166,23 @@ class ImageUploadStack(Stack):
             account=self.account,
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
-            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn
+            firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            manifest_path="$.registrationStage.manifests"
         )
+
+        # Make cleanup lambda to run once entire upload job is done.
+        cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
 
         workflow_definition = sfn.Chain.start(validation_stage.batching_task) \
             .next(validation_stage.map_state) \
+            .next(validation_ingest_stage.pre_ingest_task) \
+            .next(validation_ingest_stage.map_state) \
+            .next(validation_ingest_stage.post_ingest_task) \
             .next(deduplication_stage.batching_task) \
             .next(deduplication_stage.map_state) \
-            .next(dedup_ingest_stage.pre_ingest_task) \
-            .next(dedup_ingest_stage.map_state) \
-            .next(dedup_ingest_stage.post_ingest_task) \
+            .next(deduplication_ingest_stage.pre_ingest_task) \
+            .next(deduplication_ingest_stage.map_state) \
+            .next(deduplication_ingest_stage.post_ingest_task) \
             .next(registration_stage.batching_task) \
             .next(registration_stage.map_state) \
             .next(registration_ingest_stage.pre_ingest_task) \
@@ -181,7 +205,7 @@ class ImageUploadStack(Stack):
             resources=["*"],
         ))
 
-        for stage in [validation_stage, deduplication_stage]:
+        for stage in [validation_stage, deduplication_stage, registration_stage]:
             upload_state_machine.role.add_to_principal_policy(iam.PolicyStatement(
                 actions=["batch:SubmitJob", "batch:DescribeJobs"],
                 resources=[job_queue.job_queue_arn, stage.job_def.attr_job_definition_arn]

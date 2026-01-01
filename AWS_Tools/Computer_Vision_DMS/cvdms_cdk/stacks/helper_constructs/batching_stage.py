@@ -343,7 +343,7 @@ class BatchingStage(Construct):
             self, f"{stage_name}MapState",
             items_path=f"$.{stage_name}.manifests",
             item_selector=params,
-            result_path=f"$.{stage_name}.batch_results",
+            result_path=sfn.JsonPath.DISCARD,
             output_path="$",
             max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus)))),
         )

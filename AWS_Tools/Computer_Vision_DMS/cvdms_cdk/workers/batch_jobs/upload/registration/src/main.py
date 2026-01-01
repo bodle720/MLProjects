@@ -39,10 +39,8 @@ if not FILE_BUCKET_NAME:
 if not LOG_FIREHOSE_STREAM_NAME:
     raise RuntimeError("[REG_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
 
-# Where to write processed outputs for this shard
-PROCESSED_PREFIX_BASE = os.environ.get("PROCESSED_PREFIX_BASE", "temp/image-upload")
 # This is the “stage processed area” analogous to deduplication-step
-PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/registration/processed"
+PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/registration-step/processed"
 
 # Safety
 MAX_ROWS_IN_MEMORY = int(os.environ.get("REG_MAX_ROWS_IN_MEMORY", "200000"))
@@ -51,11 +49,6 @@ s3 = boto3.client("s3")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-print("JOB_ID=", JOB_ID)
-print("FILE_BUCKET_NAME=", FILE_BUCKET_NAME)
-print("PROCESSED_PREFIX=", PROCESSED_PREFIX)
-print("MANIFEST_S3_URI=", MANIFEST_S3_URI)
 
 def s3_read_json(uri: str) -> Dict[str, Any]:
     b, k = parse_s3_uri(uri)
@@ -273,12 +266,6 @@ def write_outputs(shard_name: str,
 
     write_text_to_s3(bucket, summary_key, json.dumps(summary), "application/json")
     write_text_to_s3(bucket, success_key, "", "text/plain")
-
-    print("upload_key=", upload_key)
-    print("imagery_key=", imagery_key)
-    print("labels_key=", labels_key)
-    print("summary_key=", summary_key)
-    print("success_key=", success_key)
 
 def main():
     start = time.time()

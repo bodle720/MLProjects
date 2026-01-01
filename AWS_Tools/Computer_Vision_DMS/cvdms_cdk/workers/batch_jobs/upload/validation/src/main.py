@@ -1,25 +1,22 @@
+#!/usr/bin/env python3
 import os
 import io
-import uuid
+import re
+import json
+import time
 import hashlib
 import logging
-import json
-
 from datetime import datetime, timezone
 
 import boto3
 from PIL import Image
 from botocore.exceptions import ClientError
 
-from common.utils import chunked_insert
-from helpers import read_manifest_with_retry, infer_dtype, create_and_save_labels
+from common.utils import log
+from helpers import read_manifest_with_retry, infer_dtype, create_and_save_labels, stable_uuid5
 
 # Env Variables from upload stack
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
-ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
-ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 # From the map state input
@@ -30,50 +27,100 @@ LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 
+PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processed"
+
 s3 = boto3.client("s3")
-athena = boto3.client("athena")
 
-if not MANIFEST_S3_URI.startswith("s3://") or MANIFEST_S3_URI.count("/") < 3:
-    raise ValueError(f"Invalid MANIFEST_S3_URI: {MANIFEST_S3_URI}")
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-# Main image processor
-def process_image(line):
-    # Assign the image a uuid
-    image_uuid = str(uuid.uuid4())
+def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or s3_uri.count("/") < 3:
+        raise ValueError(f"Invalid s3 uri: {s3_uri}")
+    b, k = s3_uri[5:].split("/", 1)
+    return b, k
 
-    # Get the source ref for the image from the line, note image is not necessarily in the file bucket at this point.
-    temp_source_ref = line["source-ref"] # s3 uri of image, e.g. "s3://name-of-some-random-bucket/samples/coco/val2017/random-30-images/000000030828.jpg"
-    bucket, key = temp_source_ref[5:].split("/", 1)  # remove "s3://"
+def _manifest_shard_name(manifest_s3_uri: str) -> str:
+    _, key = _parse_s3_uri(manifest_s3_uri)
+    fname = key.rsplit("/", 1)[-1]
+    # batch-001.jsonl -> batch-001
+    m = re.match(r"^(.*)\.jsonl$", fname)
+    return m.group(1) if m else fname
 
-    # Set up defaults for each column in upload staging table.
-    row = {'job_id': JOB_ID,
-           'image_id': image_uuid,
-           "temp_source_ref": temp_source_ref,
-           "img_type": None,
-           "img_height": None,
-           "img_width": None,
-           "num_channels": None,
-           "dtype": None,
-           "file_size_mb": 0.0, # a double value
-           "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), # Athena preferred format.
-           "data_source": DATA_SOURCE,
-           "sha256_hash": None,
-           "string_labels": None,
-           "temp_source_ref_bbox_meta": None,
-           "temp_source_ref_semantic_png": None,
-           "temp_source_ref_semantic_meta": None,
-           "temp_source_ref_instance_png": None,
-           "temp_source_ref_instance_meta": None,
-           "classes_present": None,
-           "validation_status": "pending",
-           "validation_error": None,
-           "dedup_status": "pending",
-           "dedup_error": None,
-           "registration_status": "pending",
-           "registration_error": None,
-           "matched_image_id": None}
+def _write_s3_text(bucket: str, key: str, text: str, content_type: str) -> None:
+    body = text.encode("utf-8")
+    # Safety: put_object limit is 5GB, but you may have your own guard; 200 rows should be small.
+    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
+def process_image(line: dict) -> dict:
+    # derive deterministic image uuid from job + source-ref
+    temp_source_ref = line.get("source-ref")
+    if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://"):
+        # malformed line -> failed row
+        return {
+            "job_id": JOB_ID,
+            "image_id": stable_uuid5(f"{JOB_ID}:MISSING_SOURCE_REF:{json.dumps(line, sort_keys=True)[:200]}"),
+            "temp_source_ref": temp_source_ref,
+            "img_type": None,
+            "img_height": None,
+            "img_width": None,
+            "num_channels": None,
+            "dtype": None,
+            "file_size_mb": 0.0,
+            "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "data_source": DATA_SOURCE,
+            "sha256_hash": None,
+            "string_labels": None,
+            "temp_source_ref_bbox_meta": None,
+            "temp_source_ref_semantic_png": None,
+            "temp_source_ref_semantic_meta": None,
+            "temp_source_ref_instance_png": None,
+            "temp_source_ref_instance_meta": None,
+            "classes_present": None,
+            "validation_status": "failed",
+            "validation_error": "missing/invalid source-ref",
+            "dedup_status": "pending",
+            "dedup_error": None,
+            "registration_status": "pending",
+            "registration_error": None,
+            "matched_image_id": None,
+        }
+
+    image_uuid = stable_uuid5(f"{JOB_ID}:{temp_source_ref}")
+
+    # Defaults for upload_staging row
+    row = {
+        "job_id": JOB_ID,
+        "image_id": image_uuid,
+        "temp_source_ref": temp_source_ref,
+        "img_type": None,
+        "img_height": None,
+        "img_width": None,
+        "num_channels": None,
+        "dtype": None,
+        "file_size_mb": 0.0,
+        "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "data_source": DATA_SOURCE,
+        "sha256_hash": None,
+        "string_labels": None,
+        "temp_source_ref_bbox_meta": None,
+        "temp_source_ref_semantic_png": None,
+        "temp_source_ref_semantic_meta": None,
+        "temp_source_ref_instance_png": None,
+        "temp_source_ref_instance_meta": None,
+        "classes_present": None,
+        "validation_status": "pending",
+        "validation_error": None,
+        "dedup_status": "pending",
+        "dedup_error": None,
+        "registration_status": "pending",
+        "registration_error": None,
+        "matched_image_id": None,
+    }
+
+    # Fetch image bytes from source-ref
     try:
+        bucket, key = _parse_s3_uri(temp_source_ref)
         obj = s3.get_object(Bucket=bucket, Key=key)
     except ClientError as e:
         row["validation_status"] = "failed"
@@ -81,51 +128,34 @@ def process_image(line):
         return row
 
     data = obj["Body"].read()
-    file_size_mb = round(len(data) / (1024 * 1024), 4)
-    row["file_size_mb"] = float(file_size_mb)
+    row["file_size_mb"] = float(round(len(data) / (1024 * 1024), 4))
+
     buf = io.BytesIO(data)
-
     buf.seek(0)
-    sha = hashlib.sha256(buf.read()).hexdigest()
+    row["sha256_hash"] = hashlib.sha256(buf.read()).hexdigest()
     buf.seek(0)
 
-    row["sha256_hash"] = str(sha)
-
+    # Open image
     try:
         img = Image.open(buf)
         img.load()
     except Exception as e:
         row["validation_status"] = "failed"
-        row["validation_error"] = f"Cannot open image {temp_source_ref} in validation batch job: {e}"
+        row["validation_error"] = f"Cannot open image {temp_source_ref}: {e}"
         return row
 
     bands = len(img.getbands())
     if bands not in (1, 3):
         row["validation_status"] = "failed"
-        row["validation_error"] = f"Invalid band count for image: {temp_source_ref}, count = {bands}, must be 1 or 3."
+        row["validation_error"] = f"Invalid band count: {bands}, must be 1 or 3"
         return row
-    else:
-        row["num_channels"] = bands
 
-    dtype = infer_dtype(img)
-    width, height = img.size
-
+    row["num_channels"] = bands
     row["img_type"] = "L" if bands == 1 else "RGB"
-    row["dtype"] = dtype
-    row["img_height"] = int(height)
+    row["dtype"] = infer_dtype(img)
+    width, height = img.size
     row["img_width"] = int(width)
-
-    # Here we can, depending on label type (if not "single-label" or "multi-label"), do the work to both create and move
-    # the label files (bbox json or png masks and mask mappings) to the temp/ folder with newly created label uuids
-    # per the following format:
-    # for object detection:
-    #    temp/image-upload/<job uuid>/object-detection/<label uuid>.json
-    # or, for semantic segmentation:
-    #    temp/image-upload/<job uuid>/semantic-segmentation/<label uuid>.png AND
-    #    temp/image-upload/<job uuid>/semantic-segmentation/<label uuid>.json
-    # or, for instance segmentation
-    #    temp/image-upload/<job uuid>/instance-segmentation/<label uuid>.png
-    #    temp/image-upload/<job uuid>/instance-segmentation/<label uuid>.json
+    row["img_height"] = int(height)
 
     label_cols = {
         "single-label": [],
@@ -141,12 +171,20 @@ def process_image(line):
         row["validation_error"] = f"Unsupported LABEL_TYPE: {LABEL_TYPE}"
         return row
 
-    # returns a list and a str, must make sure the order of paths (if not obj detection) corresponds to png first, then meta mask map file as json
-    paths, classes_present, error_msg = create_and_save_labels(line, LABEL_TYPE, JOB_ID, FILE_BUCKET_NAME) # paths is a list, even if single element (for object detection
+    # stable seed so retries overwrite same label objects
+    stable_seed = f"{JOB_ID}|{temp_source_ref.strip()}|{LABEL_TYPE.strip()}"
+
+    paths, classes_present, error_msg = create_and_save_labels(
+        line=line,
+        label_type=LABEL_TYPE,
+        job_id=JOB_ID,
+        file_bucket_name=FILE_BUCKET_NAME,
+        stable_seed=stable_seed
+    )
 
     if error_msg:
         row["validation_status"] = "failed"
-        row["validation_error"] = f"Unable to form and save label file(s): {error_msg}"
+        row["validation_error"] = f"Unable to form/save label files: {error_msg}"
         return row
 
     if not classes_present:
@@ -154,43 +192,55 @@ def process_image(line):
         row["validation_error"] = "Empty list of classes_present"
         return row
 
-    row['classes_present'] = classes_present
-
+    row["classes_present"] = classes_present
     if LABEL_TYPE in ("single-label", "multi-label"):
         row["string_labels"] = classes_present
 
     if col_names:
         if len(paths) != len(col_names):
             row["validation_status"] = "failed"
-            row["validation_error"] = f"Expected {len(col_names)} label paths for {LABEL_TYPE}, got {len(paths)}"
+            row["validation_error"] = f"Expected {len(col_names)} label paths, got {len(paths)}"
             return row
 
         for col_name, path in zip(col_names, paths):
             row[col_name] = path
 
     row["validation_status"] = "passed"
-
     return row
 
-def main():
-    bucket, key = MANIFEST_S3_URI[5:].split("/", 1)  # remove "s3://"
+def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary: dict) -> None:
+    bucket = FILE_BUCKET_NAME
 
-    obj = read_manifest_with_retry(bucket, key)
+    jsonl_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
+    summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
+    success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
+
+    body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
+    _write_s3_text(bucket, jsonl_key, body, content_type="application/x-ndjson")
+    _write_s3_text(bucket, summary_key, json.dumps(summary), content_type="application/json")
+    # write SUCCESS last
+    _write_s3_text(bucket, success_key, "", content_type="text/plain")
+
+def main():
+    start = time.time()
+
+    shard_name = _manifest_shard_name(MANIFEST_S3_URI)
+
+    log(JOB_ID, USER, EVENT_TYPE,
+        f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
+        LOG_FIREHOSE_STREAM_NAME)
+
+    mb, mk = _parse_s3_uri(MANIFEST_S3_URI)
+    obj = read_manifest_with_retry(mb, mk)
     if not obj:
-        error_msg = f"[VAL_JOB_DEF] Could not read manifest file with bucket={bucket} key={key}"
-        logging.error(error_msg)
-        raise RuntimeError(error_msg)
+        raise RuntimeError(f"[VAL_JOB_DEF] Could not read manifest: {MANIFEST_S3_URI}")
 
     body = obj["Body"]
 
-    chunk_size = 200
-    chunk = []
+    processed_rows = []
     total = 0
     failed = 0
-    any_insert_failed = False
-    last_error = ""
 
-    # stream JSONL lines from S3
     for line_bytes in body.iter_lines():
         if not line_bytes:
             continue
@@ -198,69 +248,33 @@ def main():
         if not s:
             continue
 
-        try:
-            line = json.loads(s)
-        except Exception as e:
-            # treat malformed json line as a failed row (and keep going),
-            # or raise if you truly want all-or-nothing for a shard
-            logging.error(f"[VAL_JOB_DEF] Bad JSON line in manifest: {e}")
-            raise
-
+        line = json.loads(s)  # if malformed, raise (consistent with your current behavior)
         row = process_image(line)
+
         total += 1
         if row["validation_status"] != "passed":
             failed += 1
-
-        chunk.append(row)
-
-        if len(chunk) >= chunk_size:
-            all_failed, le = chunked_insert(
-                chunk,
-                ICEBERG_DATABASE_NAME,
-                UPLOAD_STAGING_TABLE_NAME,
-                ATHENA_WORKGROUP,
-                ATHENA_OUTPUT_S3,
-                chunk_size=chunk_size,
-            )
-            if le:
-                last_error = le
-            if all_failed:
-                any_insert_failed = True
-                break
-            chunk = []
-
-    # final flush
-    if (not any_insert_failed) and chunk:
-        all_failed, le = chunked_insert(
-            chunk,
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_WORKGROUP,
-            ATHENA_OUTPUT_S3,
-            chunk_size=chunk_size,
-        )
-        if le:
-            last_error = le
-        if all_failed:
-            any_insert_failed = True
+        processed_rows.append(row)
 
     if total == 0:
-        error_msg = f"[VAL_JOB_DEF] There are no images in {JOB_ID} for this batch job."
-        logging.error(error_msg)
-        raise RuntimeError(error_msg)
+        raise RuntimeError(f"[VAL_JOB_DEF] No images found in manifest for shard={shard_name}")
 
-    if last_error:
-        logging.error(f"[VAL_JOB_DEF] Athena insert had row failures; last_error={last_error}")
+    summary = {
+        "job_id": JOB_ID,
+        "shard_name": shard_name,
+        "label_type": LABEL_TYPE,
+        "rows_read": total,
+        "failed_rows": failed,
+        "processed_rows": len(processed_rows),
+        "manifest": MANIFEST_S3_URI,
+    }
 
-    if any_insert_failed:
-        error_msg = (
-            f"[VAL_JOB_DEF] Validation batch job failed to upload to upload_staging. "
-            f"rows_attempted={total}"
-        )
-        logging.error(error_msg)
-        raise RuntimeError(error_msg)
+    write_processed_outputs(shard_name, processed_rows, summary)
 
-    logging.info(f"[VAL_JOB_DEF] Completed processing: {total} rows written, {failed} failed validation")
+    elapsed = time.time() - start
+    log(JOB_ID, USER, EVENT_TYPE,
+        f"[VAL_JOB_DEF] done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}",
+        LOG_FIREHOSE_STREAM_NAME)
 
 if __name__ == "__main__":
     main()

@@ -62,7 +62,7 @@ def handler(event, context):
         # each element in `batch` is already a JSON string line
 
         manifest_body = ("\n".join(batch) + "\n").encode("utf-8")
-        manifest_key = f"temp/image-upload/{job_id}/batches/validation/batch-{idx:03d}.jsonl"
+        manifest_key = f"temp/image-upload/{job_id}/batches/validation-step/manifests/batch-{idx:03d}.jsonl"
 
         s3.put_object(
             Bucket=FILE_BUCKET_NAME,
@@ -79,7 +79,8 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source":data_source,
-        "manifests": manifest_uris
+        "manifests": manifest_uris,
+        "expected_count": len(json_lines)
     }
 
     msg = f"[VAL_FILE_BATCHING] Done batching {len(json_lines)} total images for image upload validation: label type = {label_type}, {IMAGES_PER_BATCH} images per batch."

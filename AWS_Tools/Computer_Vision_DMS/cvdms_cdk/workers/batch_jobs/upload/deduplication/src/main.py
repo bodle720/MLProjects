@@ -8,7 +8,6 @@ from decimal import Decimal
 from collections import defaultdict
 from datetime import datetime, date
 
-import pyarrow as pa
 import pyarrow.dataset as ds
 import s3fs
 import boto3
@@ -33,8 +32,7 @@ if not LOG_FIREHOSE_STREAM_NAME:
 if not SHA256_TABLE_NAME:
     raise RuntimeError("[DEDUP_JOB_DEF] SHA256_TABLE_NAME not set")
 
-PROCESSED_PREFIX_BASE = os.environ.get("PROCESSED_PREFIX_BASE", "temp/image-upload")
-PROCESSED_PREFIX = f"{PROCESSED_PREFIX_BASE}/{JOB_ID}/batches/deduplication-step/processed"
+PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/deduplication-step/processed"
 
 DDB_BATCH_GET_MAX = 100
 
@@ -244,7 +242,7 @@ def process_manifest(manifest):
 
     return processed_rows, summary
 
-def write_processed_outputs(job_id, shard_name, processed_rows, summary):
+def write_processed_outputs(shard_name, processed_rows, summary):
     bucket = FILE_BUCKET_NAME
     jsonl_key = f"{PROCESSED_PREFIX}/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
@@ -281,7 +279,7 @@ def main():
 
     try:
         processed_rows, summary = process_manifest(manifest)
-        write_processed_outputs(JOB_ID, shard_name, processed_rows, summary)
+        write_processed_outputs(shard_name, processed_rows, summary)
     except Exception as e:
         # ERROR LOG (one line)
         log(

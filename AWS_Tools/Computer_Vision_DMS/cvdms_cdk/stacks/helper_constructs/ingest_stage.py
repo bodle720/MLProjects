@@ -30,7 +30,9 @@ class IngestStage(Construct):
                  account: str,
                  dlq_chain_factory: Callable[[], sfn.Chain],
                  firehose_delivery_stream_name: str,
-                 firehose_delivery_stream_attr_arn: str):
+                 firehose_delivery_stream_attr_arn: str,
+                 manifest_path: str,
+                 expected_count_path: str | None = None):
 
         super().__init__(scope, construct_id)
 
@@ -47,6 +49,8 @@ class IngestStage(Construct):
         self.dlq_chain_factory = dlq_chain_factory
         self.firehose_delivery_stream_name = firehose_delivery_stream_name
         self.firehose_delivery_stream_attr_arn = firehose_delivery_stream_attr_arn
+        self.manifest_path = manifest_path
+        self.expected_count_path = expected_count_path
 
         lambda_env = {
                 "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
@@ -74,13 +78,26 @@ class IngestStage(Construct):
 
         self.apply_ingest_permissions(pre_fn)
 
+        payload_obj = {
+            "job_id.$": "$.job_id",
+            "user.$": "$.user",
+            "event_type.$": "$.event_type",
+            "label_type.$": "$.label_type",
+            "data_source.$": "$.data_source",
+            "manifests.$": self.manifest_path,
+        }
+        if self.expected_count_path:
+            payload_obj["expected_count.$"] = self.expected_count_path
+
         pre_ingest_task = tasks.LambdaInvoke(
             self, f"{stage_name}PreLambdaTask",
             lambda_function=pre_fn,
             result_path=f"$.{stage_name}PreLambdaTask",
             output_path="$",
             timeout=Duration.seconds(config.pre_ingest_lambda.timeout_sec),
-            payload_response_only=True)
+            payload_response_only=True,
+            payload=sfn.TaskInput.from_object(payload_obj)
+        )
 
         pre_ingest_task.add_catch(
             handler=self.dlq_chain_factory(),
@@ -167,7 +184,16 @@ class IngestStage(Construct):
             result_path=f"$.{stage_name}PostLambdaTask",
             output_path="$",
             timeout=Duration.seconds(config.post_ingest_lambda.timeout_sec),
-            payload_response_only=True)
+            payload_response_only=True,
+            payload=sfn.TaskInput.from_object({
+                "job_id.$": "$.job_id",
+                "user.$": "$.user",
+                "event_type.$": "$.event_type",
+                "label_type.$": "$.label_type",
+                "data_source.$": "$.data_source",
+                "pre.$": f"$.{stage_name}PreLambdaTask"
+            })
+        )
 
         post_ingest_task.add_catch(
             handler=self.dlq_chain_factory(),

@@ -23,7 +23,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 # Where workers write processed outputs
 PROCESSED_PREFIX_BASE = os.environ.get("PROCESSED_PREFIX_BASE", "temp/image-upload")
 # e.g. temp/image-upload/{job_id}/batches/registration/processed
-PROCESSED_SUFFIX = os.environ.get("PROCESSED_SUFFIX", "batches/registration/processed")
+PROCESSED_SUFFIX = os.environ.get("PROCESSED_SUFFIX", "batches/registration-step/processed")
 
 # Label table names (not provided via env in your container_env; hardcode to match schema)
 CANONICAL_BBOX_TABLE = "canonical_bounding_boxes"

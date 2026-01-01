@@ -73,22 +73,43 @@ CONFIG = AppConfig(
             file="batch_jobs/upload/registration/Dockerfile"
         )
     ),
-    dedup_ingest=IngestStageConfig(
+    validation_ingest=IngestStageConfig(
         pre_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/ingest",
+            path="workers/lambdas/upload/ingest/validation",
+            handler="validation_pre.handler",
+            memory_size=512,
+            timeout_sec=900
+        ),
+        map_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/ingest/validation",
+            handler="validation_map.handler",
+            memory_size=512,
+            timeout_sec=900
+        ),
+        map_max_concurrency=5,
+        post_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/ingest/validation",
+            handler="validation_post.handler",
+            memory_size=512,
+            timeout_sec=900
+        )
+    ),
+    deduplication_ingest=IngestStageConfig(
+        pre_ingest_lambda=LambdaConfig(
+            path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_pre.handler",
             memory_size=512,
             timeout_sec=900
         ),
         map_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/ingest",
+            path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_map.handler",
             memory_size=512,
             timeout_sec=900
         ),
         map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/ingest",
+            path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_post.handler",
             memory_size=512,
             timeout_sec=900
@@ -96,20 +117,20 @@ CONFIG = AppConfig(
     ),
     registration_ingest=IngestStageConfig(
         pre_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/ingest",
+            path="workers/lambdas/upload/ingest/registration",
             handler="registration_pre.handler",
             memory_size=512,
             timeout_sec=900
         ),
         map_ingest_lambda=LambdaConfig(
-                    path="workers/lambdas/upload/ingest",
+                    path="workers/lambdas/upload/ingest/registration",
                     handler="registration_map.handler",
                     memory_size=512,
                     timeout_sec=900
                 ),
         map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
-            path="workers/lambdas/upload/ingest",
+            path="workers/lambdas/upload/ingest/registration",
             handler="registration_post.handler",
             memory_size=512,
             timeout_sec=900
