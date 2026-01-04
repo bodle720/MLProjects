@@ -5,7 +5,7 @@ import logging
 from typing import Dict, List
 
 from common.utils import log, chunked_insert
-from common.ingest import _iter_rows_from_jsonl_keys
+from common.ingest import iter_rows_from_jsonl_keys
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -26,7 +26,6 @@ CANONICAL_SEMANTIC_TABLE = "canonical_semantic_masks"
 CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
 LABEL_TABLES: List[str] = [CANONICAL_BBOX_TABLE, CANONICAL_SEMANTIC_TABLE, CANONICAL_INSTANCE_TABLE]
 
-
 def _flush_chunk(rows: List[Dict], table_name: str, task_name: str) -> None:
     all_failed, last_error = chunked_insert(
         rows,
@@ -41,7 +40,6 @@ def _flush_chunk(rows: List[Dict], table_name: str, task_name: str) -> None:
             f"[{task_name}] chunked_insert failures table={table_name}; "
             f"all_failed={all_failed}, last_error={last_error}"
         )
-
 
 def handler(event, context):
     """
@@ -85,7 +83,7 @@ def handler(event, context):
     # 1) upload_staging
     try:
         chunk: List[Dict] = []
-        for row in _iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key]):
             chunk.append(row)
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk, UPLOAD_STAGING_TABLE_NAME, "REG_INGEST_MAP.upload_staging")
@@ -102,7 +100,7 @@ def handler(event, context):
     # 2) canonical_imagery
     try:
         chunk = []
-        for row in _iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [imagery_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [imagery_key]):
             chunk.append(row)
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk, CANONICAL_IMAGERY_TABLE_NAME, "REG_INGEST_MAP.canonical_imagery")
@@ -120,7 +118,7 @@ def handler(event, context):
     try:
         per_table_chunks: Dict[str, List[Dict]] = {t: [] for t in LABEL_TABLES}
 
-        for row in _iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [labels_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [labels_key]):
             table = row.get("__table")
             if not table:
                 raise RuntimeError(f"[REG_INGEST_MAP] label row missing __table routing field: {row}")

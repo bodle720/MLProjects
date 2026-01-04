@@ -2,7 +2,7 @@
 import os
 import json
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import boto3
 
@@ -11,12 +11,14 @@ from common.utils import (
     s3_list_keys,
     delete_iceberg_partition_rows,
 )
-from common.ingest import _s3_read_json
+
+from common.utils import parse_s3_uri
+from common.ingest import s3_read_json
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Env
+# Env vars defined in stack code
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
@@ -26,20 +28,13 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 s3 = boto3.client("s3")
 
-def _parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
-    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or s3_uri.count("/") < 3:
-        raise ValueError(f"Invalid s3 uri: {s3_uri}")
-    b, k = s3_uri[5:].split("/", 1)
-    return b, k
-
-
 def _count_manifest_lines(manifests: List[str]) -> int:
     """
     Fallback: Count non-empty lines across all batching manifests (JSONL).
     """
     total = 0
     for uri in manifests:
-        b, k = _parse_s3_uri(uri)
+        b, k = parse_s3_uri(uri)
         obj = s3.get_object(Bucket=b, Key=k)
         body = obj["Body"]
         for line in body.iter_lines():
@@ -48,7 +43,6 @@ def _count_manifest_lines(manifests: List[str]) -> int:
             if line.decode("utf-8-sig").strip():
                 total += 1
     return total
-
 
 def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
@@ -73,7 +67,6 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             seen.add(s)
             out.append(s)
     return out
-
 
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -121,7 +114,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = _s3_read_json(bucket, summary_key)
+        summary = s3_read_json(bucket, summary_key)
         rows_read = int(summary.get("rows_read", 0))
         failed_rows = int(summary.get("failed_rows", 0))
         processed_rows = int(summary.get("processed_rows", 0))
@@ -148,7 +141,6 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_failed_rows": total_failed_rows,
         "processed_prefix": processed_prefix,
     }
-
 
 def handler(event, context):
     try:

@@ -10,7 +10,7 @@ from common.utils import (
     athena_count_job_rows,
     delete_iceberg_partition_rows,
 )
-from common.ingest import _s3_read_json
+from common.ingest import s3_read_json
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -26,12 +26,11 @@ CANONICAL_IMAGERY_TABLE_NAME = os.environ.get("CANONICAL_IMAGERY_TABLE_NAME", "c
 
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-# Label table names (must match your schema + writer’s __table routing)
+# Label table names (must match the schema + writer’s __table routing)
 CANONICAL_BBOX_TABLE = "canonical_bounding_boxes"
 CANONICAL_SEMANTIC_TABLE = "canonical_semantic_masks"
 CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
 LABEL_TABLES: List[str] = [CANONICAL_BBOX_TABLE, CANONICAL_SEMANTIC_TABLE, CANONICAL_INSTANCE_TABLE]
-
 
 def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     expected: List[str] = []
@@ -55,7 +54,6 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             seen.add(s)
             out.append(s)
     return out
-
 
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -148,7 +146,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = _s3_read_json(bucket, s)
+        summary = s3_read_json(bucket, s)
         rows_read = int(summary.get("rows_read", 0))
         canon_im_rows = int(summary.get("canonical_imagery_rows", 0))
         canon_lbl_rows = int(summary.get("canonical_label_rows", 0))
@@ -177,7 +175,6 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_canon_label_rows": total_canon_label_rows,
         "processed_prefix": processed_prefix,
     }
-
 
 def handler(event, context):
     """

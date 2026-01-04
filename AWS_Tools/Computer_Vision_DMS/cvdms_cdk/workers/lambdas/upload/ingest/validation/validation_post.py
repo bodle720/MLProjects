@@ -7,7 +7,6 @@ from common.utils import (
     log,
     athena_count_job_rows,
 )
-# NOTE: no CTAS drop needed for validation
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -19,7 +18,6 @@ ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-
 
 def handler(event, context):
     """

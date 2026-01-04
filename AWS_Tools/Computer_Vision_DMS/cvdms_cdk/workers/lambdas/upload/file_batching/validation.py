@@ -1,7 +1,5 @@
 import os
-
 import boto3
-
 from common.utils import log
 
 s3 = boto3.client("s3")

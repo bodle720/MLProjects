@@ -1,6 +1,6 @@
 import math
 import time
-from datetime import datetime, date, timezone
+from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,9 +65,6 @@ def split_ext(filename: str) -> Tuple[str, str]:
         return filename, ""
     stem, ext = filename.rsplit(".", 1)
     return stem, ext.lower()
-
-def now_utc_timestamp_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 def s3_copy_with_retry(src_bucket: str, src_key: str, dst_bucket: str, dst_key: str,
                        retries: int = 6, base_delay: float = 0.5) -> None:
@@ -186,6 +183,7 @@ def build_canonical_imagery_row(data_source: str,
                                 row: Dict[str, Any],
                                 canonical_image_uri: str,
                                 label_type: str,
+                                registration_time: str,
                                 label_uuid: Optional[str]) -> Dict[str, Any]:
     image_id = row.get("image_id")
     if not image_id:
@@ -200,7 +198,7 @@ def build_canonical_imagery_row(data_source: str,
         "num_channels": row.get("num_channels"),
         "dtype": row.get("dtype"),
         "file_size_mb": row.get("file_size_mb"),
-        "uploaded_at": now_utc_timestamp_str(),   # registration time
+        "uploaded_at": registration_time,
         "data_source": data_source,
         "sha256_hash": row.get("sha256_hash"),
         "string_labels": None,

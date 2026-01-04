@@ -193,6 +193,7 @@ class UploadClient:
                 "event_type": self.event_type,
                 "label_type": label_type,
                 "data_source":data_source,
+                "registration_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "original_manifest_s3_uri": f"s3://{self.file_bucket_name}/{manifest_key}"
             }
             job_json_key = f"{prefix}/job.json"

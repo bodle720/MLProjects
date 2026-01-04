@@ -6,9 +6,9 @@ import logging
 from common.utils import (
     log,
     athena_count_job_rows,
-    wait_for_athena,
+    wait_for_athena
 )
-from common.ingest import _drop_ctas_table_if_exists
+from common.ingest import drop_ctas_table_if_exists
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -20,7 +20,6 @@ ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-
 
 def handler(event, context):
     """
@@ -103,7 +102,7 @@ def handler(event, context):
 
     # 2) Drop CTAS temp table (safe no-op if not present)
     try:
-        drop_qid = _drop_ctas_table_if_exists(
+        drop_qid = drop_ctas_table_if_exists(
             ICEBERG_DATABASE_NAME,
             ctas_table_name,
             ATHENA_OUTPUT_S3,

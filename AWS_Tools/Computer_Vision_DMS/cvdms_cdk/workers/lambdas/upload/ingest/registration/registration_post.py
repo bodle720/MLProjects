@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict
 
 from common.utils import log, athena_count_job_rows, wait_for_athena
-from common.ingest import _drop_ctas_table_if_exists
+from common.ingest import drop_ctas_table_if_exists
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -17,12 +17,10 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-
 def _require(d: Dict[str, Any], key: str, task: str) -> Any:
     if key not in d:
         raise RuntimeError(f"[{task}] Missing key '{key}' in payload: {json.dumps(d)}")
     return d[key]
-
 
 def handler(event, context):
     """
@@ -76,7 +74,7 @@ def handler(event, context):
         ctas_table_name = f"reg_export_{sanitized_job_id}"
 
     try:
-        drop_qid = _drop_ctas_table_if_exists(
+        drop_qid = drop_ctas_table_if_exists(
             ICEBERG_DATABASE_NAME,
             ctas_table_name,
             ATHENA_OUTPUT_S3,
@@ -96,8 +94,8 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[{task}] Completed successfully for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
-    # Note: Map results are discarded in your construct, so we can’t compute inserted_* totals here.
-    # If you later keep Map results, you can aggregate them here.
+    # Note: Map results are discarded in the construct, so we can’t compute inserted_* totals here.
+    # If we later keep Map results, we can aggregate them here.
     return {
         "job_id": job_id,
         "reingest_done": True,

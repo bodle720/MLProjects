@@ -5,7 +5,7 @@ import logging
 from typing import Dict, List
 
 from common.utils import log, chunked_insert
-from common.ingest import _iter_rows_from_jsonl_keys
+from common.ingest import iter_rows_from_jsonl_keys
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -19,7 +19,6 @@ UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 CHUNK_SIZE = int(os.environ.get("INGEST_CHUNK_SIZE", "200"))
-
 
 def handler(event, context):
     """
@@ -60,7 +59,7 @@ def handler(event, context):
     inserted_rows = 0
     try:
         # Stream rows from this shard’s processed jsonl (already validated/augmented)
-        rows_iter = _iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key])
+        rows_iter = iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key])
 
         chunk: List[Dict] = []
         for r in rows_iter:

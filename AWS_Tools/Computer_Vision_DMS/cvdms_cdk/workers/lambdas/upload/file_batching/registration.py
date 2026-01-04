@@ -5,6 +5,7 @@ import math
 import boto3
 
 from common.utils import log, wait_for_athena, delete_s3_prefix
+from common.ingest import drop_ctas_table_if_exists
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -48,17 +49,6 @@ def _read_count_from_athena_result(qid: str) -> int:
         return int(val)
     except Exception:
         return 0
-
-def _drop_ctas_table_if_exists(job_id: str) -> str:
-    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
-    sql = f"DROP TABLE IF EXISTS {table_name}"
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )
-    return resp["QueryExecutionId"]
 
 def _choose_target_rows_per_shard(total_rows: int) -> int:
     usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
@@ -223,7 +213,14 @@ def handler(event, context):
     )
 
     # 1) CTAS export partitioned by shard_id
-    drop_qid = _drop_ctas_table_if_exists(job_id)
+    sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
+    table_name = f"reg_export_{sanitized_job_id}"
+
+    drop_qid = drop_ctas_table_if_exists(ICEBERG_DATABASE_NAME,
+                                         table_name,
+                                         ATHENA_OUTPUT_S3,
+                                         ATHENA_WORKGROUP)
+
     drop_res = wait_for_athena(drop_qid, poll=3.0, timeout=900)
     if drop_res["state"] != "SUCCEEDED":
         resp = drop_res["metadata"]

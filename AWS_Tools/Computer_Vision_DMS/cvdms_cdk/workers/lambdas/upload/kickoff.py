@@ -115,6 +115,7 @@ def handler(event, context):
         event_type = job_data.get("event_type", "IMAGE_UPLOAD")
         label_type = job_data["label_type"]
         data_source = job_data["data_source"]
+        registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
         log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
@@ -160,6 +161,7 @@ def handler(event, context):
                 "label_type": label_type,
                 "data_source": str(data_source).lower(),
                 "original_manifest_s3_uri": original_manifest_s3_uri,
+                "registration_time": registration_time
             })
         )
     except Exception as e:

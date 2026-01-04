@@ -10,7 +10,7 @@ from common.utils import (
     athena_count_job_rows,
     delete_iceberg_partition_rows,
 )
-from common.ingest import _s3_read_json
+from common.ingest import s3_read_json
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -108,7 +108,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = _s3_read_json(bucket, summary_key)
+        summary = s3_read_json(bucket, summary_key)
         rows_read = int(summary.get("rows_read", 0))
         processed_rows = int(summary.get("processed_rows", 0))
 

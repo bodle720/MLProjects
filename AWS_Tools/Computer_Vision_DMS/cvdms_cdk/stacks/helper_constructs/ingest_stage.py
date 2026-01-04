@@ -94,7 +94,7 @@ class IngestStage(Construct):
             lambda_function=pre_fn,
             result_path=f"$.{stage_name}PreLambdaTask",
             output_path="$",
-            timeout=Duration.seconds(config.pre_ingest_lambda.timeout_sec),
+            task_timeout=sfn.Timeout.duration(Duration.seconds(config.pre_ingest_lambda.timeout_sec)),
             payload_response_only=True,
             payload=sfn.TaskInput.from_object(payload_obj)
         )
@@ -126,7 +126,7 @@ class IngestStage(Construct):
             lambda_function=map_fn,
             result_path=sfn.JsonPath.DISCARD,
             output_path="$",
-            timeout=Duration.seconds(config.map_ingest_lambda.timeout_sec),
+            task_timeout=sfn.Timeout.duration(Duration.seconds(config.map_ingest_lambda.timeout_sec)),
             payload_response_only=True)
 
         map_state = sfn.Map(
@@ -160,7 +160,7 @@ class IngestStage(Construct):
             result_path="$.errorInfo",
         )
 
-        map_state.iterator(sfn.Chain.start(map_task))
+        map_state.item_processor(map_task)
 
         # --------------------------------------
         # Form the 'post' lambda task.
@@ -183,7 +183,7 @@ class IngestStage(Construct):
             lambda_function=post_fn,
             result_path=f"$.{stage_name}PostLambdaTask",
             output_path="$",
-            timeout=Duration.seconds(config.post_ingest_lambda.timeout_sec),
+            task_timeout=sfn.Timeout.duration(Duration.seconds(config.post_ingest_lambda.timeout_sec)),
             payload_response_only=True,
             payload=sfn.TaskInput.from_object({
                 "job_id.$": "$.job_id",

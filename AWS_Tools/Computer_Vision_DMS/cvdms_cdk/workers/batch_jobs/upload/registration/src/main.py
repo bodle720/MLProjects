@@ -31,6 +31,7 @@ DATA_SOURCE = os.environ.get("DATA_SOURCE", "unknown")
 EVENT_TYPE = os.environ.get("EVENT_TYPE", "unknown")
 FILE_BUCKET_NAME = os.environ.get("FILE_BUCKET_NAME")
 LOG_FIREHOSE_STREAM_NAME = os.environ.get("LOG_FIREHOSE_STREAM_NAME")
+REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
 if not MANIFEST_S3_URI:
     raise RuntimeError("[REG_JOB_DEF] MANIFEST_S3_URI not set")
@@ -192,7 +193,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
 
             # Build canonical imagery + label table rows
             canon_img_row = build_canonical_imagery_row(
-                DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, label_uuid
+                DATA_SOURCE, row, canonical_image_uri, LABEL_TYPE, REGISTRATION_TIME, label_uuid
             )
 
             label_row = None

@@ -489,3 +489,9 @@ def athena_count_job_rows(job_id: str,
     val = rows[1]["Data"][0].get("VarCharValue")
 
     return int(val) if val is not None else 0
+
+def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or s3_uri.count("/") < 3:
+        raise ValueError(f"Invalid s3 uri: {s3_uri}")
+    b, k = s3_uri[5:].split("/", 1)
+    return b, k

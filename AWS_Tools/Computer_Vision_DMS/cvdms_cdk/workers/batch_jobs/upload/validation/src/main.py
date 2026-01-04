@@ -6,13 +6,12 @@ import json
 import time
 import hashlib
 import logging
-from datetime import datetime, timezone
 
 import boto3
 from PIL import Image
 from botocore.exceptions import ClientError
 
-from common.utils import log
+from common.utils import log, parse_s3_uri
 from helpers import read_manifest_with_retry, infer_dtype, create_and_save_labels, stable_uuid5
 
 # Env Variables from upload stack
@@ -26,6 +25,7 @@ USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
+REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processed"
 
@@ -34,14 +34,8 @@ s3 = boto3.client("s3")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
-    if not isinstance(s3_uri, str) or not s3_uri.startswith("s3://") or s3_uri.count("/") < 3:
-        raise ValueError(f"Invalid s3 uri: {s3_uri}")
-    b, k = s3_uri[5:].split("/", 1)
-    return b, k
-
 def _manifest_shard_name(manifest_s3_uri: str) -> str:
-    _, key = _parse_s3_uri(manifest_s3_uri)
+    _, key = parse_s3_uri(manifest_s3_uri)
     fname = key.rsplit("/", 1)[-1]
     # batch-001.jsonl -> batch-001
     m = re.match(r"^(.*)\.jsonl$", fname)
@@ -67,7 +61,7 @@ def process_image(line: dict) -> dict:
             "num_channels": None,
             "dtype": None,
             "file_size_mb": 0.0,
-            "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "uploaded_at": REGISTRATION_TIME,
             "data_source": DATA_SOURCE,
             "sha256_hash": None,
             "string_labels": None,
@@ -99,7 +93,7 @@ def process_image(line: dict) -> dict:
         "num_channels": None,
         "dtype": None,
         "file_size_mb": 0.0,
-        "uploaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_at": REGISTRATION_TIME,
         "data_source": DATA_SOURCE,
         "sha256_hash": None,
         "string_labels": None,
@@ -120,7 +114,7 @@ def process_image(line: dict) -> dict:
 
     # Fetch image bytes from source-ref
     try:
-        bucket, key = _parse_s3_uri(temp_source_ref)
+        bucket, key = parse_s3_uri(temp_source_ref)
         obj = s3.get_object(Bucket=bucket, Key=key)
     except ClientError as e:
         row["validation_status"] = "failed"
@@ -230,7 +224,7 @@ def main():
         f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
         LOG_FIREHOSE_STREAM_NAME)
 
-    mb, mk = _parse_s3_uri(MANIFEST_S3_URI)
+    mb, mk = parse_s3_uri(MANIFEST_S3_URI)
     obj = read_manifest_with_retry(mb, mk)
     if not obj:
         raise RuntimeError(f"[VAL_JOB_DEF] Could not read manifest: {MANIFEST_S3_URI}")
@@ -248,7 +242,7 @@ def main():
         if not s:
             continue
 
-        line = json.loads(s)  # if malformed, raise (consistent with your current behavior)
+        line = json.loads(s)  # if malformed, raise (consistent with the current behavior)
         row = process_image(line)
 
         total += 1

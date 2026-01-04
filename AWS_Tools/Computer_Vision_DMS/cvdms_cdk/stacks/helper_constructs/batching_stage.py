@@ -310,7 +310,8 @@ class BatchingStage(Construct):
             "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
             "AWS_REGION": region,
-            "AWS_DEFAULT_REGION": region
+            "AWS_DEFAULT_REGION": region,
+            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time")
         }
         if extra_container_env:
             container_env.update(extra_container_env)
@@ -333,7 +334,8 @@ class BatchingStage(Construct):
                 "user.$": "$.user",
                 "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
-                "data_source.$": "$.data_source"
+                "data_source.$": "$.data_source",
+                "registration_time.$": "$.registration_time"
         }
 
         if extra_map_state_params:
@@ -354,8 +356,7 @@ class BatchingStage(Construct):
             result_path="$.errorInfo",
         )
 
-        per_item = sfn.Chain.start(batch_task)
-        map_state.iterator(per_item)
+        map_state.item_processor(batch_task)
 
         self.batching_task = batching_task
         self.map_state = map_state

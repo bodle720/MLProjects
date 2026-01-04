@@ -271,7 +271,7 @@ def handler(event, context):
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
-    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows} rows", LOG_FIREHOSE_STREAM_NAME)
 
     # 1) choose prefix length P dynamically
     prefix_len, target_rows = _choose_prefix_length(
