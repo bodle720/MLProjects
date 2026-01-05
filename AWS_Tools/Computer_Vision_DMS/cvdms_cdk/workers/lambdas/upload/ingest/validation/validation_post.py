@@ -5,7 +5,7 @@ import logging
 
 from common.utils import (
     log,
-    athena_count_job_rows,
+    athena_count_job_rows
 )
 
 logger = logging.getLogger()

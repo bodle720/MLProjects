@@ -82,6 +82,7 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
 
     tmp_table = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
+
     num_shards = max(1, num_shards)
 
     sql = f"""
@@ -137,11 +138,11 @@ def _list_export_files_by_shard(export_prefix: str):
     Returns dict: {shard_id: [s3://.../key, ...], ...}
     """
     paginator = s3.get_paginator("list_objects_v2")
-    prefix = export_prefix.rstrip("/") + "/"
     files_by_shard = {}
     all_keys = []
+    export_prefix = export_prefix.rstrip("/") + "/"
 
-    for page in paginator.paginate(Bucket=FILE_BUCKET_NAME, Prefix=prefix):
+    for page in paginator.paginate(Bucket=FILE_BUCKET_NAME, Prefix=export_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             all_keys.append(key)
@@ -169,7 +170,7 @@ def _write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -
     # Keep same manifest shape as your other stages for reuse in map workers:
     # shard_prefix is now shard_id
     manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
-    manifest_key = f"{manifest_prefix.rstrip('/')}/manifest-shard-{shard_name}.json"
+    manifest_key = f"{manifest_prefix}manifest-shard-{shard_name}.json"
     s3.put_object(
         Bucket=FILE_BUCKET_NAME,
         Key=manifest_key,
@@ -190,8 +191,9 @@ def handler(event, context):
 
     log(job_id, user, event_type, f"[REG_FILE_BATCHING] Starting registration batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
-    export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export"
-    manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests"
+    export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export/"
+    manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests/"
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix)
 
     # 0) COUNT(*)
     count_qid = _start_athena_count(job_id)

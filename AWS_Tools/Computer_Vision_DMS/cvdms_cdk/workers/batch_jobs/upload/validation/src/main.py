@@ -46,14 +46,18 @@ def _write_s3_text(bucket: str, key: str, text: str, content_type: str) -> None:
     # Safety: put_object limit is 5GB, but you may have your own guard; 200 rows should be small.
     s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
-def process_image(line: dict) -> dict:
+def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     # derive deterministic image uuid from job + source-ref
     temp_source_ref = line.get("source-ref")
+
+    # Deterministic per-occurrence ID (unique even for duplicates)
+    image_id = stable_uuid5(f"{JOB_ID}|{shard_name}|{line_idx}")
+
     if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://"):
         # malformed line -> failed row
         return {
             "job_id": JOB_ID,
-            "image_id": stable_uuid5(f"{JOB_ID}:MISSING_SOURCE_REF:{json.dumps(line, sort_keys=True)[:200]}"),
+            "image_id": image_id,
             "temp_source_ref": temp_source_ref,
             "img_type": None,
             "img_height": None,
@@ -80,12 +84,10 @@ def process_image(line: dict) -> dict:
             "matched_image_id": None,
         }
 
-    image_uuid = stable_uuid5(f"{JOB_ID}:{temp_source_ref}")
-
     # Defaults for upload_staging row
     row = {
         "job_id": JOB_ID,
-        "image_id": image_uuid,
+        "image_id": image_id,
         "temp_source_ref": temp_source_ref,
         "img_type": None,
         "img_height": None,
@@ -126,7 +128,8 @@ def process_image(line: dict) -> dict:
 
     buf = io.BytesIO(data)
     buf.seek(0)
-    row["sha256_hash"] = hashlib.sha256(buf.read()).hexdigest()
+    sha = hashlib.sha256(buf.read()).hexdigest()
+    row["sha256_hash"] = sha
     buf.seek(0)
 
     # Open image
@@ -166,7 +169,7 @@ def process_image(line: dict) -> dict:
         return row
 
     # stable seed so retries overwrite same label objects
-    stable_seed = f"{JOB_ID}|{temp_source_ref.strip()}|{LABEL_TYPE.strip()}"
+    stable_seed = f"{JOB_ID}|{shard_name}|{line_idx}|{LABEL_TYPE.strip()}"
 
     paths, classes_present, error_msg = create_and_save_labels(
         line=line,
@@ -235,7 +238,7 @@ def main():
     total = 0
     failed = 0
 
-    for line_bytes in body.iter_lines():
+    for line_idx, line_bytes in enumerate(body.iter_lines()):
         if not line_bytes:
             continue
         s = line_bytes.decode("utf-8-sig").strip()
@@ -243,7 +246,7 @@ def main():
             continue
 
         line = json.loads(s)  # if malformed, raise (consistent with the current behavior)
-        row = process_image(line)
+        row = process_image(line, shard_name=shard_name, line_idx=line_idx)
 
         total += 1
         if row["validation_status"] != "passed":

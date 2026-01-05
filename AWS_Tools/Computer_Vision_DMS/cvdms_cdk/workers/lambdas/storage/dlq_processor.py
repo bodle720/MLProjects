@@ -4,13 +4,14 @@ import logging
 from typing import Dict, List, Iterable, Tuple, Optional
 
 import boto3
+from botocore.exceptions import ClientError
 
 from common.utils import (
     log,
     update_job_status,
     release_lock,
     delete_s3_prefix,
-    wait_for_athena,
+    wait_for_athena
 )
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
@@ -21,6 +22,7 @@ LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 
 # canonical table names (stable per your schema)
 CANONICAL_IMAGERY_TABLE = "canonical_imagery"
@@ -30,6 +32,7 @@ CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
 
 athena = boto3.client("athena")
 s3 = boto3.client("s3")
+dynamodb = boto3.client("dynamodb")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -105,6 +108,57 @@ def _athena_fetch_all_rows(qid: str) -> List[Dict[str, Optional[str]]]:
             break
 
     return rows_out
+
+def _get_job_sha256s(job_id: str) -> List[str]:
+    safe_job = _escape_sql_string(job_id)
+    db = ICEBERG_DATABASE_NAME
+    t = UPLOAD_STAGING_TABLE_NAME
+
+    sql = f"""
+    SELECT sha256_hash
+    FROM "{db}"."{t}"
+    WHERE job_id = '{safe_job}'
+      AND registration_status = 'passed'
+      AND sha256_hash IS NOT NULL
+    """
+    qid = _athena_query(sql, poll=2.0, timeout=900)
+    rows = _athena_fetch_all_rows(qid)
+    out = []
+    for r in rows:
+        v = r.get("sha256_hash")
+        if v:
+            out.append(v)
+    # dedupe preserve order
+    seen = set()
+    uniq = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+def _delete_sha256_entries_for_job(job_id: str, shas: List[str]) -> tuple[int, int]:
+    deleted = 0
+    skipped = 0
+
+    for sha in shas:
+        try:
+            dynamodb.delete_item(
+                TableName=SHA256_TABLE_NAME,
+                Key={"sha256": {"S": sha}},
+                ConditionExpression="job_id = :j",
+                ExpressionAttributeValues={":j": {"S": job_id}},
+            )
+            deleted += 1
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                # either doesn't exist or belongs to some other job => don't delete
+                skipped += 1
+                continue
+            raise
+
+    return deleted, skipped
 
 def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
     """
@@ -297,18 +351,14 @@ def handler(event, context):
         prefix = f"temp/image-upload/{job_id}/"
         try:
             delete_s3_prefix(FILE_BUCKET_NAME, prefix)
-            temp_delete_success = True
             log(job_id, user, event_type, "[DLQ_PROCESSOR] Deleted temp s3 prefix", LOG_FIREHOSE_STREAM_NAME)
         except Exception as e:
-            canonical_cleanup_success = False
             log(job_id, user, event_type, "[DLQ_PROCESSOR] Temp S3 cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
 
         # 2) Roll back canonical writes (Iceberg + S3) best-effort
-        #    We DO NOT delete upload_staging anymore.
         try:
             registered_rows = _get_registered_upload_rows(job_id)
         except Exception as e:
-            canonical_cleanup_success = False
             log(job_id, user, event_type, "[DLQ_PROCESSOR] Failed querying upload_staging for rollback targets", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
             registered_rows = []
 
@@ -352,7 +402,6 @@ def handler(event, context):
                     _delete_iceberg_by_image_ids(CANONICAL_INSTANCE_TABLE, image_ids)
                     log(job_id, user, event_type, f"[DLQ_PROCESSOR] Deleted canonical iceberg rows for {len(image_ids)} image_id(s)", LOG_FIREHOSE_STREAM_NAME)
                 except Exception as e:
-                    canonical_cleanup_success = False
                     log(job_id, user, event_type, "[DLQ_PROCESSOR] Canonical Iceberg cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
 
                 # 2b) delete canonical s3 objects
@@ -368,16 +417,13 @@ def handler(event, context):
                     deleted_est, errors = _delete_s3_keys_best_effort(FILE_BUCKET_NAME, uniqk, batch_size=1000)
                     msg = f"[DLQ_PROCESSOR] Deleted canonical S3 objects: attempted={len(uniqk)} deleted_est={deleted_est} errors={errors}"
                     if errors:
-                        canonical_cleanup_success = False
                         log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME, warning="Some canonical S3 deletes reported errors")
                     else:
                         log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
                 except Exception as e:
-                    canonical_cleanup_success = False
                     log(job_id, user, event_type, "[DLQ_PROCESSOR] Canonical S3 cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
 
             except Exception as e:
-                canonical_cleanup_success = False
                 log(job_id, user, event_type, "[DLQ_PROCESSOR] Rollback orchestration failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         else:
             log(job_id, user, event_type, "[DLQ_PROCESSOR] No registration-passed rows found; skipping canonical rollback", LOG_FIREHOSE_STREAM_NAME)
@@ -397,7 +443,18 @@ def handler(event, context):
         except Exception as e:
             log(job_id, user, event_type, "[DLQ_PROCESSOR] Updating job status FAILED", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
 
-        # 4) Release global lock (keep this)
+        # 4) Remove any registered hashes in the hash table if error occurred after registration
+        try:
+            shas = _get_job_sha256s(job_id)
+            d, s = _delete_sha256_entries_for_job(job_id, shas)
+            log(job_id, user, event_type,
+                f"[DLQ_PROCESSOR] SHA256 rollback: deleted={d} skipped={s} candidates={len(shas)}",
+                LOG_FIREHOSE_STREAM_NAME)
+        except Exception as e:
+            log(job_id, user, event_type, "[DLQ_PROCESSOR] SHA256 rollback failed",
+                LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+
+        # 5) Release global lock (keep this)
         try:
             release_success, release_msg = release_lock(
                 job_id,

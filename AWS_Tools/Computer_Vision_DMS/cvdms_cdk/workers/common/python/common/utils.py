@@ -3,7 +3,7 @@ import json
 import math
 import logging
 from decimal import Decimal
-from typing import List
+from typing import List, Sequence
 from datetime import datetime, timezone
 
 import boto3
@@ -334,81 +334,168 @@ def _row_type_summary(r: dict, cols: list[str]) -> str:
         parts.append(f"{c}={type(v).__name__}")
     return ", ".join(parts)
 
+def _run_athena(sql: str, op: str, athena_output_s3: str, athena_workgroup: str) -> None:
+    qid = athena.start_query_execution(
+        QueryString=sql,
+        ResultConfiguration={"OutputLocation": athena_output_s3},
+        WorkGroup=athena_workgroup
+    )["QueryExecutionId"]
+
+    res = wait_for_athena(qid)
+    if res["state"] != "SUCCEEDED":
+        reason = _athena_error_details(qid)
+        raise RuntimeError(f"{op} failed qid={qid}, reason={reason}")
+
+def _table_columns(table_name: str) -> list[str]:
+    if table_name == "upload_staging":
+        return UPLOAD_STAGING_COLS
+    if table_name == "canonical_imagery":
+        return CANONICAL_IMAGERY_COLS
+    if table_name == "canonical_bounding_boxes":
+        return CANONICAL_BBOX_COLS
+    if table_name == "canonical_semantic_masks":
+        return CANONICAL_SEMANTIC_COLS
+    if table_name == "canonical_instance_annotations":
+        return CANONICAL_INSTANCE_COLS
+    raise ValueError(f"Table name not recognized: {table_name}")
+
+
+def _table_key_columns(table_name: str) -> list[str]:
+    """
+    Key columns used for idempotent delete-then-insert.
+    Note: Iceberg/Athena doesn't enforce PK uniqueness, so we implement "upsert" via delete-by-key.
+    """
+    if table_name == "upload_staging":
+        # scoped by job_id + image_id (and image_id is already job-scoped in your current scheme)
+        return ["job_id", "image_id"]
+    if table_name == "canonical_imagery":
+        return ["image_id"]
+    if table_name == "canonical_bounding_boxes":
+        return ["bbox_annotation_id"]
+    if table_name == "canonical_semantic_masks":
+        return ["semantic_mask_id"]
+    if table_name == "canonical_instance_annotations":
+        return ["instance_annotation_id"]
+    raise ValueError(f"Table name not recognized: {table_name}")
+
+def _build_insert_sql(batch: list[dict], table: str, columns: list[str]) -> str:
+    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raise TypeError("columns must be a list[str]")
+
+    values_clause = []
+    for r in batch:
+        values = [to_sql_value(r, c) for c in columns]
+        values_clause.append("(" + ", ".join(values) + ")")
+
+    return f"INSERT INTO {table} ({', '.join(columns)}) VALUES " + ", ".join(values_clause)
+
+def _build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str]) -> str:
+    """
+    Builds a targeted delete statement for the IDs in this batch.
+    - upload_staging: DELETE WHERE job_id='..' AND image_id IN (...)
+    - other tables:   DELETE WHERE <id_col> IN (...)
+    """
+    if not batch:
+        raise ValueError("batch is empty")
+    if not isinstance(key_cols, list) or not all(isinstance(c, str) for c in key_cols):
+        raise TypeError("key_cols must be a list[str]")
+
+    # Special case: upload_staging uses job_id + image_id
+    if key_cols == ["job_id", "image_id"]:
+        job_id = batch[0].get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise RuntimeError("delete-then-insert(upload_staging): missing/invalid job_id in batch[0]")
+
+        safe_job_id = _escape_sql_string(job_id.strip())
+
+        # Collect unique image_ids
+        seen = set()
+        uniq_ids: list[str] = []
+        for r in batch:
+            iid = r.get("image_id")
+
+            if r.get("job_id") != job_id:
+                raise RuntimeError("delete-then-insert(upload_staging): mixed job_id in batch")
+
+            if not isinstance(iid, str) or not iid.strip():
+                raise RuntimeError("delete-then-insert(upload_staging): missing/invalid image_id in batch row")
+
+            if iid not in seen:
+                seen.add(iid)
+                uniq_ids.append(iid)
+
+        in_list = ", ".join("'" + _escape_sql_string(i.strip()) + "'" for i in uniq_ids)
+        return f"DELETE FROM {table} WHERE job_id = '{safe_job_id}' AND image_id IN ({in_list})"
+
+    # General case: single id column IN (...)
+    if len(key_cols) != 1:
+        raise RuntimeError(f"Unsupported key_cols shape for {table}: {key_cols}")
+
+    id_col = key_cols[0]
+
+    seen = set()
+    uniq_ids: list[str] = []
+    for r in batch:
+        v = r.get(id_col)
+        if not isinstance(v, str) or not v.strip():
+            raise RuntimeError(f"delete-then-insert({table}): missing/invalid {id_col} in batch row")
+        if v not in seen:
+            seen.add(v)
+            uniq_ids.append(v)
+
+    in_list = ", ".join("'" + _escape_sql_string(i.strip()) + "'" for i in uniq_ids)
+    return f"DELETE FROM {table} WHERE {id_col} IN ({in_list})"
+
 def chunked_insert(rows,
                   iceberg_db_name,
                   table_name,
                   athena_workgroup,
                   athena_output_s3,
                   chunk_size=200):
-    """Insert rows into Iceberg in batches. If a batch fails, retry row-by-row."""
+    """
+    Idempotent chunk writer:
+      - DELETE by key(s) for the chunk
+      - INSERT the chunk
 
-    assert chunk_size > 0
+    This makes replays safe even if:
+      - Athena INSERT succeeded but Lambda/polling failed
+      - the state is manually re-run / redriven
+      - the shard is rerun after partial progress
 
-    if table_name == 'upload_staging':
-        columns = UPLOAD_STAGING_COLS
-    elif table_name == 'canonical_imagery':
-        columns = CANONICAL_IMAGERY_COLS
-    elif table_name == 'canonical_bounding_boxes':
-        columns = CANONICAL_BBOX_COLS
-    elif table_name == 'canonical_semantic_masks':
-        columns = CANONICAL_SEMANTIC_COLS
-    elif table_name == 'canonical_instance_annotations':
-        columns = CANONICAL_INSTANCE_COLS
-    else:
-        raise Exception(f'Table name not recognized: {table_name}')
+    Returns (all_failed, last_error) to preserve your existing call sites.
+    """
+    if not isinstance(chunk_size, int):
+        return True, f"chunk_size must be int, got {type(chunk_size).__name__}"
+    if not (0 < chunk_size <= 1000):
+        return True, f"chunk_size must be 1..1000, got {chunk_size}"
 
-    table = f'"{iceberg_db_name}"."{table_name}"'
-    all_failed = False
-    fail_count = 0
+    if not rows:
+        return False, ""
+
+    columns = _table_columns(table_name)
+    key_cols = _table_key_columns(table_name)
+
+    table = f"\"{iceberg_db_name}\".\"{table_name}\""
+
     last_error = ""
+
     for i in range(0, len(rows), chunk_size):
-        batch = rows[i:i+chunk_size]
-        values_clause = []
-        for r in batch:
-            values = [to_sql_value(r, c) for c in columns]
-            values_clause.append("(" + ", ".join(values) + ")")
-        sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES " + ", ".join(values_clause)
+        batch = rows[i:i + chunk_size]
+        if not batch:
+            continue
 
-        # first try to insert the batch, all or nothing is inserted in this athena call
         try:
-            qid = athena.start_query_execution(
-                QueryString=sql,
-                ResultConfiguration={"OutputLocation": athena_output_s3},
-                WorkGroup=athena_workgroup
-            )["QueryExecutionId"]
+            delete_sql = _build_delete_sql_by_keys(batch, table, key_cols)
+            _run_athena(delete_sql, op=f"DELETE({table_name} chunk)", athena_output_s3=athena_output_s3, athena_workgroup=athena_workgroup)
 
-            wait_res = wait_for_athena(qid)
-            if wait_res['state'] != 'SUCCEEDED':
-                reason = _athena_error_details(qid)
-                types = _row_type_summary(r, columns)
-                raise RuntimeError(f"Batch insert failed, failed qid={qid}, reason = {reason}, types = {types}")
+            insert_sql = _build_insert_sql(batch, table, columns)
+            _run_athena(insert_sql, op=f"INSERT({table_name} chunk)", athena_output_s3=athena_output_s3, athena_workgroup=athena_workgroup)
 
         except Exception as e:
-            # Retry row-by-row for this batch if batch insert failed due to a bad row.
-            for r in batch:
-                try:
-                    values = [to_sql_value(r, c) for c in columns]
-                    sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(values)})"
-                    qid = athena.start_query_execution(
-                        QueryString=sql,
-                        ResultConfiguration={"OutputLocation": athena_output_s3},
-                        WorkGroup=athena_workgroup
-                    )["QueryExecutionId"]
+            last_error = str(e)
+            return True, last_error
 
-                    res = wait_for_athena(qid)
-                    if res["state"] != "SUCCEEDED":
-                        reason = _athena_error_details(qid)
-                        types = _row_type_summary(r, columns)
-                        raise RuntimeError(f"Row insert failed, failed qid={qid}, reason = {reason}, types = {types}")
-
-                except Exception as e:
-                    last_error = str(e)
-                    fail_count += 1
-
-    if fail_count == len(rows) and len(rows) > 0:
-        all_failed = True
-
-    return all_failed, str(last_error)
+    return False, last_error
 
 def delete_iceberg_partition_rows(job_id: str,
                                     iceberg_db_name,
@@ -436,9 +523,13 @@ def delete_iceberg_partition_rows(job_id: str,
     delete_qid = delete_resp["QueryExecutionId"]
     delete_result = wait_for_athena(delete_qid, poll=poll_interval, timeout=timeout_seconds)
 
+    if delete_result["state"] != "SUCCEEDED":
+        raise RuntimeError(f"[VAL_INGEST_PRE] DELETE failed: {delete_result}")
+
     result = {
         "delete_query_id": delete_qid,
-        "delete_state": delete_result["state"]
+        "delete_state": delete_result["state"],
+        "delete_resp": delete_result["metadata"]
     }
 
     # 2) Optional: compact / rewrite data for that partition to remove position deletes

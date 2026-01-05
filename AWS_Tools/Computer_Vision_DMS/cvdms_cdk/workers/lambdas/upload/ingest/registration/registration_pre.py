@@ -8,7 +8,7 @@ from common.utils import (
     log,
     s3_list_keys,
     athena_count_job_rows,
-    delete_iceberg_partition_rows,
+    delete_iceberg_partition_rows
 )
 from common.ingest import s3_read_json
 

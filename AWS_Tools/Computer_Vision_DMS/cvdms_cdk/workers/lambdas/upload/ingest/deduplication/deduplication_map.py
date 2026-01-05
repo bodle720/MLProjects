@@ -18,7 +18,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-CHUNK_SIZE = int(os.environ.get("INGEST_CHUNK_SIZE", "200"))
+CHUNK_SIZE = 200
 
 def handler(event, context):
     """

@@ -130,9 +130,9 @@ def _list_export_files(export_prefix):
     Returns dict: {sha_prefix: [s3://.../key, ...], ...}
     """
     paginator = s3.get_paginator("list_objects_v2")
-    prefix = export_prefix.rstrip("/") + "/"
     files_by_prefix = {}
-    kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": prefix}
+    export_prefix = export_prefix.rstrip("/") + "/"
+    kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": export_prefix}
     all_keys = []
     for page in paginator.paginate(**kwargs):
         for obj in page.get("Contents", []):
@@ -173,7 +173,7 @@ def _write_manifest(job_id, shard_name, files, manifest_prefix):
         "shard_prefix": shard_name,
         "files": files
     }
-    manifest_key = f"{manifest_prefix.rstrip('/')}/manifest-shard-{shard_name}.json"
+    manifest_key = f"{manifest_prefix}manifest-shard-{shard_name}.json"
     body = json.dumps(manifest)
     s3.put_object(Bucket=FILE_BUCKET_NAME, Key=manifest_key, Body=body.encode("utf-8"), ContentType="application/json")
     return f"s3://{FILE_BUCKET_NAME}/{manifest_key}"
@@ -252,8 +252,9 @@ def handler(event, context):
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
 
     # Prepare prefixes
-    export_prefix_base = f"temp/image-upload/{job_id}/batches/deduplication-step/export"
-    manifest_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/manifests"
+    export_prefix_base = f"temp/image-upload/{job_id}/batches/deduplication-step/export/"
+    manifest_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/manifests/"
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix)
 
     # 0) Run COUNT(*) to estimate rows
     try:

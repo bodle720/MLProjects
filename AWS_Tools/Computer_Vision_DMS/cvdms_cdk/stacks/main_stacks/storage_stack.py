@@ -396,12 +396,14 @@ class StorageStack(Stack):
                 "ATHENA_WORKGROUP": "primary",
                 "ICEBERG_DATABASE_NAME": iceberg_database_name,
                 "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
+                "SHA256_TABLE_NAME": sha256_table.table_name
             }
         )
 
         # 1) DynamoDB
         lock_table.grant_read_write_data(dlq_processor)
         job_table.grant_read_write_data(dlq_processor)
+        sha256_table.grant_read_write_data(dlq_processor)
 
         # 2) S3: delete temp files under temp/image-upload/ and read them
         dlq_processor.add_to_role_policy(iam.PolicyStatement(

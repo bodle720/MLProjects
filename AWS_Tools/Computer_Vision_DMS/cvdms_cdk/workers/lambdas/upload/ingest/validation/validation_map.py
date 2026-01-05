@@ -18,7 +18,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-CHUNK_SIZE = int(os.environ.get("INGEST_CHUNK_SIZE", "200"))
+CHUNK_SIZE = 200
 
 def handler(event, context):
     """
@@ -117,6 +117,9 @@ def handler(event, context):
         f"[VAL_INGEST_MAP] Done shard={shard} inserted_rows={inserted_rows}",
         LOG_FIREHOSE_STREAM_NAME,
     )
+
+    if rows_read is not None and int(inserted_rows) != int(rows_read):
+        raise RuntimeError(f"[VAL_INGEST_MAP] inserted_rows={inserted_rows} != rows_read={rows_read}")
 
     return {
         "job_id": job_id,

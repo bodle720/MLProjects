@@ -1,6 +1,6 @@
 import os
 import boto3
-from common.utils import log
+from common.utils import log, delete_s3_prefix
 
 s3 = boto3.client("s3")
 
@@ -27,6 +27,8 @@ def handler(event, context):
         raise RuntimeError(f"[VAL_FILE_BATCHING] Validation batching Lambda failed: missing required key {e}")
 
     log(job_id, user, event_type, f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
+    manifest_prefix = f"temp/image-upload/{job_id}/batches/validation-step/manifests/"
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix)
 
     # Get the json lines from the original manifest
     # original_manifest_s3_uri: s3://bucket/key
@@ -60,7 +62,7 @@ def handler(event, context):
         # each element in `batch` is already a JSON string line
 
         manifest_body = ("\n".join(batch) + "\n").encode("utf-8")
-        manifest_key = f"temp/image-upload/{job_id}/batches/validation-step/manifests/batch-{idx:03d}.jsonl"
+        manifest_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
 
         s3.put_object(
             Bucket=FILE_BUCKET_NAME,

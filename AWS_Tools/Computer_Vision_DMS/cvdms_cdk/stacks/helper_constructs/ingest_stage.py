@@ -25,6 +25,7 @@ class IngestStage(Construct):
                  iceberg_bucket: s3.Bucket,
                  job_table: dynamodb.Table,
                  lock_table: dynamodb.Table,
+                 sha256_table: dynamodb.Table,
                  iceberg_database_name: str,
                  region: str,
                  account: str,
@@ -43,6 +44,7 @@ class IngestStage(Construct):
         self.iceberg_bucket = iceberg_bucket
         self.job_table = job_table
         self.lock_table = lock_table
+        self.sha256_table = sha256_table
         self.iceberg_database_name = iceberg_database_name
         self.region = region
         self.account = account
@@ -59,8 +61,9 @@ class IngestStage(Construct):
                 "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
                 "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
-                "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery"
-            }
+                "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
+                "SHA256_TABLE_NAME": self.sha256_table.table_name
+        }
 
         # --------------------------------------
         # Form the 'pre' lambda task.
@@ -210,6 +213,7 @@ class IngestStage(Construct):
         # 1) DynamoDB
         self.lock_table.grant_read_write_data(lambda_fn)
         self.job_table.grant_read_write_data(lambda_fn)
+        self.sha256_table.grant_read_write_data(lambda_fn)
 
         # 2) S3 (file bucket): temp artifacts + bucket listing/location
         lambda_fn.add_to_role_policy(

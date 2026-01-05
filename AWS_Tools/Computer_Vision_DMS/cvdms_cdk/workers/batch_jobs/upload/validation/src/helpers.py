@@ -72,7 +72,6 @@ def normalize_hex(h: str) -> str:
         return h
     raise ValueError(f"Bad hex color: {h}")
 
-
 def _put_png(key: str, png_bytes: bytes, file_bucket_name: str) -> str:
     s3.put_object(
         Bucket=file_bucket_name,

@@ -4,9 +4,14 @@ import json
 import logging
 from typing import Dict, List
 
+import boto3
+from botocore.exceptions import ClientError
+from datetime import datetime, timezone
+
 from common.utils import log, chunked_insert
 from common.ingest import iter_rows_from_jsonl_keys
 
+dynamodb = boto3.client("dynamodb")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -15,6 +20,7 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 
 UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 CANONICAL_IMAGERY_TABLE_NAME = os.environ.get("CANONICAL_IMAGERY_TABLE_NAME", "canonical_imagery")
@@ -25,6 +31,76 @@ CANONICAL_BBOX_TABLE = "canonical_bounding_boxes"
 CANONICAL_SEMANTIC_TABLE = "canonical_semantic_masks"
 CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
 LABEL_TABLES: List[str] = [CANONICAL_BBOX_TABLE, CANONICAL_SEMANTIC_TABLE, CANONICAL_INSTANCE_TABLE]
+CHUNK_SIZE = 200
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _put_sha256_mapping(sha: str, image_id: str, job_id: str, data_source: str | None) -> None:
+    """
+    Create sha256 -> canonical image_id mapping iff sha256 not already present.
+    Idempotent:
+      - If already present with same (image_id, job_id) => ok (replay)
+      - If already present with different image_id => conflict => raise
+    """
+    if not sha or not image_id:
+        return
+
+    try:
+        dynamodb.put_item(
+            TableName=SHA256_TABLE_NAME,
+            Item={
+                "sha256": {"S": sha},
+                "image_id": {"S": image_id},
+                "job_id": {"S": job_id},
+                "data_source": {"S": (data_source or "")},
+                "created_at": {"S": _utc_now_iso()},
+            },
+            ConditionExpression="attribute_not_exists(#k)",
+            ExpressionAttributeNames={"#k": "sha256"},
+        )
+        return
+
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code != "ConditionalCheckFailedException":
+            raise
+
+        # Exists already: must verify it's the same mapping (idempotent replay),
+        # otherwise someone else already registered this sha (external dup).
+        resp = dynamodb.get_item(
+            TableName=SHA256_TABLE_NAME,
+            Key={"sha256": {"S": sha}},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item") or {}
+        existing_image_id = item.get("image_id", {}).get("S")
+        existing_job_id = item.get("job_id", {}).get("S")
+
+        if existing_image_id == image_id and existing_job_id == job_id:
+            return  # replay-safe
+
+        # If it exists with different image_id, that means it's truly an external duplicate
+        # (or a logic bug if you expected to be creating it).
+        raise RuntimeError(
+            f"[REG_INGEST_MAP] sha256 already registered: sha={sha} "
+            f"existing_image_id={existing_image_id} new_image_id={image_id} "
+            f"existing_job_id={existing_job_id} new_job_id={job_id}"
+        )
+
+def _register_sha256_for_canonical_rows(rows: List[Dict], job_id: str, data_source: str | None) -> int:
+    """
+    rows are canonical_imagery rows; expects keys sha256_hash + image_id.
+    Returns number of mapping attempts (successful puts or verified replays).
+    """
+    n = 0
+    for r in rows:
+        sha = r.get("sha256_hash")
+        image_id = r.get("image_id")
+        if isinstance(sha, str) and sha.strip() and isinstance(image_id, str) and image_id.strip():
+            _put_sha256_mapping(sha.strip(), image_id.strip(), job_id, data_source)
+            n += 1
+    return n
 
 def _flush_chunk(rows: List[Dict], table_name: str, task_name: str) -> None:
     all_failed, last_error = chunked_insert(
@@ -33,7 +109,7 @@ def _flush_chunk(rows: List[Dict], table_name: str, task_name: str) -> None:
         table_name,
         ATHENA_WORKGROUP,
         ATHENA_OUTPUT_S3,
-        chunk_size=len(rows),
+        chunk_size=CHUNK_SIZE,
     )
     if all_failed or last_error:
         raise RuntimeError(
@@ -54,7 +130,7 @@ def handler(event, context):
         job_id = event["job_id"]
         user = event["user"]
         event_type = event["event_type"]
-
+        data_source = event["data_source"]
         shard = event["shard"]
         upload_key = event["upload_key"]
         imagery_key = event.get("imagery_key")
@@ -100,15 +176,19 @@ def handler(event, context):
     # 2) canonical_imagery
     try:
         chunk = []
+        sha_registered = 0
+
         for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [imagery_key]):
             chunk.append(row)
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk, CANONICAL_IMAGERY_TABLE_NAME, "REG_INGEST_MAP.canonical_imagery")
                 inserted_canon_imagery += len(chunk)
+                sha_registered += _register_sha256_for_canonical_rows(chunk, job_id, data_source)
                 chunk = []
         if chunk:
             _flush_chunk(chunk, CANONICAL_IMAGERY_TABLE_NAME, "REG_INGEST_MAP.canonical_imagery")
             inserted_canon_imagery += len(chunk)
+            sha_registered += _register_sha256_for_canonical_rows(chunk, job_id, data_source)
     except Exception as e:
         log(job_id, user, event_type, f"[REG_INGEST_MAP] canonical_imagery insert failed shard={shard}: {e}",
             LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
@@ -168,6 +248,7 @@ def handler(event, context):
         "job_id": job_id,
         "shard": shard,
         "upload_rows_inserted": inserted_upload,
+        "sha_registered": sha_registered,
         "canonical_imagery_rows_inserted": inserted_canon_imagery,
         "canonical_label_rows_inserted": inserted_labels_total,
         "canonical_label_rows_by_table": inserted_labels_by_table,
