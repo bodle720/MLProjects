@@ -3,6 +3,7 @@ import time
 import json
 import base64
 import uuid
+import hashlib
 
 import boto3
 from botocore.exceptions import ClientError
@@ -15,15 +16,6 @@ LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
 
 def stable_uuid5(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-
-def _label_uuid(stable_seed: str | None, fallback_prefix: str) -> str:
-    """
-    stable_seed: string that uniquely identifies the image/job/label_type.
-    fallback_prefix: label subtype; included so different label kinds don't collide.
-    """
-    if stable_seed:
-        return stable_uuid5(f"{stable_seed}|{fallback_prefix}")
-    return str(uuid.uuid4())
 
 def read_manifest_with_retry(bucket, key, retries=5, delay=2):
     for attempt in range(retries):
@@ -81,24 +73,27 @@ def _put_png(key: str, png_bytes: bytes, file_bucket_name: str) -> str:
     )
     return f"s3://{file_bucket_name}/{key}"
 
-def create_and_save_labels(line, label_type, job_id, file_bucket_name, stable_seed: str | None = None):
+def create_and_save_labels(line,
+                           label_type,
+                           job_id,
+                           file_bucket_name):
     try:
         if label_type == "single-label":
             meta = line.get("single-label-metadata", {})
             cn = meta.get("class-name", "").strip().lower()
             if not cn:
-                return [], [], "empty class-name for single label type"
+                return [], [], None, "empty class-name for single label type"
             else:
-                return [], [cn], None
+                return [], [cn], None, None
         elif label_type == "multi-label":
             ml = line.get("multi-label", None)
             meta = line.get("multi-label-metadata", {})
             class_map = meta.get("class-map", None)
 
             if not ml or not isinstance(ml, list):
-                return [], [], "multi-label missing/empty"
+                return [], [], None, "multi-label missing/empty"
             if not class_map or not isinstance(class_map, dict):
-                return [], [], "multi-label class-map missing/empty"
+                return [], [], None, "multi-label class-map missing/empty"
 
             out = []
             for idx in ml:
@@ -116,25 +111,25 @@ def create_and_save_labels(line, label_type, job_id, file_bucket_name, stable_se
                     classes_present.append(x)
 
             if not classes_present:
-                return [], [], "No classes are present for multi-label image"
+                return [], [], None, "No classes are present for multi-label image"
             else:
-                return [], classes_present, None
+                return [], classes_present, None, None
         elif label_type == "object-detection":
-            paths, classes_present = _create_object_detection_label(line, job_id, file_bucket_name, stable_seed)
-            return paths, classes_present, None
+            paths, classes_present, label_fingerprint = _create_object_detection_label(line, job_id, file_bucket_name)
+            return paths, classes_present, label_fingerprint, None
         elif label_type == "semantic-segmentation":
-            paths, classes_present = _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_seed)
-            return paths, classes_present, None
+            paths, classes_present, label_fingerprint = _create_semantic_segmentation_label(line, job_id, file_bucket_name)
+            return paths, classes_present, label_fingerprint, None
         elif label_type == "instance-segmentation":
-            paths, classes_present = _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_seed)
-            return paths, classes_present, None
+            paths, classes_present, label_fingerprint = _create_instance_segmentation_label(line, job_id, file_bucket_name)
+            return paths, classes_present, label_fingerprint, None
 
-        return [], [], f"Unsupported label_type: {label_type}"
+        return [], [], None, f"Unsupported label_type: {label_type}"
 
     except Exception as e:
-        return [], [], f"Error creating and saving label for label type {label_type}: {e}"
+        return [], [], None, f"Error creating and saving label for label type {label_type}: {e}"
 
-def _create_object_detection_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
+def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     od = line.get("object-detection", {})
     meta = line.get("object-detection-metadata", {})
     anns = od.get("annotations", None)
@@ -146,13 +141,23 @@ def _create_object_detection_label(line, job_id, file_bucket_name, stable_seed: 
         raise ValueError("object-detection-metadata.class-map missing/empty")
 
     out_anns = []
+    tuples_anns = [] # out anns, but as a list of tuples
     classes_present = []
     for ann in anns:
         if not isinstance(ann, dict):
             continue
+
         cid = ann.get("class_id")
+
+        if type(cid) == str:
+            try:
+                cid = int(cid)
+            except:
+                raise ValueError(f"class id in bbox annotation is not int or string version of int: {cid}")
+
         if not isinstance(cid, int):
             raise ValueError("object-detection annotation missing int class_id")
+
         class_name = class_map.get(str(cid))
         if not isinstance(class_name, str) or not class_name.strip():
             raise ValueError(f"class-map missing class for class_id={cid}")
@@ -162,11 +167,30 @@ def _create_object_detection_label(line, job_id, file_bucket_name, stable_seed: 
         coords = {}
         for f in ("top", "left", "height", "width"):
             v = ann.get(f)
-            if not isinstance(v, (int, float)):
-                raise ValueError(f"object-detection annotation.{f} must be number")
-            coords[f] = float(v)
 
-        out_anns.append({"class_name": class_name.strip().lower(), "coordinates": coords})
+            if type(v) == str:
+                try:
+                    v = int(v)
+                except:
+                    raise ValueError(f"coord {f} in bbox annotation is not int or string version of int: {v}")
+
+            if not isinstance(v, int):
+                raise ValueError(f"object-detection annotation.{f} must be number")
+
+            coords[f] = v
+
+        cn = class_name.strip().lower()
+        out_anns.append({"class_name": cn, "coordinates": coords})
+        tuples_anns.append((cn, coords['top'], coords['left'], coords['height'], coords['width']))
+
+    # make label fingerprint
+    if not tuples_anns:
+        raise ValueError("object-detection.annotations contained no valid annotation objects")
+
+    tuples_anns.sort()
+    payload = {"v": 1, "label_type": "object-detection", "boxes": [list(t) for t in tuples_anns]}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    label_fingerprint = hashlib.sha256(blob).hexdigest()
 
     # after building classes_present
     seen = set()
@@ -177,12 +201,11 @@ def _create_object_detection_label(line, job_id, file_bucket_name, stable_seed: 
             uniq.append(c)
     classes_present = uniq
 
-    label_uuid = _label_uuid(stable_seed, "object-detection")
-    key = f"temp/image-upload/{job_id}/object-detection/{label_uuid}.json"
+    key = f"temp/image-upload/{job_id}/object-detection/{label_fingerprint}.json"
     uri = _put_json(key, {"annotations": out_anns}, file_bucket_name)
-    return [uri], classes_present
+    return [uri], classes_present, label_fingerprint
 
-def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
+def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     mask_ref = line.get("semantic-segmentation-ref")
     meta = line.get("semantic-segmentation-ref-metadata", {})
     icm = meta.get("internal-color-map", None)
@@ -216,7 +239,6 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_s
     non_bg.sort(key=lambda t: (t[1], t[0]))  # deterministic
     hex_to_id = {bg_hex: 0}
     id_to_class = {"0": "bg"}
-
     next_id = 1
     for h, c in non_bg:
         if h == bg_hex:
@@ -250,6 +272,12 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_s
         unknown_count = int((~known).sum())
         raise ValueError(f"semantic mask contains {unknown_count} pixels with colors not in internal-color-map")
 
+    pixel_bytes = idx.tobytes(order="C")
+    mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
+    payload = {"v": 1, "label_type": "semantic-segmentation", "h": int(h), "w": int(w), "id_to_class": mapping_pairs}
+    meta_blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    label_fingerprint = hashlib.sha256(meta_blob + b"|" + pixel_bytes).hexdigest()
+
     present_ids = np.unique(idx)
     classes_present = []
     for pid in present_ids:
@@ -269,9 +297,8 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_s
     classes_present = uniq
 
     # Save PNG + meta JSON under same uuid
-    label_uuid = _label_uuid(stable_seed, "semantic-segmentation")
-    png_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_uuid}.png"
-    meta_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_uuid}.json"
+    png_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_fingerprint}.png"
+    meta_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_fingerprint}.json"
 
     out_img = Image.fromarray(idx, mode="L")
     buf = io.BytesIO()
@@ -282,9 +309,9 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name, stable_s
     if not classes_present:
         raise ValueError("semantic mask contains only background")
 
-    return [png_uri, meta_uri], classes_present
+    return [png_uri, meta_uri], classes_present, label_fingerprint
 
-def _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_seed: str | None = None) -> tuple[list[str], list[str]]:
+def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")
 
@@ -355,6 +382,12 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_s
         unknown_count = int((~known).sum())
         raise ValueError(f"instance mask contains {unknown_count} pixels with colors not present in worker-response instances")
 
+    pixel_bytes = idx.tobytes(order="C")
+    mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
+    payload = {"v": 1, "label_type": "instance-segmentation", "h": int(h), "w": int(w), "id_to_class": mapping_pairs}
+    meta_blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    label_fingerprint = hashlib.sha256(meta_blob + b"|" + pixel_bytes).hexdigest()
+
     present_ids = np.unique(idx)
     classes_present = []
     for pid in present_ids:
@@ -373,9 +406,8 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_s
             uniq.append(c)
     classes_present = uniq
 
-    label_uuid = _label_uuid(stable_seed, "instance-segmentation")
-    png_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_uuid}.png"
-    meta_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_uuid}.json"
+    png_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_fingerprint}.png"
+    meta_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_fingerprint}.json"
 
     out_img = Image.fromarray(idx, mode="L")
     buf = io.BytesIO()
@@ -386,4 +418,4 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name, stable_s
     if not classes_present:
         raise ValueError("instance segmentation mask contains only background")
 
-    return [png_uri, meta_uri], classes_present
+    return [png_uri, meta_uri], classes_present, label_fingerprint

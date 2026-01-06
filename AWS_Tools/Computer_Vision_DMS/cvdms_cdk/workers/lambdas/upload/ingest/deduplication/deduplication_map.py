@@ -118,6 +118,9 @@ def handler(event, context):
         LOG_FIREHOSE_STREAM_NAME,
     )
 
+    if rows_read is not None and int(inserted_rows) != int(rows_read):
+        raise RuntimeError(f"[DEDUP_INGEST_MAP] inserted_rows={inserted_rows} != rows_read={rows_read}")
+
     # We discard Map results in the state machine, but returning is still useful for CloudWatch debugging.
     return {
         "job_id": job_id,

@@ -50,7 +50,6 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             out.append(s)
     return out
 
-
 def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
     Locate per-shard dedup processed outputs
@@ -115,15 +114,17 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         total_rows_read += rows_read
         total_processed_rows += processed_rows
 
-        # IMPORTANT: include imagery_key/labels_key fields as nulls so Step Functions JSONPaths exist
         shards.append(
             {
                 "shard": shard,
                 "rows_read": rows_read,
                 "processed_rows": processed_rows,
-                "upload_key": jsonl_key,
-                "imagery_key": None,
-                "labels_key": None,
+                "canonical_imagery_rows": None,
+                "canonical_label_rows": None,
+                "upload_staging_key": jsonl_key,
+                "canonical_imagery_key": None,
+                "canonical_labels_key": None,
+                "image_labels_key": None
             }
         )
 
@@ -134,7 +135,6 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "total_processed_rows": total_processed_rows,
         "processed_prefix": processed_prefix,
     }
-
 
 def handler(event, context):
     # Validate input

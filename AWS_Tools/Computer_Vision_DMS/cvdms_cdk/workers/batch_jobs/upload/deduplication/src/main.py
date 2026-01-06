@@ -248,7 +248,7 @@ def write_processed_outputs(shard_name, processed_rows, summary):
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
-    body = "\n".join(json.dumps(r) for r in processed_rows)
+    body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
     if len(body) > 50_000_000:
         raise RuntimeError("[DEDUP_JOB_DEF] JSONL too large for put_object; implement multipart upload")
 

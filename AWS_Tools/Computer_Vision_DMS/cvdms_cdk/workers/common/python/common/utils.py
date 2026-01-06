@@ -3,7 +3,7 @@ import json
 import math
 import logging
 from decimal import Decimal
-from typing import List, Sequence
+from typing import List
 from datetime import datetime, timezone
 
 import boto3
@@ -26,7 +26,7 @@ UPLOAD_STAGING_COLS = [
     "file_size_mb", "uploaded_at", "data_source", "sha256_hash",
     "string_labels", "temp_source_ref_bbox_meta", "temp_source_ref_semantic_png",
     "temp_source_ref_semantic_meta", "temp_source_ref_instance_png", "temp_source_ref_instance_meta",
-    "classes_present", "validation_status", "validation_error",
+    "label_fingerprint", "classes_present", "validation_status", "validation_error",
     "dedup_status", "dedup_error", "registration_status", "registration_error", "matched_image_id"
 ]
 
@@ -38,9 +38,9 @@ CANONICAL_IMAGERY_COLS = [
     "instance_annotation_ids"
 ]
 
-CANONICAL_BBOX_COLS = ["bbox_annotation_id", "image_id", "source_ref_meta", "classes_present"]
-CANONICAL_SEMANTIC_COLS = ["semantic_mask_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present"]
-CANONICAL_INSTANCE_COLS = ["instance_annotation_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present"]
+CANONICAL_BBOX_COLS = ["bbox_annotation_id", "image_id", "source_ref_meta", "classes_present", "fingerprint"]
+CANONICAL_SEMANTIC_COLS = ["semantic_mask_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present", "fingerprint"]
+CANONICAL_INSTANCE_COLS = ["instance_annotation_id", "image_id", "source_ref_png", "source_ref_meta", "classes_present", "fingerprint"]
 
 def log(job_id, user, event_type, message, stream_name, warning=None, error=None, level="info"):
     entry = {
@@ -358,7 +358,6 @@ def _table_columns(table_name: str) -> list[str]:
     if table_name == "canonical_instance_annotations":
         return CANONICAL_INSTANCE_COLS
     raise ValueError(f"Table name not recognized: {table_name}")
-
 
 def _table_key_columns(table_name: str) -> list[str]:
     """

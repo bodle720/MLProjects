@@ -128,9 +128,12 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
                 "rows_read": rows_read,
                 "failed_rows": failed_rows,
                 "processed_rows": processed_rows,
-                "upload_key": jsonl_key,
-                "imagery_key": None,
-                "labels_key": None,
+                "canonical_imagery_rows": None,
+                "canonical_label_rows": None,
+                "upload_staging_key": jsonl_key,
+                "canonical_imagery_key": None,
+                "canonical_labels_key": None,
+                "image_labels_key": None
             }
         )
 

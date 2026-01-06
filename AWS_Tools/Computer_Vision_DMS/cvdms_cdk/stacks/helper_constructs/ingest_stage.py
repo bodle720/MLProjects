@@ -59,9 +59,13 @@ class IngestStage(Construct):
                 "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
                 "ATHENA_WORKGROUP": "primary",
                 "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
-                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
                 "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
+                "IMAGE_LABELS_TABLE_NAME": "image_labels",
+                "CANONICAL_BBOXES_TABLE_NAME": "canonical_bounding_boxes",
+                "CANONICAL_SEMANTIC_MASKS_TABLE_NAME": "canonical_semantic_masks",
+                "CANONICAL_INSTANCE_ANNS_TABLE_NAME": "canonical_instance_annotations",
+                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "SHA256_TABLE_NAME": self.sha256_table.table_name
         }
 
@@ -141,16 +145,12 @@ class IngestStage(Construct):
                 "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
-
                 "shard.$": "$$.Map.Item.Value.shard",
                 "rows_read.$": "$$.Map.Item.Value.rows_read",
-
-                # always present for both modes
-                "upload_key.$": "$$.Map.Item.Value.upload_key",
-
-                # optional for registration mode
-                "imagery_key.$": "$$.Map.Item.Value.imagery_key",
-                "labels_key.$": "$$.Map.Item.Value.labels_key",
+                "upload_staging_key.$": "$$.Map.Item.Value.upload_staging_key",
+                "canonical_imagery_key.$": "$$.Map.Item.Value.canonical_imagery_key",
+                "canonical_labels_key.$": "$$.Map.Item.Value.canonical_labels_key",
+                "image_labels_key.$": "$$.Map.Item.Value.image_labels_key"
             },
             result_path=sfn.JsonPath.DISCARD,
             output_path="$",

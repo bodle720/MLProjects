@@ -9,14 +9,22 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     file_size_mb double,
     uploaded_at timestamp COMMENT 'UTC upload time in ISO8601',
     data_source string,
-    sha256_hash string COMMENT '64-char hex',
-    string_labels array<string>,
-    bbox_annotation_ids array<string>,
-    semantic_mask_ids array<string>,
-    instance_annotation_ids array<string>
+    sha256_hash string COMMENT '64-char hex'
 )
 PARTITIONED BY (day(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/imagery/'
+TBLPROPERTIES (
+  'table_type'='ICEBERG',
+  'format'='parquet'
+);
+
+CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.image_labels (
+    image_id string COMMENT 'UUID foreign key for the image from canonical_imagery.image_id',
+    label_id string COMMENT 'Can be a string label lowercase, or a label id from a label table: bbox_annotation_id or semantic_mask_id or instance_annotation_id',
+    label_type string COMMENT 'one of single-label, object-detection, semantic-segmentation, or instance-segmentation'
+)
+PARTITIONED BY (label_type)
+LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/image-labels/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
   'format'='parquet'
@@ -79,14 +87,15 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     temp_source_ref_semantic_meta string,
     temp_source_ref_instance_png string,
     temp_source_ref_instance_meta string,
+    label_fingerprint string COMMENT 'A unique hash identifying this label for purpose of comparison to bbox, semantic, or instance labels.',
     classes_present array<string> COMMENT 'String class names in this image label pair.',
-    validation_status string,
+    validation_status string COMMENT 'one of pending, passed, failed',
     validation_error string,
-    dedup_status string,
+    dedup_status string COMMENT 'one of pending, passed, internal_duplicate, external_duplicate',
     dedup_error string,
-    registration_status string,
+    registration_status string COMMENT 'one of pending, passed, failed',
     registration_error string,
-    matched_image_id string
+    matched_image_id string COMMENT 'present when dedup_status = external_duplicate'
 )
 PARTITIONED BY (job_id)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/upload_staging/'

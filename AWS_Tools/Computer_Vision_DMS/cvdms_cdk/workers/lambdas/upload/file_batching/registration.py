@@ -111,6 +111,7 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
         temp_source_ref_semantic_meta,
         temp_source_ref_instance_png,
         temp_source_ref_instance_meta,
+        label_fingerprint,
         classes_present,
         validation_status,
         validation_error,
@@ -119,7 +120,7 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
         registration_status,
         registration_error,
         matched_image_id,
-        lpad(CAST(mod(from_base(substr(to_hex(xxhash64(to_utf8(coalesce(image_id, '')))), 1, 8), 16), {num_shards}) AS varchar), 6, '0') AS shard_id
+        lpad(CAST(mod(from_base(substr(replace(coalesce(image_id, ''), '-', ''), 1, 8), 16), {num_shards}) AS varchar), 6, '0') AS shard_id
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
@@ -205,6 +206,10 @@ def handler(event, context):
         raise RuntimeError(err)
 
     total_rows = _read_count_from_athena_result(count_qid)
+
+    if total_rows <= 0:
+        raise RuntimeError(f"[REG_FILE_BATCHING] No rows in upload_staging for job_id={job_id}")
+
     target_rows = _choose_target_rows_per_shard(total_rows)
     num_shards = _compute_num_shards(total_rows, target_rows)
 
@@ -264,7 +269,7 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "manifests": manifest_uris,
+        "manifests": manifest_uris
     }
 
     log(job_id, user, event_type, f"[REG_FILE_BATCHING] Completed for job {job_id}. Created {len(manifest_uris)} manifests.", LOG_FIREHOSE_STREAM_NAME)

@@ -136,17 +136,17 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     total_canon_label_rows = 0
 
     for shard in expected_shards:
-        u = shard_upload.get(shard)
-        i = shard_imagery.get(shard)
-        l = shard_labels.get(shard)
-        s = shard_summary.get(shard)
+        up_k = shard_upload.get(shard)
+        img_k = shard_imagery.get(shard)
+        lab_k = shard_labels.get(shard)
+        sum_k = shard_summary.get(shard)
         ok = shard in shard_success
 
-        if not (u and i and l and s and ok):
+        if not (up_k and img_k and lab_k and sum_k and ok):
             missing.append(shard)
             continue
 
-        summary = s3_read_json(bucket, s)
+        summary = s3_read_json(bucket, sum_k)
         rows_read = int(summary.get("rows_read", 0))
         canon_im_rows = int(summary.get("canonical_imagery_rows", 0))
         canon_lbl_rows = int(summary.get("canonical_label_rows", 0))
@@ -161,9 +161,10 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
                 "rows_read": rows_read,
                 "canonical_imagery_rows": canon_im_rows,
                 "canonical_label_rows": canon_lbl_rows,
-                "upload_key": u,
-                "imagery_key": i,
-                "labels_key": l,
+                "upload_staging_key": up_k,
+                "canonical_imagery_key": img_k,
+                "canonical_labels_key": lab_k,
+                "image_labels_key": img_lab_k
             }
         )
 

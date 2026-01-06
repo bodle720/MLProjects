@@ -74,6 +74,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
             "temp_source_ref_semantic_meta": None,
             "temp_source_ref_instance_png": None,
             "temp_source_ref_instance_meta": None,
+            "label_fingerprint": None,
             "classes_present": None,
             "validation_status": "failed",
             "validation_error": "missing/invalid source-ref",
@@ -104,6 +105,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         "temp_source_ref_semantic_meta": None,
         "temp_source_ref_instance_png": None,
         "temp_source_ref_instance_meta": None,
+        "label_fingerprint": None,
         "classes_present": None,
         "validation_status": "pending",
         "validation_error": None,
@@ -171,12 +173,11 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     # stable seed so retries overwrite same label objects
     stable_seed = f"{JOB_ID}|{shard_name}|{line_idx}|{LABEL_TYPE.strip()}"
 
-    paths, classes_present, error_msg = create_and_save_labels(
+    paths, classes_present, label_fingerprint, error_msg = create_and_save_labels(
         line=line,
         label_type=LABEL_TYPE,
         job_id=JOB_ID,
-        file_bucket_name=FILE_BUCKET_NAME,
-        stable_seed=stable_seed
+        file_bucket_name=FILE_BUCKET_NAME
     )
 
     if error_msg:
@@ -201,6 +202,9 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
 
         for col_name, path in zip(col_names, paths):
             row[col_name] = path
+
+    if label_fingerprint:
+        row["label_fingerprint"] = label_fingerprint
 
     row["validation_status"] = "passed"
     return row

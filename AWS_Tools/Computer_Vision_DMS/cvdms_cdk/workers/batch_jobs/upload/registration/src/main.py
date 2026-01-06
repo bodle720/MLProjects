@@ -249,7 +249,6 @@ def write_outputs(shard_name: str,
                   canonical_label_rows: List[Dict[str, Any]],
                   summary: Dict[str, Any]) -> None:
 
-
     bucket = FILE_BUCKET_NAME
 
     upload_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"

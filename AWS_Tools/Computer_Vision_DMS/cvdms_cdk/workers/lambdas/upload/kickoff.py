@@ -176,6 +176,6 @@ def handler(event, context):
         "user": user,
         "label_type": label_type,
         "event_type": event_type,
-        "data_source": data_source,
+        "data_source": data_source.lower(),
         "original_manifest_s3_uri": original_manifest_s3_uri
     }

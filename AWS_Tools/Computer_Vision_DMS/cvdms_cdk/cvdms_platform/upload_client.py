@@ -118,7 +118,7 @@ class UploadClient:
             "status": "PENDING",
             "summary": summary,
             "event_type": self.event_type,
-            "errors": "",
+            "error": "",
         }
 
         try:

@@ -93,6 +93,7 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         temp_source_ref_semantic_meta,
         temp_source_ref_instance_png,
         temp_source_ref_instance_meta,
+        label_fingerprint,
         classes_present,
         validation_status,
         validation_error,
@@ -101,7 +102,10 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
         registration_status,
         registration_error,
         matched_image_id,
-        substr(sha256_hash, 1, {prefix_len}) AS sha_prefix
+        CASE
+          WHEN sha256_hash IS NULL OR sha256_hash = '' THEN '__MISSING__'
+          ELSE substr(sha256_hash, 1, {prefix_len})
+        END AS sha_prefix
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
