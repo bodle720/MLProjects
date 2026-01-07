@@ -6,8 +6,8 @@ from urllib.parse import unquote_plus
 import boto3
 from botocore.exceptions import ClientError
 
-# Lambda layer imports
-from common.utils import log
+# Lambda layer imports, add to path to avoid pycharm complaining.
+from common.logging_utils import log
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]

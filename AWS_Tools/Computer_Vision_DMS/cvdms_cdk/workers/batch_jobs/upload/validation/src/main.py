@@ -5,14 +5,14 @@ import re
 import json
 import time
 import hashlib
-import logging
 
 import boto3
 from PIL import Image
 from botocore.exceptions import ClientError
 
-from common.utils import log, parse_s3_uri
-from helpers import read_manifest_with_retry, infer_dtype, create_and_save_labels, stable_uuid5
+from common.logging_utils import log
+from common.s3_utils import parse_s3_uri
+from helpers import infer_dtype, create_and_save_labels, stable_uuid5, read_manifest_with_retry
 
 # Env Variables from upload stack
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -31,9 +31,6 @@ PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processe
 
 s3 = boto3.client("s3")
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
 def _manifest_shard_name(manifest_s3_uri: str) -> str:
     _, key = parse_s3_uri(manifest_s3_uri)
     fname = key.rsplit("/", 1)[-1]
@@ -47,14 +44,16 @@ def _write_s3_text(bucket: str, key: str, text: str, content_type: str) -> None:
     s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
+
     # derive deterministic image uuid from job + source-ref
     temp_source_ref = line.get("source-ref")
 
     # Deterministic per-occurrence ID (unique even for duplicates)
     image_id = stable_uuid5(f"{JOB_ID}|{shard_name}|{line_idx}")
 
-    if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://"):
+    if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://") or line.get('issue'):
         # malformed line -> failed row
+        error_msg = line.get("issue") or f"missing/invalid temp source-ref: {temp_source_ref}"
         return {
             "job_id": JOB_ID,
             "image_id": image_id,
@@ -77,7 +76,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
             "label_fingerprint": None,
             "classes_present": None,
             "validation_status": "failed",
-            "validation_error": "missing/invalid source-ref",
+            "validation_error": error_msg,
             "dedup_status": "pending",
             "dedup_error": None,
             "registration_status": "pending",
@@ -170,9 +169,6 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         row["validation_error"] = f"Unsupported LABEL_TYPE: {LABEL_TYPE}"
         return row
 
-    # stable seed so retries overwrite same label objects
-    stable_seed = f"{JOB_ID}|{shard_name}|{line_idx}|{LABEL_TYPE.strip()}"
-
     paths, classes_present, label_fingerprint, error_msg = create_and_save_labels(
         line=line,
         label_type=LABEL_TYPE,
@@ -232,24 +228,32 @@ def main():
         LOG_FIREHOSE_STREAM_NAME)
 
     mb, mk = parse_s3_uri(MANIFEST_S3_URI)
+
     obj = read_manifest_with_retry(mb, mk)
     if not obj:
         raise RuntimeError(f"[VAL_JOB_DEF] Could not read manifest: {MANIFEST_S3_URI}")
 
-    body = obj["Body"]
-
     processed_rows = []
     total = 0
     failed = 0
-
-    for line_idx, line_bytes in enumerate(body.iter_lines()):
+    for line_idx, line_bytes in enumerate(obj["Body"].iter_lines(), start = 0):
         if not line_bytes:
             continue
+
         s = line_bytes.decode("utf-8-sig").strip()
         if not s:
             continue
 
-        line = json.loads(s)  # if malformed, raise (consistent with the current behavior)
+        try:
+            line = json.loads(s)
+        except json.JSONDecodeError as e:
+            # malformed JSON -> failed row
+            line = {"issue": f"invalid JSON: {e.msg} (pos={e.pos}), raw =  {s}"}
+
+        if not isinstance(line, dict):
+            # non-dict JSON -> failed row (still preserves line count)
+            line = {"issue": f"expected dict, got {type(line).__name__}, raw =  {s}"}
+
         row = process_image(line, shard_name=shard_name, line_idx=line_idx)
 
         total += 1

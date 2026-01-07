@@ -10,7 +10,6 @@ from botocore.exceptions import ClientError
 from .upload_client import UploadClient
 from .log_client import LogClient
 
-
 SSM_PREFIX_TEMPLATE = "/cvdms/{app}/"
 REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name",
                  "logging/log_bucket_name", "logging/glue_db_name", "logging/glue_table_name"]

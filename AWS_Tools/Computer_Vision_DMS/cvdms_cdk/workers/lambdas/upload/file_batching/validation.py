@@ -1,6 +1,7 @@
 import os
 import boto3
-from common.utils import log, delete_s3_prefix
+from common.logging_utils import log
+from common.s3_utils import delete_s3_prefix
 
 s3 = boto3.client("s3")
 
@@ -13,7 +14,7 @@ IMAGE_SIZE_MB = 3  # worst-case per image
 SAFETY_FACTOR = 0.5  # 0.5 means use only use ~50% of memory for image data
 
 max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
-IMAGES_PER_BATCH = min(max_images, 200)  # cap at 200 for sanity
+IMAGES_PER_BATCH = max(1, min(max_images, 200))
 
 def handler(event, context):
     try:
@@ -42,36 +43,46 @@ def handler(event, context):
     manifest_bucket, manifest_key = rest.split("/", 1)
 
     resp = s3.get_object(Bucket=manifest_bucket, Key=manifest_key)
-    raw_text = resp["Body"].read().decode("utf-8-sig")
 
-    # Keep only non-empty lines (client already ensured 1 JSON object per line)
-    json_lines = [ln for ln in raw_text.splitlines() if ln.strip()]
-
-    if not json_lines:
-        raise RuntimeError(f"[VAL_FILE_BATCHING] Original manifest is empty or only blank lines: {original_manifest_s3_uri}")
-
-    # Chunk into batches
-    batches = [
-        json_lines[i:i + IMAGES_PER_BATCH]
-        for i in range(0, len(json_lines), IMAGES_PER_BATCH)
-    ]
-
+    batch_lines = []
     manifest_uris = []
-    for idx, batch in enumerate(batches, start=1):
-        # make the manifest from the batch (JSONL content)
-        # each element in `batch` is already a JSON string line
+    total = 0
+    idx = 0
 
-        manifest_body = ("\n".join(batch) + "\n").encode("utf-8")
-        manifest_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
+    #  This makes memory usage ~O(batch_size) instead of O(file_size).
+    for raw in resp["Body"].iter_lines():
+        if not raw:
+            continue
 
-        s3.put_object(
-            Bucket=FILE_BUCKET_NAME,
-            Key=manifest_key,
-            Body=manifest_body,
-            ContentType="application/x-ndjson"
-        )
+        # Decode; handle possible BOM on first line
+        line = raw.decode("utf-8-sig").strip()
+        if not line:
+            continue
 
-        manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{manifest_key}")
+        total += 1
+        batch_lines.append(line)
+
+        if len(batch_lines) >= IMAGES_PER_BATCH:
+            idx += 1
+            body = ("\n".join(batch_lines) + "\n").encode("utf-8")
+            out_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
+
+            s3.put_object(
+                Bucket=FILE_BUCKET_NAME,
+                Key=out_key,
+                Body=body,
+                ContentType="application/x-ndjson",
+            )
+            manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{out_key}")
+            batch_lines = []
+
+    # flush last partial batch
+    if batch_lines:
+        idx += 1
+        body = ("\n".join(batch_lines) + "\n").encode("utf-8")
+        out_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
+        s3.put_object(Bucket=FILE_BUCKET_NAME, Key=out_key, Body=body, ContentType="application/x-ndjson")
+        manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{out_key}")
 
     result = {
         "job_id": job_id,
@@ -80,10 +91,10 @@ def handler(event, context):
         "label_type": label_type,
         "data_source":data_source,
         "manifests": manifest_uris,
-        "expected_count": len(json_lines)
+        "expected_count": total
     }
 
-    msg = f"[VAL_FILE_BATCHING] Done batching {len(json_lines)} total images for image upload validation: label type = {label_type}, {IMAGES_PER_BATCH} images per batch."
+    msg = f"[VAL_FILE_BATCHING] Done batching {total} total images for image upload validation: label type = {label_type}, {IMAGES_PER_BATCH} images per batch."
     log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
 
     return result

@@ -306,12 +306,16 @@ class BatchingStage(Construct):
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
             "ICEBERG_DATABASE_NAME": iceberg_database_name,
-            "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
-            "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
             "AWS_REGION": region,
             "AWS_DEFAULT_REGION": region,
-            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time")
+            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time"),
+            "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
+            "IMAGE_LABELS_TABLE_NAME": "image_labels",
+            "CANONICAL_BBOXES_TABLE_NAME": "canonical_bounding_boxes",
+            "CANONICAL_SEMANTIC_MASKS_TABLE_NAME": "canonical_semantic_masks",
+            "CANONICAL_INSTANCE_ANNS_TABLE_NAME": "canonical_instance_annotations",
+            "UPLOAD_STAGING_TABLE_NAME": "upload_staging"
         }
         if extra_container_env:
             container_env.update(extra_container_env)

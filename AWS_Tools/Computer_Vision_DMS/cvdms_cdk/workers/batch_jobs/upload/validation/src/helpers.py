@@ -127,7 +127,7 @@ def create_and_save_labels(line,
         return [], [], None, f"Unsupported label_type: {label_type}"
 
     except Exception as e:
-        return [], [], None, f"Error creating and saving label for label type {label_type}: {e}"
+        return [], [], None, f"[VAL_JOB_DEF] Error creating and saving label for label type {label_type}: {e}"
 
 def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     od = line.get("object-detection", {})
@@ -162,7 +162,8 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
         if not isinstance(class_name, str) or not class_name.strip():
             raise ValueError(f"class-map missing class for class_id={cid}")
 
-        classes_present.append(class_name.strip().lower())
+        cn = class_name.strip().lower()
+        classes_present.append(cn)
 
         coords = {}
         for f in ("top", "left", "height", "width"):
@@ -179,7 +180,6 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
 
             coords[f] = v
 
-        cn = class_name.strip().lower()
         out_anns.append({"class_name": cn, "coordinates": coords})
         tuples_anns.append((cn, coords['top'], coords['left'], coords['height'], coords['width']))
 
@@ -221,21 +221,34 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
     for _, v in icm.items():
         if not isinstance(v, dict):
             continue
+
         cn = v.get("class-name")
         hc = v.get("hex-color")
-        if not isinstance(cn, str) or not isinstance(hc, str):
+        if not isinstance(cn, str) or not isinstance(hc, str) or cn == "":
             continue
-        cn = cn.strip()
+
+        cn = cn.strip().lower()
         hc = normalize_hex(hc)
+
+        # Guard: same hex-color mapped to two different class-names
+        if hc in hex_to_class and hex_to_class[hc] != cn:
+            raise ValueError(
+                f"semantic internal-color-map has duplicate hex-color {hc} "
+                f"mapped to multiple classes: {hex_to_class[hc]!r} vs {cn!r}"
+            )
+
+        if cn in LOWERCASE_BG_NAMES_POSSIBLE and bg_hex is not None and bg_hex != hc:
+            raise ValueError(f"semantic internal-color-map has multiple background colors: {bg_hex} and {hc}")
+
         hex_to_class[hc] = cn
-        if cn.lower() in LOWERCASE_BG_NAMES_POSSIBLE:
+        if cn in LOWERCASE_BG_NAMES_POSSIBLE:
             bg_hex = hc
 
     if bg_hex is None:
         raise ValueError("semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background")
 
     # Assign IDs: bg=0, then 1..N
-    non_bg = [(h, c) for h, c in hex_to_class.items() if c.lower() not in LOWERCASE_BG_NAMES_POSSIBLE]
+    non_bg = [(h, c) for h, c in hex_to_class.items() if c not in LOWERCASE_BG_NAMES_POSSIBLE]
     non_bg.sort(key=lambda t: (t[1], t[0]))  # deterministic
     hex_to_id = {bg_hex: 0}
     id_to_class = {"0": "bg"}
@@ -243,8 +256,12 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
     for h, c in non_bg:
         if h == bg_hex:
             continue
+        # We only use uint8 masks now, so no pixel values above 255 allowed
+        if next_id > 255:
+            raise ValueError("too many classes/instances for uint8 mask")
+
         hex_to_id[h] = next_id
-        id_to_class[str(next_id)] = c.lower()
+        id_to_class[str(next_id)] = c
         next_id += 1
 
     # Load the RGB mask
@@ -267,10 +284,12 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
         idx[packed == tgt] = np.uint8(pid)
         known |= (packed == tgt)
 
-    if not np.all(known):
-        # compute how many pixels are unknown (cheap)
-        unknown_count = int((~known).sum())
-        raise ValueError(f"semantic mask contains {unknown_count} pixels with colors not in internal-color-map")
+    unknown_mask = ~known
+    if np.any(unknown_mask):
+        unknown_colors = np.unique(packed[unknown_mask])
+        raise ValueError(
+            f"semantic mask contains {unknown_colors.size} unknown colors not in internal-color-map"
+        )
 
     pixel_bytes = idx.tobytes(order="C")
     mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
@@ -284,8 +303,8 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
         if int(pid) == 0:
             continue
         cn = id_to_class.get(str(int(pid)))
-        if cn and cn.lower() not in LOWERCASE_BG_NAMES_POSSIBLE:
-            classes_present.append(cn.lower())
+        if cn and cn not in LOWERCASE_BG_NAMES_POSSIBLE:
+            classes_present.append(cn)
 
     # de-dupe preserve order
     seen = set()
@@ -341,23 +360,31 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
     next_id = 1
 
     for inst in instances:
+
         if not isinstance(inst, dict):
             continue
+
         hc = inst.get("color")
         lab = inst.get("label")
         if not isinstance(hc, str) or not isinstance(lab, str) or not lab.strip():
             continue
 
         hc = normalize_hex(hc)
-        lab = lab.strip()
+        lab = lab.strip().lower()
 
         # IMPORTANT: each instance gets a new ID even if label repeats
         if hc in hex_to_id:
             raise ValueError(f"duplicate instance color in worker response: {hc}")
 
+        if next_id > 255:
+            raise ValueError("too many instances for uint8 mask")
+
         hex_to_id[hc] = next_id
-        id_to_class[str(next_id)] = lab.lower()
+        id_to_class[str(next_id)] = lab
         next_id += 1
+
+    if not hex_to_id:
+        raise ValueError("instance: no valid instances parsed from worker response")
 
     # decode and load RGB mask
     mask_bytes = base64.b64decode(png_b64)
@@ -377,10 +404,15 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
         idx[packed == tgt] = np.uint8(pid)
         known |= (packed == tgt)
 
-    if not np.all(known):
-        # compute how many pixels are unknown (cheap)
-        unknown_count = int((~known).sum())
-        raise ValueError(f"instance mask contains {unknown_count} pixels with colors not present in worker-response instances")
+    unknown_mask = ~known
+    if np.any(unknown_mask):
+        unknown_colors = np.unique(packed[unknown_mask])
+        if unknown_colors.size > 1:
+            raise ValueError(
+                f"instance mask contains {unknown_colors.size} unknown colors "
+                f"(expected at most 1 for background)."
+            )
+        # background stays 0 because idx was initialized to zeros
 
     pixel_bytes = idx.tobytes(order="C")
     mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
@@ -394,8 +426,8 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
         if int(pid) == 0:
             continue
         cn = id_to_class.get(str(int(pid)))
-        if cn and cn.lower() not in LOWERCASE_BG_NAMES_POSSIBLE:
-            classes_present.append(cn.lower())
+        if cn and cn not in LOWERCASE_BG_NAMES_POSSIBLE:
+            classes_present.append(cn)
 
     # de-dupe preserve order
     seen = set()
