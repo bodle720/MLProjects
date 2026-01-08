@@ -1,6 +1,6 @@
 import time
 import boto3
-from typing import Union
+from typing import Union, Optional
 
 athena = boto3.client("athena")
 
@@ -118,3 +118,19 @@ def drop_ctas_table_if_exists(db_name: str,
                                poll,
                                timeout)
     return qid
+
+def athena_get_scalar(qid: str) -> Optional[str]:
+    """
+    Return the first data cell (row 1, col 0) from an Athena query result as a string.
+    - Returns None if there is no data row or no cell.
+    """
+    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
+    rows = resp.get("ResultSet", {}).get("Rows", [])
+    if len(rows) < 2:
+        return None
+
+    data = rows[1].get("Data", [])
+    if not data:
+        return None
+
+    return data[0].get("VarCharValue")

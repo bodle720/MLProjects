@@ -46,8 +46,11 @@ class StorageStack(Stack):
         # Derive a unique glue database name from the stack name to store the iceberg table schema
         raw = sub(r"[^a-z0-9_]", "_", construct_id.lower())
         raw = sub(r"_+", "_", raw).strip("_")  # optional cleanup
-        if not raw or raw[0].isdigit():
+        if not raw:
+            raw = "db"
+        elif raw[0].isdigit():
             raw = f"db_{raw}"
+
         iceberg_database_name = f"{raw}_imagery_db"
 
         # File bucket (S3 file bucket to hold files)

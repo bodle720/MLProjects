@@ -339,7 +339,6 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
 
-
 def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")

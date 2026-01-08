@@ -4,7 +4,9 @@ import math
 
 import boto3
 
-from common.utils import log, wait_for_athena, delete_s3_prefix
+from common.logging_utils import log
+from common.s3_utils import delete_s3_prefix
+from common.athena_utils import run_athena, athena_get_scalar
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -29,41 +31,37 @@ MAX_PREFIX_LENGTH = 3
 JOB_MEMORY_MB = 512
 
 s3 = boto3.client("s3")
-athena = boto3.client("athena")
 
-def _start_athena_count(job_id):
-    """Run a fast COUNT(*) to estimate number of rows for job_id."""
+def athena_get_int_scalar(qid: str, default: int = 0) -> int:
+    s = athena_get_scalar(qid)
+    if s is None:
+        return default
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return default
+
+def generate_start_athena_max_shard_sql(job_id, prefix_len):
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-
     safe_job_id = job_id.replace("'", "''")
-    sql = (
-        f"SELECT count(*) as cnt FROM {table} "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
-    )
-    return resp["QueryExecutionId"]
 
-def _drop_ctas_table_if_exists(job_id):
-    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS {table_name}'
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
+    sql = f"""
+    SELECT max(cnt) AS max_cnt
+    FROM (
+      SELECT substr(sha256_hash, 1, {prefix_len}) AS sha_prefix, count(*) AS cnt
+      FROM {table}
+      WHERE job_id = '{safe_job_id}'
+        AND sha256_hash IS NOT NULL
+        AND sha256_hash <> ''
+      GROUP BY 1
     )
-    return resp["QueryExecutionId"]
+    """
+    return sql
 
-def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
+def generate_start_athena_ctas_sql(job_id, export_s3_prefix, prefix_len):
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-
     safe_job_id = job_id.replace("'", "''")
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-
     tmp_table = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
 
@@ -109,24 +107,7 @@ def _start_athena_ctas(job_id, export_s3_prefix, prefix_len):
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
-
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP
-    )
-    return resp["QueryExecutionId"]
-
-def _read_count_from_athena_result(qid: str) -> int:
-    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
-    rows = resp.get("ResultSet", {}).get("Rows", [])
-    if len(rows) < 2:
-        return 0
-    val = rows[1]["Data"][0].get("VarCharValue")
-    try:
-        return int(val)
-    except Exception:
-        return 0
+    return sql
 
 def _list_export_files(export_prefix):
     """
@@ -214,34 +195,6 @@ def _choose_prefix_length(total_rows,
     # fallback to max_prefix_len
     return max_prefix_len, target
 
-def _start_athena_max_shard(job_id: str, prefix_len: int) -> str:
-    """
-    Returns QueryExecutionId for a query that computes the largest shard size
-    for substr(sha256_hash, 1, prefix_len) within this job_id.
-    Only considers rows that have a non-empty sha256_hash.
-    """
-    table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-    safe_job_id = job_id.replace("'", "''")
-
-    sql = f"""
-    SELECT max(cnt) AS max_cnt
-    FROM (
-      SELECT substr(sha256_hash, 1, {prefix_len}) AS sha_prefix, count(*) AS cnt
-      FROM {table}
-      WHERE job_id = '{safe_job_id}'
-        AND sha256_hash IS NOT NULL
-        AND sha256_hash <> ''
-      GROUP BY 1
-    )
-    """
-
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )
-    return resp["QueryExecutionId"]
-
 def handler(event, context):
     # Validate input
     try:
@@ -262,58 +215,64 @@ def handler(event, context):
 
     # 0) Run COUNT(*) to estimate rows
     try:
-        count_qid = _start_athena_count(job_id)
+        table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
+        safe_job_id = job_id.replace("'", "''")
+        count_sql = (
+            f"SELECT count(*) as cnt FROM {table} "
+            f"WHERE job_id = '{safe_job_id}'"
+        )
+        count_qid, wait_res = run_athena(count_sql,
+                                       "[DEDUP_FILE_BATCHING] RUN COUNT",
+                                       ATHENA_OUTPUT_S3,
+                                       ATHENA_WORKGROUP,
+                                       poll=2.0,
+                                       timeout=300)
     except Exception as e:
         err = f"[DEDUP_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    athena_res = wait_for_athena(count_qid, poll=2.0, timeout=300)
-    if athena_res['state'] != 'SUCCEEDED':
-        resp = athena_res['metadata']
-        err = f"[DEDUP_FILE_BATCHING] Athena COUNT failed for job {job_id}. Response = {resp}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise RuntimeError(err)
-
-    total_rows = _read_count_from_athena_result(count_qid)
+    total_rows = athena_get_int_scalar(count_qid)
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows} rows", LOG_FIREHOSE_STREAM_NAME)
 
     # 1) choose prefix length P dynamically
     prefix_len, target_rows = _choose_prefix_length(
         total_rows,
-        job_memory_mb=int(os.environ.get("DEDUP_JOB_MEMORY_MB", JOB_MEMORY_MB)),
-        avg_row_kb=float(os.environ.get("DEDUP_AVG_ROW_KB", AVG_ROW_KB)),
-        safety_factor=float(os.environ.get("DEDUP_MEMORY_SAFETY_FACTOR", MEMORY_SAFETY_FACTOR)),
-        min_rows=int(os.environ.get("DEDUP_MIN_ROWS_PER_SHARD", MIN_ROWS_PER_SHARD)),
-        max_rows=int(os.environ.get("DEDUP_MAX_ROWS_PER_SHARD", MAX_ROWS_PER_SHARD)),
-        max_prefix_len=int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH))
+        job_memory_mb=JOB_MEMORY_MB,
+        avg_row_kb=AVG_ROW_KB,
+        safety_factor=MEMORY_SAFETY_FACTOR,
+        min_rows=MIN_ROWS_PER_SHARD,
+        max_rows=MAX_ROWS_PER_SHARD,
+        max_prefix_len=MAX_PREFIX_LENGTH
     )
 
     # 1.5) Post-check: ensure max shard size <= target_rows by probing Athena.
     # This prevents a pathological prefix bucket from creating a huge manifest/shard.
     probe_prefix_len = prefix_len
     max_cnt = None
+    for p in range(probe_prefix_len, MAX_PREFIX_LENGTH + 1):
+        sql = generate_start_athena_max_shard_sql(job_id, p)
+        try:
+            qid, _ = run_athena(sql,
+                                 "[DEDUP_FILE_BATCHING] PROBE MAX SHARD",
+                                 ATHENA_OUTPUT_S3,
+                                 ATHENA_WORKGROUP,
+                                 poll=2.0,
+                                 timeout=300)
+        except Exception as e:
+            err = f"[DEDUP_FILE_BATCHING] Failed max shard probe in Athena for p = {p}, {job_id}: {e}"
+            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            raise
 
-    for p in range(probe_prefix_len, int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH)) + 1):
-        qid = _start_athena_max_shard(job_id, p)
-        res = wait_for_athena(qid, poll=2.0, timeout=300)
-        if res["state"] != "SUCCEEDED":
-            resp = res["metadata"]
-            err = f"[DEDUP_FILE_BATCHING] Athena max-shard probe failed for job {job_id} prefix_len={p}. Response={resp}"
-            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-            raise RuntimeError(err)
-
-        max_cnt = _read_count_from_athena_result(qid)
-        log(job_id, user, event_type,
-            f"[DEDUP_FILE_BATCHING] Probe max shard rows for prefix_len={p}: max_cnt={max_cnt} (target={target_rows})",
-            LOG_FIREHOSE_STREAM_NAME)
+        max_cnt = athena_get_int_scalar(qid)
+        log(job_id, user, event_type,f"[DEDUP_FILE_BATCHING] Probe max shard rows for prefix_len={p}: max_cnt={max_cnt} (target={target_rows})", LOG_FIREHOSE_STREAM_NAME)
 
         if max_cnt <= target_rows:
             prefix_len = p
             break
 
     # If still too big even at max prefix len, keep max and warn (can still proceed, but shard may be large).
-    if max_cnt is not None and max_cnt > target_rows and prefix_len == int(os.environ.get("DEDUP_MAX_PREFIX_LENGTH", MAX_PREFIX_LENGTH)):
+    if max_cnt is not None and max_cnt > target_rows and prefix_len ==  MAX_PREFIX_LENGTH:
         warn = (f"[DEDUP_FILE_BATCHING] WARNING: even at MAX_PREFIX_LENGTH={prefix_len}, "
                 f"max shard rows={max_cnt} > target_rows={target_rows}. "
                 f"Proceeding; consider increasing MAX_PREFIX_LENGTH or raising target_rows/job memory.")
@@ -322,30 +281,35 @@ def handler(event, context):
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})", LOG_FIREHOSE_STREAM_NAME)
 
     # 2) Run CTAS to export partitioned files with sha_prefix
+    sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
+    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
+    sql = f'DROP TABLE IF EXISTS {table_name}'
     try:
-        drop_qid = _drop_ctas_table_if_exists(job_id)
-        athena_res = wait_for_athena(drop_qid, poll=3.0, timeout=900)
-        if athena_res['state'] != 'SUCCEEDED':
-            resp = athena_res['metadata']
-            err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
-            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-            raise RuntimeError(err)
-
-        delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
-
-        qid = _start_athena_ctas(job_id, export_prefix_base, prefix_len)
-
+        run_athena(sql,
+                   "[DEDUP_FILE_BATCHING] DROP CTAS IF EXISTS",
+                   ATHENA_OUTPUT_S3,
+                   ATHENA_WORKGROUP,
+                   poll=3.0,
+                   timeout=900)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena CTAS for job {job_id}: {e}"
+        err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS if exists for job {job_id}: {e}"
         log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
         raise
 
-    athena_res = wait_for_athena(qid, poll=3.0, timeout=900)
-    if athena_res['state'] != 'SUCCEEDED':
-        resp = athena_res['metadata']
-        err = f"[DEDUP_FILE_BATCHING] Athena CTAS failed for job {job_id}. Response = {resp}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise RuntimeError(err)
+    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
+
+    sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, prefix_len)
+    try:
+        run_athena(sql,
+                   "[DEDUP_FILE_BATCHING] MAKE CTAS TABLE",
+                   ATHENA_OUTPUT_S3,
+                   ATHENA_WORKGROUP,
+                   poll=3.0,
+                   timeout=900)
+    except Exception as e:
+        err = f"[DEDUP_FILE_BATCHING] Failed to make CTAS table and export for job {job_id}: {e}"
+        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        raise
 
     log(job_id, user, event_type, f"[DEDUP_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
 
