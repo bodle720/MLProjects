@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, List, Iterator
+from typing import Dict, List, Iterator, Union, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -154,3 +154,32 @@ def s3_read_jsonl(
 def s3_read_jsonl_list(bucket: str, jsonl_keys: list[str]) -> Iterator[Dict]:
     for key in jsonl_keys:
         yield from s3_read_jsonl(bucket, key)
+
+def write_s3_obj(bucket: str,
+                key: str,
+                content: Union[str, bytes, bytearray, memoryview],
+                content_type: str,
+                encoding: str = "utf-8") -> str:
+    """
+    Write text or bytes to S3 and return s3:// URI.
+    - If content is str: it is encoded with `encoding`
+    - If content is bytes: it is written as-is
+    """
+    if isinstance(content, str):
+        body = content.encode(encoding)
+    elif isinstance(content, bytes):
+        body = content
+    elif isinstance(content, (bytearray, memoryview)):
+        body = bytes(content)
+    else:
+        raise TypeError(f"content must be str or bytes, got {type(content).__name__}")
+
+    # Safety: put_object limit is 5GB.
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )
+
+    return f"s3://{bucket}/{key}"

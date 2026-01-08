@@ -123,7 +123,7 @@ def handler(event, context):
       {
         job_id, user, event_type, label_type, data_source,
         shard, rows_read,
-        upload_key, imagery_key, labels_key
+        upload_staging_key, canonical_imagery_key, canonical_labels_key
       }
     """
     try:
@@ -132,9 +132,9 @@ def handler(event, context):
         event_type = event["event_type"]
         data_source = event["data_source"]
         shard = event["shard"]
-        upload_key = event["upload_key"]
-        imagery_key = event.get("imagery_key")
-        labels_key = event.get("labels_key")
+        upload_staging_key = event["upload_staging_key"]
+        canonical_imagery_key = event.get("canonical_imagery_key")
+        canonical_labels_key = event.get("canonical_labels_key")
     except KeyError as e:
         raise RuntimeError(f"[REG_INGEST_MAP] Missing key: {e}, event={json.dumps(event)}")
 
@@ -142,10 +142,10 @@ def handler(event, context):
         raise RuntimeError("[REG_INGEST_MAP] missing job_id")
     if not shard:
         raise RuntimeError("[REG_INGEST_MAP] missing shard")
-    if not upload_key or not imagery_key or not labels_key:
+    if not upload_staging_key or not canonical_imagery_key or not canonical_labels_key:
         raise RuntimeError(
             f"[REG_INGEST_MAP] missing shard keys (upload/imagery/labels). "
-            f"upload_key={upload_key}, imagery_key={imagery_key}, labels_key={labels_key}"
+            f"upload_staging_key={upload_staging_key}, canonical_imagery_key={canonical_imagery_key}, canonical_labels_key={canonical_labels_key}"
         )
 
     log(job_id, user, event_type, f"[REG_INGEST_MAP] Ingesting shard={shard}", LOG_FIREHOSE_STREAM_NAME)
@@ -159,7 +159,7 @@ def handler(event, context):
     # 1) upload_staging
     try:
         chunk: List[Dict] = []
-        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_staging_key]):
             chunk.append(row)
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk, UPLOAD_STAGING_TABLE_NAME, "REG_INGEST_MAP.upload_staging")
@@ -178,7 +178,7 @@ def handler(event, context):
         chunk = []
         sha_registered = 0
 
-        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [imagery_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [canonical_imagery_key]):
             chunk.append(row)
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk, CANONICAL_IMAGERY_TABLE_NAME, "REG_INGEST_MAP.canonical_imagery")
@@ -198,7 +198,7 @@ def handler(event, context):
     try:
         per_table_chunks: Dict[str, List[Dict]] = {t: [] for t in LABEL_TABLES}
 
-        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [labels_key]):
+        for row in iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [canonical_labels_key]):
             table = row.get("__table")
             if not table:
                 raise RuntimeError(f"[REG_INGEST_MAP] label row missing __table routing field: {row}")

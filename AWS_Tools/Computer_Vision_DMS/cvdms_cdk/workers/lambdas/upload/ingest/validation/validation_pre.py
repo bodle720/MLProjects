@@ -6,14 +6,9 @@ from typing import Dict, List
 
 import boto3
 
-from common.utils import (
-    log,
-    s3_list_keys,
-    delete_iceberg_partition_rows,
-)
-
-from common.utils import parse_s3_uri
-from common.ingest import s3_read_json
+from common.logging_utils import log
+from common.iceberg_utils import delete_job_rows_from_table
+from common.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -34,7 +29,12 @@ def _count_manifest_lines(manifests: List[str]) -> int:
     """
     total = 0
     for uri in manifests:
-        b, k = parse_s3_uri(uri)
+
+        try:
+            b, k = parse_s3_uri(uri)
+        except:
+            raise ValueError(f"[VAL_INGEST_PRE] Invalid s3 uri: {uri}")
+
         obj = s3.get_object(Bucket=b, Key=k)
         body = obj["Body"]
         for line in body.iter_lines():
@@ -51,8 +51,13 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     expected: List[str] = []
     for m in manifests:
+
         try:
-            _, key = m.replace("s3://", "").split("/", 1)
+            _, key = parse_s3_uri(m)
+        except:
+            raise ValueError(f"[VAL_INGEST_PRE] Invalid s3 uri: {m}")
+
+        try:
             fname = key.split("/")[-1]
             shard_name = fname[:-len(".jsonl")] if fname.endswith(".jsonl") else fname.rsplit(".", 1)[0]
             expected.append(shard_name)
@@ -217,12 +222,13 @@ def handler(event, context):
 
     # 3) Delete upload_staging partition once (safe even if empty)
     try:
-        delete_result = delete_iceberg_partition_rows(
+        delete_result = delete_job_rows_from_table(
             job_id,
+            "[VAL_INGEST_PRE]",
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
         log(job_id, user, event_type, f"[VAL_INGEST_PRE] Deleted upload_staging partition, result={delete_result}", LOG_FIREHOSE_STREAM_NAME)
     except Exception as e:

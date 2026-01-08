@@ -1,7 +1,7 @@
 import os
 import boto3
 from common.logging_utils import log
-from common.s3_utils import delete_s3_prefix
+from common.s3_utils import delete_s3_prefix, parse_s3_uri
 
 s3 = boto3.client("s3")
 
@@ -33,14 +33,10 @@ def handler(event, context):
 
     # Get the json lines from the original manifest
     # original_manifest_s3_uri: s3://bucket/key
-    if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
-        raise RuntimeError(f"[VAL_FILE_BATCHING] Invalid original_manifest_s3_uri: {original_manifest_s3_uri}")
-
-    rest = original_manifest_s3_uri[5:]
-    if "/" not in rest:
-        raise RuntimeError(f"[VAL_FILE_BATCHING] original_manifest_s3_uri missing key: {original_manifest_s3_uri}")
-
-    manifest_bucket, manifest_key = rest.split("/", 1)
+    try:
+        manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri)
+    except ValueError as e:
+        raise RuntimeError(f"[VAL_FILE_BATCHING] Invalid original_manifest_s3_uri: {e}")
 
     resp = s3.get_object(Bucket=manifest_bucket, Key=manifest_key)
 

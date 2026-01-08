@@ -11,7 +11,7 @@ from PIL import Image
 from botocore.exceptions import ClientError
 
 from common.logging_utils import log
-from common.s3_utils import parse_s3_uri
+from common.s3_utils import parse_s3_uri, write_s3_obj
 from helpers import infer_dtype, create_and_save_labels, stable_uuid5, read_manifest_with_retry
 
 # Env Variables from upload stack
@@ -32,16 +32,15 @@ PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processe
 s3 = boto3.client("s3")
 
 def _manifest_shard_name(manifest_s3_uri: str) -> str:
-    _, key = parse_s3_uri(manifest_s3_uri)
+    try:
+        _, key = parse_s3_uri(manifest_s3_uri)
+    except ValueError as e:
+        raise RuntimeError(f"[VAL_JOB_DEF] Invalid manifest_s3_uri: {e}")
+
     fname = key.rsplit("/", 1)[-1]
     # batch-001.jsonl -> batch-001
     m = re.match(r"^(.*)\.jsonl$", fname)
     return m.group(1) if m else fname
-
-def _write_s3_text(bucket: str, key: str, text: str, content_type: str) -> None:
-    body = text.encode("utf-8")
-    # Safety: put_object limit is 5GB, but you may have your own guard; 200 rows should be small.
-    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
 
@@ -115,9 +114,15 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         "matched_image_id": None,
     }
 
-    # Fetch image bytes from source-ref
     try:
         bucket, key = parse_s3_uri(temp_source_ref)
+    except ValueError as e:
+        row["validation_status"] = "failed"
+        row["validation_error"] = str(e)
+        return row
+
+    # Fetch image bytes from source-ref
+    try:
         obj = s3.get_object(Bucket=bucket, Key=key)
     except ClientError as e:
         row["validation_status"] = "failed"
@@ -206,17 +211,27 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     return row
 
 def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary: dict) -> None:
-    bucket = FILE_BUCKET_NAME
-
     jsonl_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
     body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
-    _write_s3_text(bucket, jsonl_key, body, content_type="application/x-ndjson")
-    _write_s3_text(bucket, summary_key, json.dumps(summary), content_type="application/json")
+    write_s3_obj(FILE_BUCKET_NAME,
+                  jsonl_key,
+                  body,
+                  "application/x-ndjson",
+                  encoding="utf-8")
+    write_s3_obj(FILE_BUCKET_NAME,
+                  summary_key,
+                  json.dumps(summary),
+                  "application/json",
+                  encoding="utf-8")
     # write SUCCESS last
-    _write_s3_text(bucket, success_key, "", content_type="text/plain")
+    write_s3_obj(FILE_BUCKET_NAME,
+                  success_key,
+                  "",
+                  "text/plain",
+                  encoding="utf-8")
 
 def main():
     start = time.time()
@@ -227,7 +242,10 @@ def main():
         f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
         LOG_FIREHOSE_STREAM_NAME)
 
-    mb, mk = parse_s3_uri(MANIFEST_S3_URI)
+    try:
+        mb, mk = parse_s3_uri(MANIFEST_S3_URI)
+    except ValueError as e:
+        raise RuntimeError(f"[VAL_JOB_DEF] Invalid MANIFEST_S3_URI: {e}")
 
     obj = read_manifest_with_retry(mb, mk)
     if not obj:

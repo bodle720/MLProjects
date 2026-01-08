@@ -4,8 +4,9 @@ import json
 import logging
 from typing import Dict, List
 
-from common.utils import log, chunked_insert
-from common.ingest import iter_rows_from_jsonl_keys
+from common.logging_utils import log
+from common.iceberg_utils import chunked_insert
+from common.s3_utils import s3_read_jsonl_list
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -26,7 +27,7 @@ def handler(event, context):
       {
         job_id, user, event_type, label_type, data_source,
         shard, rows_read,
-        upload_key,
+        upload_staging_key,
         imagery_key (None),
         labels_key (None)
       }
@@ -36,7 +37,7 @@ def handler(event, context):
         user = event["user"]
         event_type = event["event_type"]
         shard = event["shard"]
-        upload_key = event["upload_key"]
+        upload_staging_key = event["upload_staging_key"]
         rows_read = event.get("rows_read")
     except KeyError as e:
         raise RuntimeError(f"[VAL_INGEST_MAP] Missing key: {e}, event={json.dumps(event)}")
@@ -45,56 +46,56 @@ def handler(event, context):
         raise RuntimeError("[VAL_INGEST_MAP] missing job_id")
     if not shard:
         raise RuntimeError("[VAL_INGEST_MAP] missing shard")
-    if not upload_key:
-        raise RuntimeError("[VAL_INGEST_MAP] missing upload_key")
+    if not upload_staging_key:
+        raise RuntimeError("[VAL_INGEST_MAP] missing upload_staging_key")
 
     log(
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_MAP] Start shard={shard} upload_key=s3://{FILE_BUCKET_NAME}/{upload_key} rows_read={rows_read}",
+        f"[VAL_INGEST_MAP] Start shard={shard} upload_staging_key=s3://{FILE_BUCKET_NAME}/{upload_staging_key} rows_read={rows_read}",
         LOG_FIREHOSE_STREAM_NAME,
     )
 
     inserted_rows = 0
     try:
         # Stream rows from this shard’s processed jsonl (already validated/augmented)
-        rows_iter = iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key])
+        rows_iter = s3_read_jsonl_list(FILE_BUCKET_NAME, [upload_staging_key])
 
         chunk: List[Dict] = []
         for r in rows_iter:
             chunk.append(r)
             if len(chunk) >= CHUNK_SIZE:
-                all_failed, last_error = chunked_insert(
+                ok, err = chunked_insert(
                     chunk,
+                    "[VAL_INGEST_MAP]",
                     ICEBERG_DATABASE_NAME,
                     UPLOAD_STAGING_TABLE_NAME,
                     ATHENA_WORKGROUP,
                     ATHENA_OUTPUT_S3,
                     chunk_size=CHUNK_SIZE,
                 )
-                if all_failed or last_error:
+                if not ok:
                     raise RuntimeError(
-                        f"[VAL_INGEST_MAP] chunked_insert failures shard={shard}; "
-                        f"all_failed={all_failed}, last_error={last_error}"
+                        f"[VAL_INGEST_MAP] chunked_insert failed shard={shard}; err={err}"
                     )
                 inserted_rows += len(chunk)
                 chunk = []
 
         # flush last
         if chunk:
-            all_failed, last_error = chunked_insert(
+            ok, err = chunked_insert(
                 chunk,
+                "[VAL_INGEST_MAP]",
                 ICEBERG_DATABASE_NAME,
                 UPLOAD_STAGING_TABLE_NAME,
                 ATHENA_WORKGROUP,
                 ATHENA_OUTPUT_S3,
                 chunk_size=CHUNK_SIZE,
             )
-            if all_failed or last_error:
+            if not ok:
                 raise RuntimeError(
-                    f"[VAL_INGEST_MAP] chunked_insert failures shard={shard}; "
-                    f"all_failed={all_failed}, last_error={last_error}"
+                    f"[VAL_INGEST_MAP] chunked_insert failed shard={shard}; err={err}"
                 )
             inserted_rows += len(chunk)
 
@@ -118,12 +119,12 @@ def handler(event, context):
         LOG_FIREHOSE_STREAM_NAME,
     )
 
-    if rows_read is not None and int(inserted_rows) != int(rows_read):
+    if rows_read is not None and inserted_rows != int(float(rows_read)):
         raise RuntimeError(f"[VAL_INGEST_MAP] inserted_rows={inserted_rows} != rows_read={rows_read}")
 
     return {
         "job_id": job_id,
         "shard": shard,
         "inserted_rows": inserted_rows,
-        "upload_key": upload_key,
+        "upload_staging_key": upload_staging_key,
     }

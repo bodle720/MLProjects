@@ -2,6 +2,7 @@ import re
 import math
 from datetime import datetime
 from decimal import Decimal
+from typing import Union
 
 from common.table_schemas import TABLES, TableSchema
 from common.athena_utils import run_athena
@@ -140,7 +141,7 @@ def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str])
         raise ValueError("key_cols is empty")
 
     # Special-case upload_staging: partition-friendly delete (job_id partition)
-    if key_cols == ["job_id", "image_id"]:
+    if set(key_cols) == {"job_id", "image_id"}:
         job_id = batch[0].get("job_id")
         if not isinstance(job_id, str) or not job_id.strip():
             raise RuntimeError("delete(upload_staging): missing/invalid job_id in batch[0]")
@@ -236,25 +237,31 @@ def chunked_insert(
     athena_workgroup: str,
     athena_output_s3: str,
     chunk_size: int = 200,
-    poll: int = 5,
-    timeout: int = 1800
-
-) -> tuple[bool, str]:
+    poll: Union[int, float] = 5,
+    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
 
     if not isinstance(chunk_size, int):
-        return True, f"chunk_size must be int, got {type(chunk_size).__name__}"
+        return False, f"chunk_size must be int, got {type(chunk_size).__name__}"
+    if not isinstance(timeout, (int, float)):
+        return False, f"timeout must be int oo float, got {type(timeout).__name__}"
+    if not isinstance(poll, (int, float)):
+        return False, f"poll must be int or float, got {type(poll).__name__}"
     if not (0 < chunk_size <= 1000):
-        return True, f"chunk_size must be 1..1000, got {chunk_size}"
-
-    if not rows:
-        return False, ""
+        return False, f"chunk_size must be 1..1000, got {chunk_size}"
+    if not isinstance(rows, list):
+        return False, f"rows to insert is not a list, got {type(rows).__name__}"
+    if len(rows) == 0:
+        return True, ""
+    if not all(isinstance(r, dict) for r in rows):
+        bad = next((r for r in rows if not isinstance(r, dict)), rows[0])
+        return False, f"not all rows to insert is a dict, a bad row = {bad}"
 
     schema = TABLES.get(table_name)
     if schema is None:
-        return True, f"Unknown table_name: {table_name}"
+        return False, f"Unknown table_name: {table_name}"
 
     full_table = f"\"{iceberg_db_name}\".\"{table_name}\""
-    last_error = ""
+
     chunk_counter = 1
     for i in range(0, len(rows), chunk_size):
         batch = rows[i:i + chunk_size]
@@ -285,12 +292,12 @@ def chunked_insert(
         except Exception as e:
             sample = batch[0] if batch else {}
             sample_types = row_type_summary(sample, schema.cols)
-            last_error = f"{e} | table={table_name} | chunk number={chunk_counter} of chunks of size {chunk_size} for {len(rows)} rows | sample_row_types: {sample_types}"
-            return True, last_error
+            error_msg = f"{e} | table={table_name} | chunk number={chunk_counter} of chunks of size {chunk_size} for {len(rows)} rows | sample_row_types: {sample_types}"
+            return False, error_msg
         else:
             chunk_counter += 1
 
-    return False, last_error
+    return True, ""
 
 def delete_job_rows_from_table(job_id: str,
                                 task_name: str,
@@ -298,8 +305,8 @@ def delete_job_rows_from_table(job_id: str,
                                 table_name,
                                 athena_output_s3,
                                 athena_workgroup,
-                                poll_interval: int = 5,
-                                timeout_seconds: int = 1800,
+                                poll_interval: Union[int,float] = 5,
+                                timeout_seconds: Union[int,float] = 1800,
                                 run_compaction: bool = True):
     """
     Delete all rows for a given job_id from an Iceberg table and optionally compact.
@@ -307,7 +314,7 @@ def delete_job_rows_from_table(job_id: str,
     """
     # Escape single quotes in job_id for SQL literal safety
     safe_job_id = job_id.replace("'", "''")
-    full_table = f"{iceberg_db_name}.{table_name}"
+    full_table = f"\"{iceberg_db_name}\".\"{table_name}\""
 
     # 1) DELETE statement (Iceberg positional delete files)
     delete_sql = f"DELETE FROM {full_table} WHERE job_id = '{safe_job_id}'"

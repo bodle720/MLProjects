@@ -3,10 +3,8 @@ import os
 import json
 import logging
 
-from common.utils import (
-    log,
-    athena_count_job_rows
-)
+from common.logging_utils import log
+from common.athena_utils import athena_count_job_rows
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -63,11 +61,11 @@ def handler(event, context):
     try:
         new_count = athena_count_job_rows(
             job_id,
+            "[VAL_INGEST_POST]",
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            "VAL_INGEST_POST",
-            athena_workgroup=ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
     except Exception as e:
         log(

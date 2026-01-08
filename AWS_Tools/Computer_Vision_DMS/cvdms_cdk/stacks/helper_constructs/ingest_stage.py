@@ -240,7 +240,7 @@ class IngestStage(Construct):
         # 4) Athena: start and poll queries in the workgroup
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+                actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"],
                 resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"],
             )
         )

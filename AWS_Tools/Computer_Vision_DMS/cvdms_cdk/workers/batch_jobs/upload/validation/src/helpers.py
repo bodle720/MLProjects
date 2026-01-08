@@ -10,6 +10,8 @@ from botocore.exceptions import ClientError
 from PIL import Image
 import numpy as np
 
+from common.s3_utils import write_s3_obj
+
 s3 = boto3.client("s3")
 
 LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
@@ -29,15 +31,6 @@ def read_manifest_with_retry(bucket, key, retries=5, delay=2):
             raise RuntimeError(f'Unknown exception in loading manifest file: {e}')
 
     return None
-
-def _put_json(key: str, payload: dict, file_bucket_name: str) -> str:
-    s3.put_object(
-        Bucket=file_bucket_name,
-        Key=key,
-        Body=json.dumps(payload).encode("utf-8"),
-        ContentType="application/json",
-    )
-    return f"s3://{file_bucket_name}/{key}"
 
 # Image feature calculation helpers
 def infer_dtype(img):
@@ -63,15 +56,6 @@ def normalize_hex(h: str) -> str:
     if len(h) == 7:
         return h
     raise ValueError(f"Bad hex color: {h}")
-
-def _put_png(key: str, png_bytes: bytes, file_bucket_name: str) -> str:
-    s3.put_object(
-        Bucket=file_bucket_name,
-        Key=key,
-        Body=png_bytes,
-        ContentType="image/png",
-    )
-    return f"s3://{file_bucket_name}/{key}"
 
 def create_and_save_labels(line,
                            label_type,
@@ -140,7 +124,6 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
     if not isinstance(class_map, dict) or len(class_map) == 0:
         raise ValueError("object-detection-metadata.class-map missing/empty")
 
-    out_anns = []
     tuples_anns = [] # out anns, but as a list of tuples
     classes_present = []
     for ann in anns:
@@ -180,7 +163,6 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
 
             coords[f] = v
 
-        out_anns.append({"class_name": cn, "coordinates": coords})
         tuples_anns.append((cn, coords['top'], coords['left'], coords['height'], coords['width']))
 
     # make label fingerprint
@@ -201,11 +183,28 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
             uniq.append(c)
     classes_present = uniq
 
+    out_anns = [
+        {"class_name": cn, "coordinates": {"top": top, "left": left, "height": height, "width": width}}
+        for (cn, top, left, height, width) in tuples_anns
+    ]
+
     key = f"temp/image-upload/{job_id}/object-detection/{label_fingerprint}.json"
-    uri = _put_json(key, {"annotations": out_anns}, file_bucket_name)
+    uri = write_s3_obj(file_bucket_name,
+                          key,
+                          json.dumps({"annotations": out_anns}),
+                          "application/json",
+                          encoding="utf-8")
+
     return [uri], classes_present, label_fingerprint
 
 def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
+    """
+    Color-invariant semantic fingerprinting:
+    - Uses internal-color-map to map RGB colors -> class names
+    - Assigns numeric IDs by CLASS NAME ONLY (bg=0, others sorted by class name)
+    - Any pixel color not in internal-color-map is treated as background (0) by default
+      (i.e., we do NOT raise on unknown colors).
+    """
     mask_ref = line.get("semantic-segmentation-ref")
     meta = line.get("semantic-segmentation-ref-metadata", {})
     icm = meta.get("internal-color-map", None)
@@ -215,52 +214,47 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
     if not isinstance(icm, dict) or len(icm) == 0:
         raise ValueError("semantic internal-color-map missing/empty")
 
-    # Build hex -> class map and require bg
-    hex_to_class = {}
-    bg_hex = None
+    # Build class_name -> set(hex_colors), require a background class
+    class_to_hexes: dict[str, set[str]] = {}
+    bg_class: str | None = None
+
     for _, v in icm.items():
         if not isinstance(v, dict):
             continue
 
         cn = v.get("class-name")
         hc = v.get("hex-color")
-        if not isinstance(cn, str) or not isinstance(hc, str) or cn == "":
+        if not isinstance(cn, str) or not cn.strip():
+            continue
+        if not isinstance(hc, str) or not hc.strip():
             continue
 
         cn = cn.strip().lower()
         hc = normalize_hex(hc)
 
-        # Guard: same hex-color mapped to two different class-names
-        if hc in hex_to_class and hex_to_class[hc] != cn:
-            raise ValueError(
-                f"semantic internal-color-map has duplicate hex-color {hc} "
-                f"mapped to multiple classes: {hex_to_class[hc]!r} vs {cn!r}"
-            )
+        class_to_hexes.setdefault(cn, set()).add(hc)
 
-        if cn in LOWERCASE_BG_NAMES_POSSIBLE and bg_hex is not None and bg_hex != hc:
-            raise ValueError(f"semantic internal-color-map has multiple background colors: {bg_hex} and {hc}")
-
-        hex_to_class[hc] = cn
         if cn in LOWERCASE_BG_NAMES_POSSIBLE:
-            bg_hex = hc
+            # You can allow both "bg" and "background" to exist; we just need *a* bg class.
+            if bg_class is None:
+                bg_class = cn
 
-    if bg_hex is None:
-        raise ValueError("semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background")
+    if bg_class is None:
+        raise ValueError(
+            "semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background"
+        )
 
-    # Assign IDs: bg=0, then 1..N
-    non_bg = [(h, c) for h, c in hex_to_class.items() if c not in LOWERCASE_BG_NAMES_POSSIBLE]
-    non_bg.sort(key=lambda t: (t[1], t[0]))  # deterministic
-    hex_to_id = {bg_hex: 0}
-    id_to_class = {"0": "bg"}
+    # Deterministic class IDs by CLASS NAME ONLY (color-independent)
+    non_bg_classes = sorted([c for c in class_to_hexes.keys() if c not in LOWERCASE_BG_NAMES_POSSIBLE])
+
+    id_to_class: dict[str, str] = {"0": "bg"}
+    class_to_id: dict[str, int] = {bg_class: 0}
+
     next_id = 1
-    for h, c in non_bg:
-        if h == bg_hex:
-            continue
-        # We only use uint8 masks now, so no pixel values above 255 allowed
+    for c in non_bg_classes:
         if next_id > 255:
-            raise ValueError("too many classes/instances for uint8 mask")
-
-        hex_to_id[h] = next_id
+            raise ValueError("too many classes for uint8 mask")
+        class_to_id[c] = next_id
         id_to_class[str(next_id)] = c
         next_id += 1
 
@@ -269,34 +263,42 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
     mask_bytes = s3.get_object(Bucket=mb, Key=mk)["Body"].read()
     rgb = np.array(Image.open(io.BytesIO(mask_bytes)).convert("RGB"), dtype=np.uint8)
 
-    # Convert to indexed mask
+    # Convert to indexed mask (unknown colors remain 0 == background)
     h, w, _ = rgb.shape
     idx = np.zeros((h, w), dtype=np.uint8)
 
-    packed = (rgb[:, :, 0].astype(np.uint32) << 16) | (rgb[:, :, 1].astype(np.uint32) << 8) | rgb[:, :, 2].astype(np.uint32)
+    packed = (
+        (rgb[:, :, 0].astype(np.uint32) << 16)
+        | (rgb[:, :, 1].astype(np.uint32) << 8)
+        | rgb[:, :, 2].astype(np.uint32)
+    )
 
-    known = np.zeros_like(packed, dtype=bool)
-    for hex_color, pid in hex_to_id.items():
-        r = int(hex_color[1:3], 16)
-        g = int(hex_color[3:5], 16)
-        b = int(hex_color[5:7], 16)
-        tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
-        idx[packed == tgt] = np.uint8(pid)
-        known |= (packed == tgt)
+    # Fill idx by class (union all colors that map to that class)
+    for cls, hexes in class_to_hexes.items():
+        pid = class_to_id.get(cls)
+        if pid is None:
+            continue  # shouldn't happen
+        for hex_color in hexes:
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
+            idx[packed == tgt] = np.uint8(pid)
 
-    unknown_mask = ~known
-    if np.any(unknown_mask):
-        unknown_colors = np.unique(packed[unknown_mask])
-        raise ValueError(
-            f"semantic mask contains {unknown_colors.size} unknown colors not in internal-color-map"
-        )
-
+    # Fingerprint: mapping (stable) + pixels (stable) => color-invariant across GT jobs
     pixel_bytes = idx.tobytes(order="C")
     mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
-    payload = {"v": 1, "label_type": "semantic-segmentation", "h": int(h), "w": int(w), "id_to_class": mapping_pairs}
+    payload = {
+        "v": 1,
+        "label_type": "semantic-segmentation",
+        "h": int(h),
+        "w": int(w),
+        "id_to_class": mapping_pairs,
+    }
     meta_blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     label_fingerprint = hashlib.sha256(meta_blob + b"|" + pixel_bytes).hexdigest()
 
+    # classes_present from ids present
     present_ids = np.unique(idx)
     classes_present = []
     for pid in present_ids:
@@ -306,7 +308,7 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
         if cn and cn not in LOWERCASE_BG_NAMES_POSSIBLE:
             classes_present.append(cn)
 
-    # de-dupe preserve order
+    # de-dupe preserve order (unique already, but keep your pattern)
     seen = set()
     uniq = []
     for c in classes_present:
@@ -315,25 +317,32 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
             uniq.append(c)
     classes_present = uniq
 
-    # Save PNG + meta JSON under same uuid
+    if not classes_present:
+        raise ValueError("semantic mask contains only background")
+
+    # Save PNG + meta JSON using fingerprint as key
     png_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_fingerprint}.png"
     meta_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_fingerprint}.json"
 
     out_img = Image.fromarray(idx, mode="L")
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
-    png_uri = _put_png(png_key, buf.getvalue(), file_bucket_name)
-    meta_uri = _put_json(meta_key, {"id_to_class": id_to_class}, file_bucket_name)
 
-    if not classes_present:
-        raise ValueError("semantic mask contains only background")
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png")
+    meta_uri = write_s3_obj(
+        file_bucket_name,
+        meta_key,
+        json.dumps({"id_to_class": id_to_class}),
+        "application/json",
+        encoding="utf-8",
+    )
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
+
 
 def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")
-
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):
         raise ValueError("instance: worker-response-ref missing/invalid")
 
@@ -354,72 +363,85 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
     if not isinstance(png_b64, str) or not png_b64.strip():
         raise ValueError("instance: worker response missing labeledImage.pngImageData")
 
-    # Each instance gets its own id (0 bg always)
-    id_to_class = {"0": "bg"}
-    hex_to_id = {}
-    next_id = 1
-
+    # Parse instances: keep (hex_color, label)
+    parsed = []
+    seen_colors = set()
     for inst in instances:
-
         if not isinstance(inst, dict):
             continue
-
         hc = inst.get("color")
         lab = inst.get("label")
         if not isinstance(hc, str) or not isinstance(lab, str) or not lab.strip():
             continue
-
         hc = normalize_hex(hc)
-        lab = lab.strip().lower()
-
-        # IMPORTANT: each instance gets a new ID even if label repeats
-        if hc in hex_to_id:
+        if hc in seen_colors:
             raise ValueError(f"duplicate instance color in worker response: {hc}")
+        seen_colors.add(hc)
+        parsed.append((hc, lab.strip().lower()))
 
-        if next_id > 255:
-            raise ValueError("too many instances for uint8 mask")
-
-        hex_to_id[hc] = next_id
-        id_to_class[str(next_id)] = lab
-        next_id += 1
-
-    if not hex_to_id:
+    if not parsed:
         raise ValueError("instance: no valid instances parsed from worker response")
 
     # decode and load RGB mask
     mask_bytes = base64.b64decode(png_b64)
     rgb = np.array(Image.open(io.BytesIO(mask_bytes)).convert("RGB"), dtype=np.uint8)
-
-    # Convert to indexed mask (unknown colors -> 0 bg)
     h, w, _ = rgb.shape
-    idx = np.zeros((h, w), dtype=np.uint8)
-    packed = (rgb[:, :, 0].astype(np.uint32) << 16) | (rgb[:, :, 1].astype(np.uint32) << 8) | rgb[:, :, 2].astype(np.uint32)
 
-    known = np.zeros_like(packed, dtype=bool)
-    for hex_color, pid in hex_to_id.items():
-        r = int(hex_color[1:3], 16)
-        g = int(hex_color[3:5], 16)
-        b = int(hex_color[5:7], 16)
+    packed = (
+        (rgb[:, :, 0].astype(np.uint32) << 16)
+        | (rgb[:, :, 1].astype(np.uint32) << 8)
+        | rgb[:, :, 2].astype(np.uint32)
+    )
+
+    # Build per-instance masks and stable ordering keys
+    instance_masks = []
+    for hc, lab in parsed:
+        r = int(hc[1:3], 16)
+        g = int(hc[3:5], 16)
+        b = int(hc[5:7], 16)
         tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
-        idx[packed == tgt] = np.uint8(pid)
-        known |= (packed == tgt)
 
-    unknown_mask = ~known
-    if np.any(unknown_mask):
-        unknown_colors = np.unique(packed[unknown_mask])
-        if unknown_colors.size > 1:
-            raise ValueError(
-                f"instance mask contains {unknown_colors.size} unknown colors "
-                f"(expected at most 1 for background)."
-            )
-        # background stays 0 because idx was initialized to zeros
+        m = (packed == tgt)
 
+        if not m.any():
+            raise ValueError(f"instance: instance color {hc} ({lab}) has 0 pixels in mask")
+
+        area = int(m.sum())
+        ys, xs = np.where(m)
+        top = int(ys.min()); bottom = int(ys.max())
+        left = int(xs.min()); right = int(xs.max())
+
+        # Tie-breaker that’s independent of the color: hash the binary mask bytes
+        # (We already hash idx bytes later; this is just for deterministic ordering.)
+        mask_hash = hashlib.sha256(m.tobytes(order="C")).hexdigest()
+
+        # Sort key: label + geometry + content hash
+        sort_key = (lab, top, left, bottom, right, area, mask_hash)
+        instance_masks.append((sort_key, lab, m))
+
+    # Deterministic ordering independent of GT color choices
+    instance_masks.sort(key=lambda t: t[0])
+
+    # Build indexed mask + mapping
+    idx = np.zeros((h, w), dtype=np.uint8)
+    id_to_class = {"0": "bg"}
+
+    next_id = 1
+    for _, lab, m in instance_masks:
+        if next_id > 255:
+            raise ValueError("too many instances for uint8 mask")
+        idx[m] = np.uint8(next_id)
+        id_to_class[str(next_id)] = lab
+        next_id += 1
+
+    # Fingerprint (same as you do)
     pixel_bytes = idx.tobytes(order="C")
     mapping_pairs = sorted(id_to_class.items(), key=lambda kv: int(kv[0]))
     payload = {"v": 1, "label_type": "instance-segmentation", "h": int(h), "w": int(w), "id_to_class": mapping_pairs}
     meta_blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     label_fingerprint = hashlib.sha256(meta_blob + b"|" + pixel_bytes).hexdigest()
 
+    # classes_present from ids present
     present_ids = np.unique(idx)
     classes_present = []
     for pid in present_ids:
@@ -438,16 +460,18 @@ def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple
             uniq.append(c)
     classes_present = uniq
 
+    if not classes_present:
+        raise ValueError("instance segmentation mask contains only background")
+
+    # Save outputs using fingerprint as key
     png_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_fingerprint}.png"
     meta_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_fingerprint}.json"
 
     out_img = Image.fromarray(idx, mode="L")
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
-    png_uri = _put_png(png_key, buf.getvalue(), file_bucket_name)
-    meta_uri = _put_json(meta_key, {"id_to_class": id_to_class}, file_bucket_name)
 
-    if not classes_present:
-        raise ValueError("instance segmentation mask contains only background")
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png")
+    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", encoding="utf-8")
 
     return [png_uri, meta_uri], classes_present, label_fingerprint

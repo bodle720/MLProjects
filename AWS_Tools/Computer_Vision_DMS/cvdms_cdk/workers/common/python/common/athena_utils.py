@@ -1,12 +1,12 @@
 import time
 import boto3
+from typing import Union
 
 athena = boto3.client("athena")
 
 def wait_for_athena(query_execution_id,
                     poll=1.5,
                     timeout=900):
-    """Poll Athena until query completes or times out. Returns True if succeeded, False otherwise."""
     start = time.time()
     while True:
         try:
@@ -18,7 +18,7 @@ def wait_for_athena(query_execution_id,
                 return {"state": state, "response": resp, "timed_out": True}
             time.sleep(poll)
         except Exception as e:
-            raise Exception(f'Exception in wait_for_athena: {e}')
+            raise RuntimeError(f"Exception in wait_for_athena: {e}") from e
 
 def athena_error_details(qid: str) -> str:
     qe = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
@@ -32,8 +32,8 @@ def run_athena(sql: str,
                task_name: str,
                athena_output_s3: str,
                athena_workgroup: str,
-               poll: int,
-               timeout: int) -> tuple[str, dict]:
+               poll: Union[int, float],
+               timeout: Union[int, float]) -> tuple[str, dict]:
 
     qid = athena.start_query_execution(
         QueryString=sql,
@@ -44,11 +44,22 @@ def run_athena(sql: str,
     wait_res = wait_for_athena(qid, poll=poll, timeout=timeout)
 
     if wait_res["timed_out"]:
-        reason = athena_error_details(qid)
-        raise RuntimeError(
-            f"{task_name} failed qid={qid} state={wait_res['state']} timed_out={wait_res['timed_out']} reason={reason}"
-        )
+        post_stop_state = "unknown"
+        try:
+            athena.stop_query_execution(QueryExecutionId=qid)
+            stop_attempt_msg = "stop_called"
+        except Exception as e:
+            stop_attempt_msg = f"stop_failed: {e}"
 
+        try:
+            post = athena.get_query_execution(QueryExecutionId=qid)
+            post_stop_state = post["QueryExecution"]["Status"]["State"]
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            f"{task_name} timed out qid={qid} pre_stop_state={wait_res['state']} post_stop_state={post_stop_state} stop_attempt_msg={stop_attempt_msg}"
+        )
     if wait_res["state"] != "SUCCEEDED":
         reason = athena_error_details(qid)
         raise RuntimeError(
@@ -62,8 +73,8 @@ def athena_count_job_rows(job_id: str,
                            table_name: str,
                            athena_output_s3: str,
                            athena_workgroup: str = "primary",
-                           poll: int = 2.0,
-                           timeout: int = 600) -> int:
+                           poll: Union[int, float] = 2.0,
+                           timeout: Union[int, float] = 600) -> int:
     """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
     safe_job_id = job_id.replace("'", "''")
     sql = (

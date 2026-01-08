@@ -44,7 +44,11 @@ class StorageStack(Stack):
         self.firehose_delivery_stream = firehose_delivery_stream
 
         # Derive a unique glue database name from the stack name to store the iceberg table schema
-        iceberg_database_name = sub(r'[^a-z0-9_]', '_', construct_id.lower()) + "_imagery_db"
+        raw = sub(r"[^a-z0-9_]", "_", construct_id.lower())
+        raw = sub(r"_+", "_", raw).strip("_")  # optional cleanup
+        if not raw or raw[0].isdigit():
+            raw = f"db_{raw}"
+        iceberg_database_name = f"{raw}_imagery_db"
 
         # File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
