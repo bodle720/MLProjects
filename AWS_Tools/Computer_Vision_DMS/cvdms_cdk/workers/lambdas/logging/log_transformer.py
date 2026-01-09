@@ -2,68 +2,91 @@ import json
 import base64
 from datetime import datetime, timezone
 
-def normalize_record(record_body):
-    """
-    Accept raw JSON or text and produce stable JSON structure:
-    {
-      "job_id": "<string>",
-      "user": "<string>",
-      "event_type": "<string>",
-      "message": "<string>",
-      "warning": "<string or null>",
-      "error": "<string or null>",
-      "timestamp": "<ISO8601 timestamp UTC>"
-    }
-    """
+ALLOWED_LEVELS = {"info", "warning", "error"}
+
+def _normalize_level(v) -> str:
+    s = str(v).strip().lower()
+    if s in ALLOWED_LEVELS:
+        return s
+    # common synonyms
+    if s in ("warn", "warning"):
+        return "warning"
+    if s in ("err", "error", "fatal", "critical"):
+        return "error"
+    if s in ("info", "information", "debug", "trace"):
+        return "info"
+    return "warning"
+
+def _normalize_timestamp(ts) -> str:
+    # Return ISO8601 UTC "YYYY-mm-ddTHH:MM:SSZ"
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if isinstance(ts, str):
+        s = ts.strip()
+        if not s:
+            return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # If already looks like ISO Z, keep it (optionally you could parse+reformat)
+        if "T" in s and (s.endswith("Z") or s.endswith("z")):
+            return s[:-1] + "Z"
+
+        # Try a couple formats you might produce elsewhere
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+                return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                pass
+
+        # Fallback: keep as string, but this may break parquet timestamp conversion
+        # Better to coerce to now rather than poison the stream:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def normalize_record(record_body: str) -> dict:
     try:
         obj = json.loads(record_body)
+        if not isinstance(obj, dict):
+            obj = {"message": record_body}
     except Exception:
-        print(f'[FIREHOSE_LOG_TRANSFORMER] Could not load json record_body {record_body}')
-        # not JSON, wrap raw text as message
+        preview = record_body[:200].replace("\n", "\\n")
+        print(f"[FIREHOSE_LOG_TRANSFORMER] Could not parse JSON. Preview={preview!r}")
         obj = {"message": record_body}
 
-    # tolerant normalization
-    out = {}
-    out["job_id"] = str(obj.get("job_id")) if obj.get("job_id") is not None else None
-    out["user"] = str(obj.get("user")) if obj.get("user") is not None else None
-    out["event_type"] = obj.get("event_type") or obj.get("type") or "unknown"
-    out["message"] = obj.get("message") or obj.get("msg") or ""
-    out["warning"] = str(obj.get("warning")) if obj.get("warning") is not None else None
-    out["error"] = str(obj.get("error")) if obj.get("error") is not None else None
+    job_id = obj.get("job_id") or "UNKNOWN"
+    user = obj.get("user") or "UNKNOWN"
+    event_type = obj.get("event_type") or "UNKNOWN"
+    message = obj.get("message") or "UNKNOWN"
 
-    # timestamp handling: accept numeric epoch, ISO strings, or create now
-    ts = obj.get("timestamp")
-    if isinstance(ts, (int, float)):
-        out["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    elif ts:
-        out["timestamp"] = str(ts)
-    else:
-        out["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
+    out = {
+        "job_id": str(job_id),
+        "user": str(user),
+        "event_type": str(event_type),
+        "level": _normalize_level(obj.get("level")),
+        "message": str(message),
+        "timestamp": _normalize_timestamp(obj.get("timestamp")),
+    }
     return out
 
 def handler(event, context):
-    """
-    Firehose transformation Lambda entrypoint.
-    Expects event records in the Firehose transform input format.
-    Returns records in Firehose transform output format.
-    """
     output = {"records": []}
 
     for rec in event.get("records", []):
-        rec_id = rec.get("recordId")
-        # Firehose gives base64 data
+        rec_id = rec.get("recordId", "UNKNOWN")
+
         try:
-            raw = base64.b64decode(rec.get("data")).decode("utf-8")
+            raw_bytes = base64.b64decode(rec.get("data") or b"")
+            raw = raw_bytes.decode("utf-8", errors="replace")
+            raw = raw.lstrip("\ufeff").strip()
         except Exception as e:
-            print(f"[FIREHOSE_LOG_TRANSFORMER] Issue decoding, setting raw = empty string for rec = {rec}, error = {e}")
+            print(f"[FIREHOSE_LOG_TRANSFORMER] decode failed rec_id={rec_id}: {e}")
             raw = ""
 
         normalized = normalize_record(raw)
-        print("[FIREHOSE_LOG_TRANSFORMER] Normalized record = ", normalized) # for debugging
 
-        # Firehose JSON->Parquet conversion expects JSON lines; send back a JSON string per record.
-        out_data = json.dumps(normalized) + "\n"
+        out_data = json.dumps(normalized, ensure_ascii=False) + "\n"
         out_b64 = base64.b64encode(out_data.encode("utf-8")).decode("utf-8")
 
         output["records"].append({

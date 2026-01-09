@@ -30,6 +30,10 @@ class LoggingStack(Stack):
         '''
         super().__init__(scope, construct_id, **kwargs)
 
+        # Make the table and db name
+        logs_db_name = f"{app_name.lower()}_logs_db"
+        logs_table_name = f"{app_name.lower()}_logs_table"
+
         # Create a Lambda Layer from the common utilities
         common_layer = _lambda.LayerVersion(
             self,
@@ -69,7 +73,7 @@ class LoggingStack(Stack):
         glue_db = glue.CfnDatabase(self, "LogsGlueDatabase",
             catalog_id=self.account,
             database_input=glue.CfnDatabase.DatabaseInputProperty(
-                name=f"{app_name.lower()}_logs_db"
+                name=logs_db_name
             )
         )
 
@@ -78,7 +82,7 @@ class LoggingStack(Stack):
             catalog_id=self.account,
             database_name=glue_db.ref,
             table_input=glue.CfnTable.TableInputProperty(
-                name=f"{app_name.lower()}_logs_table",
+                name=logs_table_name,
                 table_type="EXTERNAL_TABLE",
                 parameters={
                     "classification": "parquet",
@@ -93,9 +97,8 @@ class LoggingStack(Stack):
                         glue.CfnTable.ColumnProperty(name="job_id", type="string"),
                         glue.CfnTable.ColumnProperty(name="user", type="string"),
                         glue.CfnTable.ColumnProperty(name="event_type", type="string"),
+                        glue.CfnTable.ColumnProperty(name="level", type="string"),
                         glue.CfnTable.ColumnProperty(name="message", type="string"),
-                        glue.CfnTable.ColumnProperty(name="warning", type="string"),
-                        glue.CfnTable.ColumnProperty(name="error", type="string"),
                         glue.CfnTable.ColumnProperty(name="timestamp", type="timestamp"),
                     ],
                     input_format="org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
@@ -199,8 +202,8 @@ class LoggingStack(Stack):
                                          )
                                      ),
                                      schema_configuration=firehose.CfnDeliveryStream.SchemaConfigurationProperty(
-                                         database_name=f"{app_name.lower()}_logs_db",
-                                         table_name=f"{app_name.lower()}_logs_table",
+                                         database_name=logs_db_name,
+                                         table_name=logs_table_name,
                                          region=self.region,
                                          role_arn=firehose_role.role_arn,
                                          version_id="LATEST"
@@ -240,13 +243,13 @@ class LoggingStack(Stack):
         # Glue DB name
         ssm.StringParameter(self, "GlueDbNameParam",
             parameter_name=f"/cvdms/{app_name}/logging/glue_db_name",
-            string_value=glue_db.ref
+            string_value=logs_db_name
         )
 
         # Glue Table name
         ssm.StringParameter(self, "GlueTableNameParam",
             parameter_name=f"/cvdms/{app_name}/logging/glue_table_name",
-            string_value=glue_table.table_input.name
+            string_value=logs_table_name
         )
 
         # Firehose stream name (optional but useful)
