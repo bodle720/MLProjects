@@ -179,7 +179,7 @@ def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: st
                           key,
                           json.dumps({"annotations": out_anns}),
                           "application/json",
-                          encoding="utf-8")
+                          "[VAL_JOB_DEF]")
 
     return [uri], classes_present, label_fingerprint
 
@@ -314,14 +314,9 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
 
-    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png")
-    meta_uri = write_s3_obj(
-        file_bucket_name,
-        meta_key,
-        json.dumps({"id_to_class": id_to_class}),
-        "application/json",
-        encoding="utf-8",
-    )
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", "[VAL_JOB_DEF]")
+
+    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", "[VAL_JOB_DEF]")
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
 
@@ -456,7 +451,7 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
 
-    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png")
-    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", encoding="utf-8")
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", "[VAL_JOB_DEF]")
+    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", "[VAL_JOB_DEF]")
 
     return [png_uri, meta_uri], classes_present, label_fingerprint

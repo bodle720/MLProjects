@@ -99,7 +99,7 @@ def to_sql_value(schema,
         if not isinstance(v, str) or not v.strip():
             return "NULL"
         s = v.strip()
-        validate_timestamp_str(s)   # raises if bad
+        validate_timestamp_str(s, task_name)   # raises if bad
         return f"TIMESTAMP '{escape_sql_string(s)}'"
 
     if t == "array_string":
@@ -129,12 +129,13 @@ def to_sql_value(schema,
 
 def build_insert_sql(batch: list[dict],
                      full_table: str,
+                     task_name: str,
                      schema: TableSchema) -> str:
     cols = schema.cols
 
     values_clause: list[str] = []
     for r in batch:
-        values = [to_sql_value(schema, r, c) for c in cols]
+        values = [to_sql_value(schema, r, c, task_name) for c in cols]
         values_clause.append("(" + ", ".join(values) + ")")
 
     return f"INSERT INTO {full_table} ({', '.join(cols)}) VALUES " + ", ".join(values_clause)
@@ -276,7 +277,7 @@ def chunked_insert(rows: list[dict],
             continue
 
         try:
-            delete_sql = build_delete_sql_by_keys(batch, full_table, schema.key_cols)
+            delete_sql = build_delete_sql_by_keys(batch, full_table, task_name, schema.key_cols)
             run_athena(
                 delete_sql,
                 f"{task_name} DELETE",
@@ -286,7 +287,7 @@ def chunked_insert(rows: list[dict],
                 timeout
             )
 
-            insert_sql = build_insert_sql(batch, full_table, schema)
+            insert_sql = build_insert_sql(batch, full_table, task_name, schema)
             run_athena(
                 insert_sql,
                 f"{task_name} INSERT",

@@ -8,7 +8,6 @@ from common.s3_utils import s3_list_keys, s3_read_json
 from common.athena_utils import athena_count_job_rows
 from common.iceberg_utils import delete_job_rows_from_table
 
-# Env
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
@@ -200,7 +199,7 @@ def handler(event, context):
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Deleted upload_staging partition, result={delete_result}")
     except Exception as e:

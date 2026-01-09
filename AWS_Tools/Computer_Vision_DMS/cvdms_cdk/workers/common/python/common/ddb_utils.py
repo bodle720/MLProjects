@@ -1,13 +1,9 @@
 import time
-import logging
 import boto3
 from typing import Any, Dict, Optional, Literal
 from botocore.exceptions import ClientError
 
 from common.logging_utils import log
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource("dynamodb")
 
