@@ -11,8 +11,8 @@ from PIL import Image
 from botocore.exceptions import ClientError
 
 from common.logging_utils import log
-from common.s3_utils import parse_s3_uri, write_s3_obj
-from helpers import infer_dtype, create_and_save_labels, stable_uuid5, read_manifest_with_retry
+from common.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
+from helpers import infer_dtype, create_and_save_labels, stable_uuid5
 
 # Env Variables from upload stack
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -33,7 +33,7 @@ s3 = boto3.client("s3")
 
 def _manifest_shard_name(manifest_s3_uri: str) -> str:
     try:
-        _, key = parse_s3_uri(manifest_s3_uri)
+        _, key = parse_s3_uri(manifest_s3_uri, "[VAL_JOB_DEF]")
     except ValueError as e:
         raise RuntimeError(f"[VAL_JOB_DEF] Invalid manifest_s3_uri: {e}")
 
@@ -115,7 +115,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     }
 
     try:
-        bucket, key = parse_s3_uri(temp_source_ref)
+        bucket, key = parse_s3_uri(temp_source_ref, "[VAL_JOB_DEF]")
     except ValueError as e:
         row["validation_status"] = "failed"
         row["validation_error"] = str(e)
@@ -220,34 +220,33 @@ def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary
                   jsonl_key,
                   body,
                   "application/x-ndjson",
-                  encoding="utf-8")
+                 "[VAL_JOB_DEF]")
     write_s3_obj(FILE_BUCKET_NAME,
                   summary_key,
                   json.dumps(summary),
                   "application/json",
-                  encoding="utf-8")
+                  "[VAL_JOB_DEF]")
     # write SUCCESS last
     write_s3_obj(FILE_BUCKET_NAME,
                   success_key,
                   "",
                   "text/plain",
-                  encoding="utf-8")
+                  "[VAL_JOB_DEF]")
 
 def main():
     start = time.time()
 
     shard_name = _manifest_shard_name(MANIFEST_S3_URI)
 
-    log(JOB_ID, USER, EVENT_TYPE,
-        f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
-        LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
 
     try:
-        mb, mk = parse_s3_uri(MANIFEST_S3_URI)
+        mb, mk = parse_s3_uri(MANIFEST_S3_URI, "[VAL_JOB_DEF]")
     except ValueError as e:
         raise RuntimeError(f"[VAL_JOB_DEF] Invalid MANIFEST_S3_URI: {e}")
 
-    obj = read_manifest_with_retry(mb, mk)
+    obj = read_obj_with_retry(mb, mk, "[VAL_JOB_DEF]")
     if not obj:
         raise RuntimeError(f"[VAL_JOB_DEF] Could not read manifest: {MANIFEST_S3_URI}")
 
@@ -295,9 +294,8 @@ def main():
     write_processed_outputs(shard_name, processed_rows, summary)
 
     elapsed = time.time() - start
-    log(JOB_ID, USER, EVENT_TYPE,
-        f"[VAL_JOB_DEF] done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}",
-        LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_JOB_DEF] done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}")
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
 from typing import Dict, List
 
 import boto3
@@ -10,10 +9,6 @@ from common.logging_utils import log
 from common.iceberg_utils import delete_job_rows_from_table
 from common.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Env vars defined in stack code
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
@@ -29,9 +24,8 @@ def _count_manifest_lines(manifests: List[str]) -> int:
     """
     total = 0
     for uri in manifests:
-
         try:
-            b, k = parse_s3_uri(uri)
+            b, k = parse_s3_uri(uri, "[VAL_INGEST_PRE]")
         except:
             raise ValueError(f"[VAL_INGEST_PRE] Invalid s3 uri: {uri}")
 
@@ -53,7 +47,7 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     for m in manifests:
 
         try:
-            _, key = parse_s3_uri(m)
+            _, key = parse_s3_uri(m, "[VAL_INGEST_PRE]")
         except:
             raise ValueError(f"[VAL_INGEST_PRE] Invalid s3 uri: {m}")
 
@@ -119,7 +113,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = s3_read_json(bucket, summary_key)
+        summary = s3_read_json(bucket, summary_key, "[VAL_INGEST_PRE]")
         rows_read = int(summary.get("rows_read", 0))
         failed_rows = int(summary.get("failed_rows", 0))
         processed_rows = int(summary.get("processed_rows", 0))
@@ -165,7 +159,7 @@ def handler(event, context):
     if not manifests or not isinstance(manifests, list):
         raise RuntimeError("[VAL_INGEST_PRE] manifests must be a non-empty list of s3 URIs")
 
-    log(job_id, user, event_type, f"[VAL_INGEST_PRE] Starting validation pre-ingest for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[VAL_INGEST_PRE] Starting validation pre-ingest for job {job_id}")
 
     # 0) Determine expected_count
     expected_count = None
@@ -179,27 +173,27 @@ def handler(event, context):
         try:
             expected_count = _count_manifest_lines(manifests)
         except Exception as e:
-            log(job_id, user, event_type, f"[VAL_INGEST_PRE] Failed counting manifest lines: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[VAL_INGEST_PRE] Failed counting manifest lines: {e}", level="error")
             raise
 
     if expected_count <= 0:
         err = f"[VAL_INGEST_PRE] expected_count is {expected_count} (manifests empty?)"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    log(job_id, user, event_type, f"[VAL_INGEST_PRE] expected_count={expected_count}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[VAL_INGEST_PRE] expected_count={expected_count}")
 
     # 1) Collect processed outputs + verify completeness
     try:
         collected = _collect_processed_shards(job_id, manifests)
     except Exception as e:
-        log(job_id, user, event_type, f"[VAL_INGEST_PRE] Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[VAL_INGEST_PRE] Failed collecting processed shards: {e}", level="error")
         raise
 
     missing = collected["missing_shards"]
     if missing:
         err = f"[VAL_INGEST_PRE] Missing processed outputs for shards: {missing}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     shards = collected["shards"]
@@ -210,14 +204,14 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_PRE] Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_PRE] Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}"
     )
 
     # 2) Verify counts: workers rows_read must equal expected_count
     if total_rows_read != expected_count:
         err = f"[VAL_INGEST_PRE] Row count mismatch: expected_count={expected_count}, workers rows_read={total_rows_read}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # 3) Delete upload_staging partition once (safe even if empty)
@@ -230,9 +224,9 @@ def handler(event, context):
             ATHENA_OUTPUT_S3,
             ATHENA_WORKGROUP
         )
-        log(job_id, user, event_type, f"[VAL_INGEST_PRE] Deleted upload_staging partition, result={delete_result}", LOG_FIREHOSE_STREAM_NAME)
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[VAL_INGEST_PRE] Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
-        log(job_id, user, event_type, f"[VAL_INGEST_PRE] Failed deleting upload_staging partition: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[VAL_INGEST_PRE] Failed deleting upload_staging partition: {e}", level="error")
         raise
 
     return {

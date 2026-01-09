@@ -1,55 +1,30 @@
 import os
 import json
-import logging
 from typing import Dict, List, Iterable, Tuple, Optional
 
 import boto3
 from botocore.exceptions import ClientError
 
-from common.utils import (
-    log,
-    update_job_status,
-    release_lock,
-    delete_s3_prefix,
-    wait_for_athena
-)
+from common.logging_utils import log
+from common.s3_utils import delete_s3_prefix, parse_s3_uri, get_key_basename
+from common.ddb_utils import update_job_status, release_lock
+from common.iceberg_utils import escape_sql_string
+from common.athena_utils import run_athena, athena_fetch_all_rows
+from common.table_schemas import CANONICAL_IMAGERY_TABLE_NAME, CANONICAL_BBOX_TABLE_NAME, \
+                                 CANONICAL_SEMANTIC_TABLE_NAME, CANONICAL_INSTANCE_TABLE_NAME, \
+                                 UPLOAD_STAGING_TABLE_NAME
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ["UPLOAD_STAGING_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 
-# canonical table names (stable per your schema)
-CANONICAL_IMAGERY_TABLE = "canonical_imagery"
-CANONICAL_BBOX_TABLE = "canonical_bounding_boxes"
-CANONICAL_SEMANTIC_TABLE = "canonical_semantic_masks"
-CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
-
-athena = boto3.client("athena")
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def _escape_sql_string(s: str) -> str:
-    return s.replace("'", "''")
-
-def _parse_s3_uri(uri: str) -> Tuple[str, str]:
-    # expects s3://bucket/key
-    if not uri or not uri.startswith("s3://"):
-        raise ValueError(f"Invalid S3 URI: {uri!r}")
-    bucket_key = uri[len("s3://"):]
-    bucket, key = bucket_key.split("/", 1)
-    return bucket, key
-
-def _basename(key: str) -> str:
-    return key.rsplit("/", 1)[-1]
 
 def _split_ext(name: str) -> Tuple[str, str]:
     if "." not in name:
@@ -57,60 +32,8 @@ def _split_ext(name: str) -> Tuple[str, str]:
     stem, ext = name.rsplit(".", 1)
     return stem, ext.lower()
 
-def _athena_query(sql: str, poll: float = 2.0, timeout: int = 900) -> str:
-    q = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )
-    qid = q["QueryExecutionId"]
-    res = wait_for_athena(qid, poll=poll, timeout=timeout)
-    if res["state"] != "SUCCEEDED":
-        meta = res.get("metadata")
-        raise RuntimeError(f"Athena query failed state={res['state']} sql={sql} meta={meta}")
-    return qid
-
-def _athena_fetch_all_rows(qid: str) -> List[Dict[str, Optional[str]]]:
-    """
-    Returns list[dict] mapping column_name -> VarCharValue (strings).
-    Note: Athena returns everything as strings here.
-    """
-    rows_out: List[Dict[str, Optional[str]]] = []
-    next_token = None
-    header: List[str] = []
-
-    while True:
-        kwargs = {"QueryExecutionId": qid}
-        if next_token:
-            kwargs["NextToken"] = next_token
-
-        resp = athena.get_query_results(**kwargs)
-        rs = resp.get("ResultSet", {})
-        rows = rs.get("Rows", [])
-
-        # first page contains header row
-        if not header:
-            if not rows:
-                return []
-            header = [c.get("VarCharValue", "") for c in rows[0].get("Data", [])]
-            rows = rows[1:]  # drop header row
-
-        for r in rows:
-            data = r.get("Data", [])
-            item = {}
-            for i, col in enumerate(header):
-                v = data[i].get("VarCharValue") if i < len(data) else None
-                item[col] = v
-            rows_out.append(item)
-
-        next_token = resp.get("NextToken")
-        if not next_token:
-            break
-
-    return rows_out
-
 def _get_job_sha256s(job_id: str) -> List[str]:
-    safe_job = _escape_sql_string(job_id)
+    safe_job = escape_sql_string(job_id)
     db = ICEBERG_DATABASE_NAME
     t = UPLOAD_STAGING_TABLE_NAME
 
@@ -121,8 +44,15 @@ def _get_job_sha256s(job_id: str) -> List[str]:
       AND registration_status = 'passed'
       AND sha256_hash IS NOT NULL
     """
-    qid = _athena_query(sql, poll=2.0, timeout=900)
-    rows = _athena_fetch_all_rows(qid)
+
+    qid, _ = run_athena(sql,
+                         "[DLQ_PROCESSOR]",
+                         ATHENA_OUTPUT_S3,
+                         ATHENA_WORKGROUP,
+                         poll=2.0,
+                         timeout=900)
+
+    rows = athena_fetch_all_rows(qid)
     out = []
     for r in rows:
         v = r.get("sha256_hash")
@@ -164,7 +94,7 @@ def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
     """
     Pull enough columns from upload_staging to compute rollback targets.
     """
-    safe_job = _escape_sql_string(job_id)
+    safe_job = escape_sql_string(job_id)
     db = ICEBERG_DATABASE_NAME
     t = UPLOAD_STAGING_TABLE_NAME
 
@@ -183,8 +113,15 @@ def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
       AND registration_status = 'passed'
     """
 
-    qid = _athena_query(sql, poll=2.0, timeout=900)
-    return _athena_fetch_all_rows(qid)
+    qid, _ = run_athena(sql,
+                         "[DLQ_PROCESSOR]",
+                         ATHENA_OUTPUT_S3,
+                         ATHENA_WORKGROUP,
+                         poll=2.0,
+                         timeout=900)
+
+    rows = athena_fetch_all_rows(qid)
+    return rows
 
 def _derive_canonical_image_key(data_source: str, image_id: str, temp_source_ref: str) -> Optional[str]:
     """
@@ -194,8 +131,8 @@ def _derive_canonical_image_key(data_source: str, image_id: str, temp_source_ref
     if not (data_source and image_id and temp_source_ref):
         return None
     try:
-        _, src_key = _parse_s3_uri(temp_source_ref)
-        fname = _basename(src_key)
+        _, src_key = parse_s3_uri(temp_source_ref, "[DLQ_PROCESSOR]")
+        fname = get_key_basename(src_key)
         _, ext = _split_ext(fname)
         if ext not in ("png", "jpg", "jpeg"):
             return None
@@ -207,8 +144,8 @@ def _label_uuid_from_temp_ref(uri: str) -> Optional[str]:
     if not uri:
         return None
     try:
-        _, key = _parse_s3_uri(uri)
-        fname = _basename(key)
+        _, key = parse_s3_uri(uri, "[DLQ_PROCESSOR]")
+        fname = get_key_basename(key)
         stem, _ = _split_ext(fname)
         return stem or None
     except Exception:
@@ -309,9 +246,14 @@ def _delete_iceberg_by_image_ids(table_name: str, image_ids: List[str], chunk_si
 
     db = ICEBERG_DATABASE_NAME
     for chunk in _chunked(image_ids, chunk_size):
-        in_list = ", ".join(f"'{_escape_sql_string(i)}'" for i in chunk)
+        in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
         sql = f'DELETE FROM "{db}"."{table_name}" WHERE image_id IN ({in_list})'
-        _athena_query(sql, poll=2.0, timeout=1800)
+        _, _ = run_athena(sql,
+                            "[DLQ_PROCESSOR]",
+                            ATHENA_OUTPUT_S3,
+                            ATHENA_WORKGROUP,
+                            poll=2.0,
+                            timeout=1800)
 
 def handler(event, context):
     total_records = 0
@@ -333,7 +275,6 @@ def handler(event, context):
         job_id = body.get("job_id")
         user = body.get("user")
         event_type = body.get("event_type")
-        error = body.get("error")
 
         if source not in ("stepfunctions", "kickoff", "lambda"):
             print(f"[DLQ_PROCESSOR] Skipping unknown source={source}")
@@ -344,22 +285,22 @@ def handler(event, context):
             continue
 
         # Original failure reason
-        log(job_id, user, event_type, "[DLQ_PROCESSOR] Original failure reason", LOG_FIREHOSE_STREAM_NAME, error=str(error), level="error")
-        log(job_id, user, event_type, f"[DLQ_PROCESSOR] DLQ received message: {body}", LOG_FIREHOSE_STREAM_NAME)
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Original failure reason", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] DLQ received message: {body}")
 
         # 1) Delete temp folder for this job (always)
         prefix = f"temp/image-upload/{job_id}/"
         try:
-            delete_s3_prefix(FILE_BUCKET_NAME, prefix)
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] Deleted temp s3 prefix", LOG_FIREHOSE_STREAM_NAME)
+            delete_s3_prefix(FILE_BUCKET_NAME, prefix, "[DLQ_PROCESSOR]")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Deleted temp s3 prefix")
         except Exception as e:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] Temp S3 cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Temp S3 cleanup failed", level="error")
 
         # 2) Roll back canonical writes (Iceberg + S3) best-effort
         try:
             registered_rows = _get_registered_upload_rows(job_id)
         except Exception as e:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] Failed querying upload_staging for rollback targets", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Failed querying upload_staging for rollback targets", level="error")
             registered_rows = []
 
         # If we have rows that claim registration passed, rollback the canonical side-effects
@@ -396,13 +337,13 @@ def handler(event, context):
 
                 # 2a) delete canonical iceberg rows (tables first to avoid dangling refs)
                 try:
-                    _delete_iceberg_by_image_ids(CANONICAL_IMAGERY_TABLE, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_BBOX_TABLE, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_SEMANTIC_TABLE, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_INSTANCE_TABLE, image_ids)
-                    log(job_id, user, event_type, f"[DLQ_PROCESSOR] Deleted canonical iceberg rows for {len(image_ids)} image_id(s)", LOG_FIREHOSE_STREAM_NAME)
+                    _delete_iceberg_by_image_ids(CANONICAL_IMAGERY_TABLE_NAME, image_ids)
+                    _delete_iceberg_by_image_ids(CANONICAL_BBOX_TABLE_NAME, image_ids)
+                    _delete_iceberg_by_image_ids(CANONICAL_SEMANTIC_TABLE_NAME, image_ids)
+                    _delete_iceberg_by_image_ids(CANONICAL_INSTANCE_TABLE_NAME, image_ids)
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Deleted canonical iceberg rows for {len(image_ids)} image_id(s)")
                 except Exception as e:
-                    log(job_id, user, event_type, "[DLQ_PROCESSOR] Canonical Iceberg cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Canonical Iceberg cleanup failed", level="error")
 
                 # 2b) delete canonical s3 objects
                 try:
@@ -417,55 +358,58 @@ def handler(event, context):
                     deleted_est, errors = _delete_s3_keys_best_effort(FILE_BUCKET_NAME, uniqk, batch_size=1000)
                     msg = f"[DLQ_PROCESSOR] Deleted canonical S3 objects: attempted={len(uniqk)} deleted_est={deleted_est} errors={errors}"
                     if errors:
-                        log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME, warning="Some canonical S3 deletes reported errors")
+                        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level='warning')
                     else:
-                        log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
+                        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
                 except Exception as e:
-                    log(job_id, user, event_type, "[DLQ_PROCESSOR] Canonical S3 cleanup failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Canonical S3 cleanup failed", level="error")
 
             except Exception as e:
-                log(job_id, user, event_type, "[DLQ_PROCESSOR] Rollback orchestration failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Rollback orchestration failed", level="error")
         else:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] No registration-passed rows found; skipping canonical rollback", LOG_FIREHOSE_STREAM_NAME)
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] No registration-passed rows found; skipping canonical rollback")
 
-        # 3) Mark job FAILED (keep this)
+        # 3) Mark job FAILED
         try:
-            update_success, update_msg = update_job_status(
-                job_id,
-                "FAILED",
-                JOB_TABLE_NAME,
-                LOG_FIREHOSE_STREAM_NAME,
-                user=user,
-                event_type=event_type,
-                error_msg=None,
-            )
-            log(job_id, user, event_type, f"[DLQ_PROCESSOR] Updated job status to FAILED. success={update_success}, msg={update_msg}", LOG_FIREHOSE_STREAM_NAME)
+            update_success, update_msg = update_job_status(job_id,
+                                                            "FAILED",
+                                                            JOB_TABLE_NAME,
+                                                            LOG_FIREHOSE_STREAM_NAME,
+                                                            user=user,
+                                                            event_type=event_type,
+                                                            error_msg=None)
+
+            if update_success:
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Updated job to status to FAILED successfully.")
+            else:
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DLQ_PROCESSOR] Failed to set job status to FAILED, message = {update_msg}", level="error")
+
         except Exception as e:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] Updating job status FAILED", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Updating job status FAILED with exception: {e}", level="error")
 
         # 4) Remove any registered hashes in the hash table if error occurred after registration
         try:
             shas = _get_job_sha256s(job_id)
             d, s = _delete_sha256_entries_for_job(job_id, shas)
-            log(job_id, user, event_type,
-                f"[DLQ_PROCESSOR] SHA256 rollback: deleted={d} skipped={s} candidates={len(shas)}",
-                LOG_FIREHOSE_STREAM_NAME)
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] SHA256 rollback: deleted={d} skipped={s} candidates={len(shas)}")
         except Exception as e:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] SHA256 rollback failed",
-                LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] SHA256 rollback failed: {e}", level="error")
 
-        # 5) Release global lock (keep this)
+        # 5) Release global lock
         try:
-            release_success, release_msg = release_lock(
-                job_id,
-                LOCK_TABLE_NAME,
-                LOG_FIREHOSE_STREAM_NAME,
-                user=user,
-                event_type=event_type,
-            )
-            log(job_id, user, event_type, f"[DLQ_PROCESSOR] Release lock attempt. success={release_success}, msg={release_msg}", LOG_FIREHOSE_STREAM_NAME)
+            release_success, release_msg = release_lock(job_id,
+                                                        LOCK_TABLE_NAME,
+                                                        LOG_FIREHOSE_STREAM_NAME,
+                                                        user=user,
+                                                        event_type=event_type)
+
+            if release_success:
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Release lock attempt success.")
+            else:
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DLQ_PROCESSOR] Release lock failed, message = {release_msg}", level="error")
+
         except Exception as e:
-            log(job_id, user, event_type, "[DLQ_PROCESSOR] Release lock failed", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Release lock failed with exception: {e}", level="error")
 
         # Did we at least fail the job + unlock?
         if update_success and release_success:

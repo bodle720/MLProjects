@@ -9,8 +9,6 @@ from common.athena_utils import athena_count_job_rows
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Env
-FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
@@ -53,8 +51,8 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_POST] Starting post-ingest verify for job {job_id} (expected_count={original_count})",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_POST] Starting post-ingest verify for job {job_id} (expected_count={original_count})"
     )
 
     # 1) Verify upload_staging count after Map inserts
@@ -72,10 +70,9 @@ def handler(event, context):
             job_id,
             user,
             event_type,
-            f"[VAL_INGEST_POST] Athena count after inserts failed: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"[VAL_INGEST_POST] Athena count after inserts failed: {e}",
+            level="error"
         )
         raise
 
@@ -83,13 +80,13 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_POST] Athena new_count={new_count} for job {job_id}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_POST] Athena new_count={new_count} for job {job_id}"
     )
 
     if int(new_count) != int(original_count):
         err = f"[VAL_INGEST_POST] Post-insert count mismatch: expected_count={original_count}, new_count={new_count}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # Validation ingest has no CTAS table to drop
@@ -97,8 +94,8 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_POST] Validation ingest complete for job {job_id}: expected_count={original_count}, new_count={new_count}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_POST] Validation ingest complete for job {job_id}: expected_count={original_count}, new_count={new_count}"
     )
 
     return {

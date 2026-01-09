@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
 from typing import Dict, List
 
-from common.utils import log, chunked_insert
-from common.ingest import iter_rows_from_jsonl_keys
+from common.logging_utils import log
+from common.s3_utils import s3_read_jsonl_list
+from common.iceberg_utils import chunked_insert
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Env
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
@@ -52,49 +48,51 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[DEDUP_INGEST_MAP] Start shard={shard} upload_key=s3://{FILE_BUCKET_NAME}/{upload_key} rows_read={rows_read}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[DEDUP_INGEST_MAP] Start shard={shard} upload_key=s3://{FILE_BUCKET_NAME}/{upload_key} rows_read={rows_read}"
     )
 
     inserted_rows = 0
     try:
         # Stream rows from this shard’s processed jsonl
-        rows_iter = iter_rows_from_jsonl_keys(FILE_BUCKET_NAME, [upload_key])
+        rows_iter = s3_read_jsonl_list(FILE_BUCKET_NAME, [upload_key], "[DEDUP_INGEST_MAP]")
 
         chunk: List[Dict] = []
         for r in rows_iter:
             chunk.append(r)
             if len(chunk) >= CHUNK_SIZE:
-                all_failed, last_error = chunked_insert(
-                    chunk,
-                    ICEBERG_DATABASE_NAME,
-                    UPLOAD_STAGING_TABLE_NAME,
-                    ATHENA_WORKGROUP,
-                    ATHENA_OUTPUT_S3,
-                    chunk_size=CHUNK_SIZE,
-                )
-                if all_failed or last_error:
+                ok, err = chunked_insert(
+                                        chunk,
+                                        "[DEDUP_INGEST_MAP]",
+                                        ICEBERG_DATABASE_NAME,
+                                        UPLOAD_STAGING_TABLE_NAME,
+                                        ATHENA_WORKGROUP,
+                                        ATHENA_OUTPUT_S3,
+                                        chunk_size=CHUNK_SIZE,
+                                    )
+                if not ok:
                     raise RuntimeError(
                         f"[DEDUP_INGEST_MAP] chunked_insert failures shard={shard}; "
-                        f"all_failed={all_failed}, last_error={last_error}"
+                        f"error={err}"
                     )
                 inserted_rows += len(chunk)
                 chunk = []
 
         # flush last
         if chunk:
-            all_failed, last_error = chunked_insert(
+            ok, err = chunked_insert(
                 chunk,
+                "[DEDUP_INGEST_MAP]",
                 ICEBERG_DATABASE_NAME,
                 UPLOAD_STAGING_TABLE_NAME,
                 ATHENA_WORKGROUP,
                 ATHENA_OUTPUT_S3,
                 chunk_size=CHUNK_SIZE,
             )
-            if all_failed or last_error:
+            if not ok:
                 raise RuntimeError(
                     f"[DEDUP_INGEST_MAP] chunked_insert failures shard={shard}; "
-                    f"all_failed={all_failed}, last_error={last_error}"
+                    f"error={err}"
                 )
             inserted_rows += len(chunk)
 
@@ -103,10 +101,9 @@ def handler(event, context):
             job_id,
             user,
             event_type,
-            f"[DEDUP_INGEST_MAP] Failed shard={shard}: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"[DEDUP_INGEST_MAP] Failed shard={shard}: {e}",
+            level="error"
         )
         raise
 
@@ -114,8 +111,8 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[DEDUP_INGEST_MAP] Done shard={shard} inserted_rows={inserted_rows}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[DEDUP_INGEST_MAP] Done shard={shard} inserted_rows={inserted_rows}"
     )
 
     if rows_read is not None and int(inserted_rows) != int(rows_read):

@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 
 # Lambda layer imports, add to path to avoid pycharm complaining.
 from common.logging_utils import log
+from common.s3_utils import s3_read_json, parse_s3_uri
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
@@ -43,7 +44,7 @@ def send_to_dlq(job_id, user, event_type, error):
             })
         )
     except Exception as e:
-        log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Failed to send to DLQ: {str(error)}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[UPLOAD_KICKOFF] Failed to send to DLQ: {str(error)}", level='error')
 
 def fail(job_id, user, event_type, msg):
     job_id = job_id or "unknown"
@@ -51,16 +52,6 @@ def fail(job_id, user, event_type, msg):
     event_type = event_type or "IMAGE_UPLOAD"
     send_to_dlq(job_id, user, event_type, msg)
     return {"status": "failed", "job_id": job_id, "user": user, "event_type": event_type}
-
-def _parse_s3_uri(uri: str):
-    # uri: s3://bucket/key
-    rest = uri[5:]
-
-    if "/" in rest:
-        b, k = rest.split("/", 1)
-        return b, k
-    else:
-        return None, None
 
 def handler(event, context):
     job_id = "unknown"
@@ -108,8 +99,7 @@ def handler(event, context):
 
     # Now proceed with your existing logic to fetch job.json, validate, etc.
     try:
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        job_data = json.loads(obj["Body"].read().decode("utf-8"))
+        job_data = s3_read_json(bucket, key, "[UPLOAD_KICKOFF]")
         job_id = job_data["job_id"]
         user = job_data["user"]
         event_type = job_data.get("event_type", "IMAGE_UPLOAD")
@@ -118,7 +108,7 @@ def handler(event, context):
         registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from manifest", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, "[UPLOAD_KICKOFF] Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from manifest", level='error')
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
     if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
@@ -127,7 +117,7 @@ def handler(event, context):
     if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Invalid S3 URI original_manifest_s3_uri: {original_manifest_s3_uri}")
 
-    manifest_bucket, manifest_key = _parse_s3_uri(original_manifest_s3_uri)
+    manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri, "[UPLOAD_KICKOFF]")
 
     if manifest_bucket is None:
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: Manifest missing key: {original_manifest_s3_uri}")
@@ -165,10 +155,10 @@ def handler(event, context):
             })
         )
     except Exception as e:
-        log(job_id, user, event_type, "[UPLOAD_KICKOFF] Error starting state machine for upload workflow.", LOG_FIREHOSE_STREAM_NAME, error=str(e), level='error')
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,"[UPLOAD_KICKOFF] Error starting state machine for upload workflow.", level='error')
         return fail(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
 
-    log(job_id, user, event_type, f"[UPLOAD_KICKOFF] Kickoff Lambda started state machine execution {response['executionArn']}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[UPLOAD_KICKOFF] Kickoff Lambda started state machine execution {response['executionArn']}")
 
     return {
         "status": "ok",

@@ -2,27 +2,27 @@ import re
 import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Union
+from typing import Union, Optional
 
 from common.table_schemas import TABLES, TableSchema
 from common.athena_utils import run_athena
 
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
-def validate_timestamp_str(s: str) -> None:
+def validate_timestamp_str(s: str, task_name: str) -> None:
     # fast format check
     if not _TS_RE.match(s):
-        raise ValueError(f"Invalid timestamp format (expected YYYY-MM-DD HH:MM:SS): {s!r}")
+        raise ValueError(f"{task_name} Invalid timestamp format (expected YYYY-MM-DD HH:MM:SS): {s!r}")
 
     try:
         datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except ValueError as e:
-        raise ValueError(f"Invalid timestamp value: {s!r}") from e
+        raise ValueError(f"{task_name} Invalid timestamp value: {s!r}") from e
 
 def escape_sql_string(s: str) -> str:
     return s.replace("'", "''")
 
-def coerce_int(v):
+def coerce_int(v: Union[int, float, Decimal, str, None]) -> Optional[int]:
     if v is None or isinstance(v, bool):
         return None
 
@@ -51,7 +51,7 @@ def coerce_int(v):
 
     return None
 
-def coerce_float(v):
+def coerce_float(v: Union[int, float, Decimal, str, None]) -> Optional[float]:
     if v is None or isinstance(v, bool):
         return None
 
@@ -74,7 +74,10 @@ def coerce_float(v):
 
     return None
 
-def to_sql_value(schema, r: dict, col: str) -> str:
+def to_sql_value(schema,
+                 r: dict,
+                 col: str,
+                 task_name: str) -> str:
     t = schema.types[col]
     v = r.get(col)
 
@@ -102,14 +105,14 @@ def to_sql_value(schema, r: dict, col: str) -> str:
     if t == "array_string":
         if not isinstance(v, list):
             raise ValueError(
-                f"Column {col} expected array<string>, got {type(v).__name__}: {v!r}"
+                f"{task_name} Column {col} expected array<string>, got {type(v).__name__}: {v!r}"
             )
         if len(v) == 0:
             return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
 
         if any(x is None for x in v):
             raise ValueError(
-                f"List {v} contains a None value."
+                f"{task_name} List {v} contains a None value."
             )
 
         # Optional: filter/normalize elements
@@ -122,9 +125,11 @@ def to_sql_value(schema, r: dict, col: str) -> str:
 
         return "ARRAY[" + ", ".join(items) + "]"
 
-    raise ValueError(f"Unhandled SqlType {t} for col {col}")
+    raise ValueError(f"{task_name} Unhandled SqlType {t} for col {col}")
 
-def build_insert_sql(batch: list[dict], full_table: str, schema: TableSchema) -> str:
+def build_insert_sql(batch: list[dict],
+                     full_table: str,
+                     schema: TableSchema) -> str:
     cols = schema.cols
 
     values_clause: list[str] = []
@@ -134,17 +139,20 @@ def build_insert_sql(batch: list[dict], full_table: str, schema: TableSchema) ->
 
     return f"INSERT INTO {full_table} ({', '.join(cols)}) VALUES " + ", ".join(values_clause)
 
-def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str]) -> str:
+def build_delete_sql_by_keys(batch: list[dict],
+                             table: str,
+                             task_name: str,
+                             key_cols: list[str]) -> str:
     if not batch:
-        raise ValueError("batch is empty")
+        raise ValueError(f"{task_name} batch is empty")
     if not key_cols:
-        raise ValueError("key_cols is empty")
+        raise ValueError(f"{task_name} key_cols is empty")
 
     # Special-case upload_staging: partition-friendly delete (job_id partition)
     if set(key_cols) == {"job_id", "image_id"}:
         job_id = batch[0].get("job_id")
         if not isinstance(job_id, str) or not job_id.strip():
-            raise RuntimeError("delete(upload_staging): missing/invalid job_id in batch[0]")
+            raise RuntimeError(f"{task_name} delete(upload_staging): missing/invalid job_id in batch[0]")
 
         safe_job_id = escape_sql_string(job_id.strip())
 
@@ -152,11 +160,11 @@ def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str])
         uniq_ids: list[str] = []
         for r in batch:
             if r.get("job_id") != job_id:
-                raise RuntimeError("delete(upload_staging): mixed job_id in batch")
+                raise RuntimeError(f"{task_name} delete(upload_staging): mixed job_id in batch")
 
             iid = r.get("image_id")
             if not isinstance(iid, str) or not iid.strip():
-                raise RuntimeError("delete(upload_staging): missing/invalid image_id")
+                raise RuntimeError(f"{task_name} delete(upload_staging): missing/invalid image_id")
 
             iid_s = iid.strip()
             if iid_s not in seen:
@@ -178,7 +186,7 @@ def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str])
         for r in batch:
             v = r.get(k)
             if not isinstance(v, str) or not v.strip():
-                raise RuntimeError(f"delete({table}): missing/invalid {k}")
+                raise RuntimeError(f"{task_name} delete({table}): missing/invalid {k}")
 
             v_s = v.strip()
             if v_s not in seen:
@@ -202,7 +210,7 @@ def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str])
         for k in key_cols:
             v = r.get(k)
             if not isinstance(v, str) or not v.strip():
-                raise RuntimeError(f"delete({table}): missing/invalid {k}")
+                raise RuntimeError(f"{task_name} delete({table}): missing/invalid {k}")
 
             sv = v.strip()
             raw_key.append(sv)
@@ -229,16 +237,15 @@ def build_delete_sql_by_keys(batch: list[dict], table: str, key_cols: list[str])
 
     return f"DELETE FROM {table} WHERE {cols_sql} IN ({tuples_sql})"
 
-def chunked_insert(
-    rows: list[dict],
-    task_name: str,
-    iceberg_db_name: str,
-    table_name: str,
-    athena_workgroup: str,
-    athena_output_s3: str,
-    chunk_size: int = 200,
-    poll: Union[int, float] = 5,
-    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
+def chunked_insert(rows: list[dict],
+                    task_name: str,
+                    iceberg_db_name: str,
+                    table_name: str,
+                    athena_workgroup: str,
+                    athena_output_s3: str,
+                    chunk_size: int = 200,
+                    poll: Union[int, float] = 5,
+                    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
 
     if not isinstance(chunk_size, int):
         return False, f"chunk_size must be int, got {type(chunk_size).__name__}"
@@ -301,13 +308,13 @@ def chunked_insert(
 
 def delete_job_rows_from_table(job_id: str,
                                 task_name: str,
-                                iceberg_db_name,
-                                table_name,
-                                athena_output_s3,
-                                athena_workgroup,
+                                iceberg_db_name: str,
+                                table_name: str,
+                                athena_output_s3: str,
+                                athena_workgroup: str,
                                 poll_interval: Union[int,float] = 5,
                                 timeout_seconds: Union[int,float] = 1800,
-                                run_compaction: bool = True):
+                                run_compaction: bool = True) -> dict:
     """
     Delete all rows for a given job_id from an Iceberg table and optionally compact.
     Returns a dict with query ids and final states for DELETE and OPTIMIZE.

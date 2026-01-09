@@ -1,39 +1,76 @@
 import time
 import boto3
-from typing import Union, Optional
+from typing import Union, TypedDict, Any, Dict, Optional, List
 
 athena = boto3.client("athena")
 
-def wait_for_athena(query_execution_id,
-                    poll=1.5,
-                    timeout=900):
+class AthenaWaitResult(TypedDict):
+    state: str
+    response: Dict[str, Any]
+    timed_out: bool
+
+def wait_for_athena(query_execution_id: str,
+                    task_name: str,
+                    poll: Union[int, float] = 1.5,
+                    timeout: Union[int, float] = 900) -> AthenaWaitResult:
+    try:
+        poll_s = float(poll)
+        timeout_s = float(timeout)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{task_name} poll/timeout must be numbers: poll={poll!r} timeout={timeout!r}") from e
+
+    if poll_s <= 0:
+        raise ValueError(f"{task_name} poll must be > 0, got {poll_s}")
+    if timeout_s <= 0:
+        raise ValueError(f"{task_name} timeout must be > 0, got {timeout_s}")
+
     start = time.time()
+
     while True:
         try:
             resp = athena.get_query_execution(QueryExecutionId=query_execution_id)
             state = resp["QueryExecution"]["Status"]["State"]
-            if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
-                return {"state": state, "response": resp, "timed_out": False}
-            if time.time() - start > timeout:
-                return {"state": state, "response": resp, "timed_out": True}
-            time.sleep(poll)
         except Exception as e:
-            raise RuntimeError(f"Exception in wait_for_athena: {e}") from e
+            raise RuntimeError(
+                f"{task_name} wait_for_athena failed qid={query_execution_id}: {e}"
+            ) from e
+
+        if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
+            return {"state": state, "response": resp, "timed_out": False}
+
+        elapsed = time.time() - start
+        if elapsed > timeout_s:
+            return {"state": state, "response": resp, "timed_out": True}
+
+        # Sleep, but don't overshoot remaining time by too much
+        remaining = timeout_s - elapsed
+        time.sleep(min(poll_s, max(0.0, remaining)))
 
 def athena_error_details(qid: str) -> str:
-    qe = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
-    st = qe.get("Status", {})
+    try:
+        qe = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]
+    except Exception as e:
+        return f"failed_to_get_query_execution: {e}"
+
+    st: Dict[str, Any] = qe.get("Status", {}) or {}
+    reason = st.get("StateChangeReason") or "unknown"
+
     ae = st.get("AthenaError")
-    if ae:
-        return f"{st.get('StateChangeReason','unknown')} | AthenaError={ae}"
-    return st.get("StateChangeReason", "unknown")
+    if isinstance(ae, dict):
+        msg = ae.get("ErrorMessage") or ""
+        cat = ae.get("ErrorCategory")
+        typ = ae.get("ErrorType")
+        retryable = ae.get("Retryable")
+        return f"{reason} | AthenaError(message={msg!r}, category={cat}, type={typ}, retryable={retryable})"
+
+    return reason
 
 def run_athena(sql: str,
                task_name: str,
                athena_output_s3: str,
                athena_workgroup: str,
-               poll: Union[int, float],
-               timeout: Union[int, float]) -> tuple[str, dict]:
+               poll: Union[int, float] = 1.5,
+               timeout: Union[int, float] = 900) -> tuple[str, AthenaWaitResult]:
 
     qid = athena.start_query_execution(
         QueryString=sql,
@@ -41,7 +78,7 @@ def run_athena(sql: str,
         WorkGroup=athena_workgroup
     )["QueryExecutionId"]
 
-    wait_res = wait_for_athena(qid, poll=poll, timeout=timeout)
+    wait_res = wait_for_athena(qid, task_name, poll=poll, timeout=timeout)
 
     if wait_res["timed_out"]:
         post_stop_state = "unknown"
@@ -58,13 +95,16 @@ def run_athena(sql: str,
             pass
 
         raise RuntimeError(
-            f"{task_name} timed out qid={qid} pre_stop_state={wait_res['state']} post_stop_state={post_stop_state} stop_attempt_msg={stop_attempt_msg}"
+            f"{task_name} timed out qid={qid} pre_stop_state={wait_res['state']} "
+            f"post_stop_state={post_stop_state} stop_attempt_msg={stop_attempt_msg}, sql preview: {sql[:200]}"
         )
+
     if wait_res["state"] != "SUCCEEDED":
         reason = athena_error_details(qid)
         raise RuntimeError(
-            f"{task_name} failed qid={qid} state={wait_res['state']} timed_out={wait_res['timed_out']} reason={reason}"
+            f"{task_name} failed qid={qid} state={wait_res['state']} reason={reason}, sql preview: {sql[:200]}"
         )
+
     return qid, wait_res
 
 def athena_count_job_rows(job_id: str,
@@ -76,61 +116,124 @@ def athena_count_job_rows(job_id: str,
                            poll: Union[int, float] = 2.0,
                            timeout: Union[int, float] = 600) -> int:
     """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
+
+    if '"' in db_name or '"' in table_name:
+        raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
+
     safe_job_id = job_id.replace("'", "''")
     sql = (
         f"SELECT count(*) as cnt FROM \"{db_name}\".\"{table_name}\" "
         f"WHERE job_id = '{safe_job_id}'"
     )
-    qid, wait_res = run_athena(sql,
-                               task_name,
-                               athena_output_s3,
-                               athena_workgroup,
-                               poll,
-                               timeout)
+    qid, _ = run_athena(sql,
+                       task_name + " COUNT JOB ROWS",
+                       athena_output_s3,
+                       athena_workgroup,
+                       poll,
+                       timeout)
 
-    out = athena.get_query_results(QueryExecutionId=qid)
-    rows = out.get("ResultSet", {}).get("Rows", [])
-
-    if len(rows) < 2 or not rows[1].get("Data"):
+    s = athena_get_scalar(qid, task_name)  # row 1 col 0
+    if s is None:
         return 0
-    val = rows[1]["Data"][0].get("VarCharValue")
-
     try:
-        return int(val)
-    except (TypeError, ValueError):
-        return 0
+        return int(s)
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(f"{task_name} expected integer count, got {s!r} (qid={qid})") from e
 
 def drop_ctas_table_if_exists(db_name: str,
                                table_name: str,
                                task_name: str,
                                athena_output_s3: str,
                                athena_workgroup: str = "primary",
-                               poll: int = 2.0,
-                               timeout: int = 600) -> str:
+                               poll: Union[int, float] = 2.0,
+                               timeout: Union[int, float] = 600) -> str:
+    if '"' in db_name or '"' in table_name:
+        raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
 
-    full_table_name = f"{db_name}.{table_name}"
-    sql = f"DROP TABLE IF EXISTS {full_table_name}"
+    sql = f'DROP TABLE IF EXISTS "{db_name}"."{table_name}"'
 
-    qid, wait_res = run_athena(sql,
-                               task_name,
-                               athena_output_s3,
-                               athena_workgroup,
-                               poll,
-                               timeout)
+    qid, _ = run_athena(sql,
+                       task_name,
+                       athena_output_s3,
+                       athena_workgroup,
+                       poll,
+                       timeout)
     return qid
 
-def athena_get_scalar(qid: str) -> Optional[str]:
+def athena_get_cell(qid: str,
+                    task_name: str,
+                    row_index: int = 1,
+                    col_index: int = 0) -> Optional[str]:
     """
-    Return the first data cell (row 1, col 0) from an Athena query result as a string.
-    - Returns None if there is no data row or no cell.
+    Return a specific cell from Athena results as a string.
+    Defaults to row 1/col 0 (first data row, first column).
+    Returns None if missing or SQL NULL.
     """
-    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
+    if row_index < 0 or col_index < 0:
+        raise ValueError(f"{task_name} ATHENA row_index/col_index must be >= 0, got {row_index=}, {col_index=}")
+
+    try:
+        resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=max(10, row_index + 1))
+    except Exception as e:
+        raise RuntimeError(f"{task_name} ATHENA get_query_results failed qid={qid}: {e}") from e
+
     rows = resp.get("ResultSet", {}).get("Rows", [])
-    if len(rows) < 2:
+    if len(rows) <= row_index:
         return None
 
-    data = rows[1].get("Data", [])
-    if not data:
+    data = rows[row_index].get("Data", [])
+    if len(data) <= col_index:
         return None
 
-    return data[0].get("VarCharValue")
+    return data[col_index].get("VarCharValue")
+
+def athena_get_scalar(qid: str, task_name: str) -> Optional[str]:
+    return athena_get_cell(qid, task_name, row_index=1, col_index=0)
+
+def athena_get_int_scalar(qid: str, task_name: str, default: int = 0) -> int:
+    s = athena_get_scalar(qid, task_name)
+    if s is None:
+        return default
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return default
+
+def athena_fetch_all_rows(qid: str) -> List[Dict[str, Optional[str]]]:
+    """
+    Returns list[dict] mapping column_name -> VarCharValue (strings).
+    Note: Athena returns everything as strings here.
+    """
+    rows_out: List[Dict[str, Optional[str]]] = []
+    next_token = None
+    header: List[str] = []
+
+    while True:
+        kwargs = {"QueryExecutionId": qid}
+        if next_token:
+            kwargs["NextToken"] = next_token
+
+        resp = athena.get_query_results(**kwargs)
+        rs = resp.get("ResultSet", {})
+        rows = rs.get("Rows", [])
+
+        # first page contains header row
+        if not header:
+            if not rows:
+                return []
+            header = [c.get("VarCharValue", "") for c in rows[0].get("Data", [])]
+            rows = rows[1:]  # drop header row
+
+        for r in rows:
+            data = r.get("Data", [])
+            item = {}
+            for i, col in enumerate(header):
+                v = data[i].get("VarCharValue") if i < len(data) else None
+                item[col] = v
+            rows_out.append(item)
+
+        next_token = resp.get("NextToken")
+        if not next_token:
+            break
+
+    return rows_out

@@ -1,12 +1,11 @@
 import io
-import time
 import json
 import base64
 import uuid
 import hashlib
+from typing import Optional
 
 import boto3
-from botocore.exceptions import ClientError
 from PIL import Image
 import numpy as np
 
@@ -19,21 +18,8 @@ LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
 def stable_uuid5(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
-def read_manifest_with_retry(bucket, key, retries=5, delay=2):
-    for attempt in range(retries):
-        try:
-            return s3.get_object(Bucket=bucket, Key=key)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchKey":
-                if attempt < retries - 1:
-                    time.sleep(delay)
-                    continue
-            raise RuntimeError(f'Unknown exception in loading manifest file: {e}')
-
-    return None
-
 # Image feature calculation helpers
-def infer_dtype(img):
+def infer_dtype(img) -> str:
     mode = img.mode
     if mode in ("L", "RGB", "RGBA", "CMYK", "YCbCr"):
         return "uint8"
@@ -57,10 +43,10 @@ def normalize_hex(h: str) -> str:
         return h
     raise ValueError(f"Bad hex color: {h}")
 
-def create_and_save_labels(line,
-                           label_type,
-                           job_id,
-                           file_bucket_name):
+def create_and_save_labels(line: dict,
+                           label_type: str,
+                           job_id: str,
+                           file_bucket_name: str) -> tuple[list[str], list[str], Optional[str], Optional[str]]:
     try:
         if label_type == "single-label":
             meta = line.get("single-label-metadata", {})
@@ -113,7 +99,7 @@ def create_and_save_labels(line,
     except Exception as e:
         return [], [], None, f"[VAL_JOB_DEF] Error creating and saving label for label type {label_type}: {e}"
 
-def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
+def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     od = line.get("object-detection", {})
     meta = line.get("object-detection-metadata", {})
     anns = od.get("annotations", None)
@@ -197,7 +183,7 @@ def _create_object_detection_label(line, job_id, file_bucket_name) -> tuple[list
 
     return [uri], classes_present, label_fingerprint
 
-def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
+def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     """
     Color-invariant semantic fingerprinting:
     - Uses internal-color-map to map RGB colors -> class names
@@ -339,7 +325,7 @@ def _create_semantic_segmentation_label(line, job_id, file_bucket_name) -> tuple
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
 
-def _create_instance_segmentation_label(line, job_id, file_bucket_name) -> tuple[list[str], list[str], str]:
+def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):

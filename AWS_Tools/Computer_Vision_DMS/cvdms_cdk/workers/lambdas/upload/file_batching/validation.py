@@ -1,9 +1,7 @@
 import os
-import boto3
-from common.logging_utils import log
-from common.s3_utils import delete_s3_prefix, parse_s3_uri
 
-s3 = boto3.client("s3")
+from common.logging_utils import log
+from common.s3_utils import delete_s3_prefix, parse_s3_uri, write_s3_obj, read_obj_with_retry
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
@@ -27,18 +25,18 @@ def handler(event, context):
     except KeyError as e:
         raise RuntimeError(f"[VAL_FILE_BATCHING] Validation batching Lambda failed: missing required key {e}")
 
-    log(job_id, user, event_type, f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[VAL_FILE_BATCHING] Starting batching of images for image upload validation job id {job_id}.")
     manifest_prefix = f"temp/image-upload/{job_id}/batches/validation-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix)
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, "[VAL_FILE_BATCHING]")
 
     # Get the json lines from the original manifest
     # original_manifest_s3_uri: s3://bucket/key
     try:
-        manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri)
+        manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri, "[VAL_FILE_BATCHING]")
     except ValueError as e:
         raise RuntimeError(f"[VAL_FILE_BATCHING] Invalid original_manifest_s3_uri: {e}")
 
-    resp = s3.get_object(Bucket=manifest_bucket, Key=manifest_key)
+    resp = read_obj_with_retry(manifest_bucket, manifest_key, "[VAL_FILE_BATCHING]")
 
     batch_lines = []
     manifest_uris = []
@@ -60,25 +58,19 @@ def handler(event, context):
 
         if len(batch_lines) >= IMAGES_PER_BATCH:
             idx += 1
-            body = ("\n".join(batch_lines) + "\n").encode("utf-8")
+            content = "\n".join(batch_lines) + "\n"
             out_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
-
-            s3.put_object(
-                Bucket=FILE_BUCKET_NAME,
-                Key=out_key,
-                Body=body,
-                ContentType="application/x-ndjson",
-            )
-            manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{out_key}")
+            uri = write_s3_obj(FILE_BUCKET_NAME, out_key, content, "application/x-ndjson", "[VAL_FILE_BATCHING]")
+            manifest_uris.append(uri)
             batch_lines = []
 
     # flush last partial batch
     if batch_lines:
         idx += 1
-        body = ("\n".join(batch_lines) + "\n").encode("utf-8")
+        content = "\n".join(batch_lines) + "\n"
         out_key = f"{manifest_prefix}batch-{idx:03d}.jsonl"
-        s3.put_object(Bucket=FILE_BUCKET_NAME, Key=out_key, Body=body, ContentType="application/x-ndjson")
-        manifest_uris.append(f"s3://{FILE_BUCKET_NAME}/{out_key}")
+        uri = write_s3_obj(FILE_BUCKET_NAME, out_key, content, "application/x-ndjson", "[VAL_FILE_BATCHING]")
+        manifest_uris.append(uri)
 
     result = {
         "job_id": job_id,
@@ -91,6 +83,6 @@ def handler(event, context):
     }
 
     msg = f"[VAL_FILE_BATCHING] Done batching {total} total images for image upload validation: label type = {label_type}, {IMAGES_PER_BATCH} images per batch."
-    log(job_id, user, event_type, msg, LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
 
     return result

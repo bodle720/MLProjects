@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
 from typing import Dict, List
 
-from common.utils import (
-    log,
-    s3_list_keys,
-    athena_count_job_rows,
-    delete_iceberg_partition_rows,
-)
-from common.ingest import s3_read_json
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+from common.logging_utils import log
+from common.s3_utils import s3_list_keys, s3_read_json
+from common.athena_utils import athena_count_job_rows
+from common.iceberg_utils import delete_job_rows_from_table
 
 # Env
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -107,7 +100,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = s3_read_json(bucket, summary_key)
+        summary = s3_read_json(bucket, summary_key, "[DEDUP_INGEST_PRE]")
         rows_read = int(summary.get("rows_read", 0))
         processed_rows = int(summary.get("processed_rows", 0))
 
@@ -151,19 +144,19 @@ def handler(event, context):
     if not manifests or not isinstance(manifests, list):
         raise RuntimeError("[DEDUP_INGEST_PRE] manifests must be a non-empty list of s3 URIs")
 
-    log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Starting dedup pre-ingest for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Starting dedup pre-ingest for job {job_id}")
 
     # 1) Collect processed shard outputs and verify completeness
     try:
         collected = _collect_processed_shards(job_id, manifests)
     except Exception as e:
-        log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Failed collecting processed shards: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Failed collecting processed shards: {e}", level="error")
         raise
 
     missing = collected["missing_shards"]
     if missing:
         err = f"[DEDUP_INGEST_PRE] Missing processed outputs for shards: {missing}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     shards = collected["shards"]
@@ -174,43 +167,44 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[DEDUP_INGEST_PRE] Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[DEDUP_INGEST_PRE] Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}"
     )
 
     # 2) Verify original count via Athena (before deletion)
     try:
         original_count = athena_count_job_rows(
             job_id,
+            "[DEDUP_INGEST_PRE]",
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            "DEDUP_INGEST_PRE",
-            athena_workgroup=ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
     except Exception as e:
-        log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Athena count failed: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Athena count failed: {e}", level="error")
         raise
 
-    log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Athena original_count={original_count}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Athena original_count={original_count}")
 
     if total_rows_read != original_count:
         err = f"[DEDUP_INGEST_PRE] Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # 3) Delete original partition rows once (before Map inserts)
     try:
-        delete_result = delete_iceberg_partition_rows(
+        delete_result = delete_job_rows_from_table(
             job_id,
+            "[DEDUP_INGEST_PRE]",
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
             ATHENA_WORKGROUP,
         )
-        log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Deleted upload_staging partition, result={delete_result}", LOG_FIREHOSE_STREAM_NAME)
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
-        log(job_id, user, event_type, f"[DEDUP_INGEST_PRE] Failed deleting upload_staging partition: {e}", LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Failed deleting upload_staging partition: {e}", level="error")
         raise
 
     # Return the per-shard plan for the Map state

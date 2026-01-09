@@ -1,6 +1,13 @@
 from typing import Literal
 from dataclasses import dataclass
 
+CANONICAL_IMAGERY_TABLE_NAME = "canonical_imagery"
+IMAGE_LABELS_TABLE_NAME = "image_labels"
+CANONICAL_BBOX_TABLE_NAME = "canonical_bounding_boxes"
+CANONICAL_SEMANTIC_TABLE_NAME = "canonical_semantic_masks"
+CANONICAL_INSTANCE_TABLE_NAME = "canonical_instance_annotations"
+UPLOAD_STAGING_TABLE_NAME = "upload_staging"
+
 SqlType = Literal["string", "int", "float", "timestamp", "array_string"]
 
 @dataclass(frozen=True)
@@ -185,10 +192,10 @@ UPLOAD_STAGING_SCHEMA = TableSchema(
 )
 
 TABLES: dict[str, TableSchema] = {
-    "canonical_imagery": CANONICAL_IMAGERY_SCHEMA,
-    "image_labels": IMAGE_LABELS_SCHEMA,
-    "canonical_bounding_boxes": CANONICAL_BOUNDING_BOXES_SCHEMA,
-    "canonical_semantic_masks": CANONICAL_SEMANTIC_MASKS_SCHEMA,
-    "canonical_instance_annotations": CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA,
-    "upload_staging": UPLOAD_STAGING_SCHEMA
+    CANONICAL_IMAGERY_TABLE_NAME: CANONICAL_IMAGERY_SCHEMA,
+    IMAGE_LABELS_TABLE_NAME: IMAGE_LABELS_SCHEMA,
+    CANONICAL_BBOX_TABLE_NAME: CANONICAL_BOUNDING_BOXES_SCHEMA,
+    CANONICAL_SEMANTIC_TABLE_NAME: CANONICAL_SEMANTIC_MASKS_SCHEMA,
+    CANONICAL_INSTANCE_TABLE_NAME: CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA,
+    UPLOAD_STAGING_TABLE_NAME: UPLOAD_STAGING_SCHEMA
 }

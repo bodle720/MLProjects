@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
 from typing import Dict, List
 
 from common.logging_utils import log
 from common.iceberg_utils import chunked_insert
 from common.s3_utils import s3_read_jsonl_list
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Env
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
@@ -53,14 +48,14 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_MAP] Start shard={shard} upload_staging_key=s3://{FILE_BUCKET_NAME}/{upload_staging_key} rows_read={rows_read}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_MAP] Start shard={shard} upload_staging_key=s3://{FILE_BUCKET_NAME}/{upload_staging_key} rows_read={rows_read}"
     )
 
     inserted_rows = 0
     try:
         # Stream rows from this shard’s processed jsonl (already validated/augmented)
-        rows_iter = s3_read_jsonl_list(FILE_BUCKET_NAME, [upload_staging_key])
+        rows_iter = s3_read_jsonl_list(FILE_BUCKET_NAME, [upload_staging_key], "[VAL_INGEST_MAP]")
 
         chunk: List[Dict] = []
         for r in rows_iter:
@@ -104,10 +99,9 @@ def handler(event, context):
             job_id,
             user,
             event_type,
-            f"[VAL_INGEST_MAP] Failed shard={shard}: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"[VAL_INGEST_MAP] Failed shard={shard}: {e}",
+            level="error"
         )
         raise
 
@@ -115,8 +109,8 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[VAL_INGEST_MAP] Done shard={shard} inserted_rows={inserted_rows}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"[VAL_INGEST_MAP] Done shard={shard} inserted_rows={inserted_rows}"
     )
 
     if rows_read is not None and inserted_rows != int(float(rows_read)):
