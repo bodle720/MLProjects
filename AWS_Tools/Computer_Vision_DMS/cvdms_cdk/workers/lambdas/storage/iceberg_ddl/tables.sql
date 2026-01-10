@@ -106,10 +106,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
     dataset_id string,
+    dataset_version int,
     image_id string,
     label string
 )
-PARTITIONED BY (dataset_id)
+PARTITIONED BY (dataset_id, dataset_version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/single_label/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -118,10 +119,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
     dataset_id string,
+    dataset_version int,
     image_id string,
     labels array<string>
 )
-PARTITIONED BY (dataset_id)
+PARTITIONED BY (dataset_id, dataset_version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/multi_label/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -130,10 +132,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     dataset_id string,
+    dataset_version int,
     image_id string,
     bbox_annotation_id string
 )
-PARTITIONED BY (dataset_id)
+PARTITIONED BY (dataset_id, dataset_version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/object_detection/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -142,10 +145,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     dataset_id string,
+    dataset_version int,
     image_id string,
     semantic_mask_id string
 )
-PARTITIONED BY (dataset_id)
+PARTITIONED BY (dataset_id, dataset_version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/semantic_segmentation/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -154,10 +158,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     dataset_id string,
+    dataset_version int,
     image_id string,
     instance_annotation_id string
 )
-PARTITIONED BY (dataset_id)
+PARTITIONED BY (dataset_id, dataset_version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/instance_segmentation/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',

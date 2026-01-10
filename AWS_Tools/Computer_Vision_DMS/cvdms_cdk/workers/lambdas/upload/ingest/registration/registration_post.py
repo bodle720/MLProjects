@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
-from typing import Any, Dict
 
-from common.utils import log, athena_count_job_rows, wait_for_athena
-from common.ingest import drop_ctas_table_if_exists
+from common.logging_utils import log
+from common.athena_utils import athena_count_job_rows, drop_table_if_exists
+from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Env
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-def _require(d: Dict[str, Any], key: str, task: str) -> Any:
-    if key not in d:
-        raise RuntimeError(f"[{task}] Missing key '{key}' in payload: {json.dumps(d)}")
-    return d[key]
+TASK_NAME = "[REG_INGEST_POST]"
 
 def handler(event, context):
     """
@@ -33,37 +24,36 @@ def handler(event, context):
         }
       }
     """
-    task = "REG_INGEST_POST"
+    try:
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
+        pre = event["pre"]
+        original_count = pre["original_count"]
+    except KeyError as e:
+        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
 
-    job_id = _require(event, "job_id", task)
-    user = _require(event, "user", task)
-    event_type = _require(event, "event_type", task)
-
-    pre = _require(event, "pre", task)
-    original_count = _require(pre, "original_count", task)
-
-    log(job_id, user, event_type, f"[{task}] Starting post-ingest verification for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting post-ingest verification for job {job_id}")
 
     # 1) Verify upload_staging row count after Map inserts
     try:
         new_count = athena_count_job_rows(
-            job_id,
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_OUTPUT_S3,
-            task,
-            athena_workgroup=ATHENA_WORKGROUP,
-        )
+                                        job_id,
+                                        TASK_NAME,
+                                        ICEBERG_DATABASE_NAME,
+                                        UPLOAD_STAGING_TABLE_NAME,
+                                        ATHENA_OUTPUT_S3,
+                                        ATHENA_WORKGROUP
+                                    )
     except Exception as e:
-        log(job_id, user, event_type, f"[{task}] Athena count after inserts failed: {e}",
-            LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena count after inserts failed: {e}", level="error")
         raise
 
-    log(job_id, user, event_type, f"[{task}] upload_staging new_count={new_count}, original_count={original_count}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} upload_staging new_count={new_count}, original_count={original_count}")
 
     if int(new_count) != int(original_count):
-        err = f"[{task}] Post-reinsert count mismatch: original_count={original_count}, new_count={new_count}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        err = f"{TASK_NAME} Post-reinsert count mismatch: original_count={original_count}, new_count={new_count}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # 2) Drop CTAS temp table created by registration batching (safe no-op if absent)
@@ -74,25 +64,16 @@ def handler(event, context):
         ctas_table_name = f"reg_export_{sanitized_job_id}"
 
     try:
-        drop_qid = drop_ctas_table_if_exists(
-            ICEBERG_DATABASE_NAME,
-            ctas_table_name,
-            ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP,
-        )
-        res = wait_for_athena(drop_qid, poll=2.0, timeout=600)
-        if res.get("state") != "SUCCEEDED":
-            resp = res.get("metadata")
-            err = f"[{task}] Failed to drop CTAS temp table for job_id={job_id}, table={ctas_table_name}, response={resp}"
-            log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-            raise RuntimeError(err)
-
+        drop_table_if_exists(ICEBERG_DATABASE_NAME,
+                            ctas_table_name,
+                            TASK_NAME,
+                            ATHENA_OUTPUT_S3,
+                            ATHENA_WORKGROUP)
     except Exception as e:
-        log(job_id, user, event_type, f"[{task}] CTAS drop failed table={ctas_table_name}: {e}",
-            LOG_FIREHOSE_STREAM_NAME, error=str(e), level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} CTAS drop failed table={ctas_table_name}: {e}", level="error")
         raise
 
-    log(job_id, user, event_type, f"[{task}] Completed successfully for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Completed successfully for job {job_id}")
 
     # Note: Map results are discarded in the construct, so we can’t compute inserted_* totals here.
     # If we later keep Map results, we can aggregate them here.

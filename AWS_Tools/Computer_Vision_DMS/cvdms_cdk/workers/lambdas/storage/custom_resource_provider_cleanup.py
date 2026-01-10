@@ -8,7 +8,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 lambda_client = boto3.client("lambda")
-CLEANUP_FN = os.environ.get("CLEANUP_FUNCTION_NAME")
+CLEANUP_FUNCTION_NAME = os.environ["CLEANUP_FUNCTION_NAME"]
 
 def handler(event, context):
     logger.info("Received event: %s", json.dumps(event))
@@ -17,7 +17,7 @@ def handler(event, context):
     # Run cleanup on Delete events
     if req_type == "Delete":
         resp = lambda_client.invoke(
-            FunctionName=CLEANUP_FN,
+            FunctionName=CLEANUP_FUNCTION_NAME,
             InvocationType="RequestResponse",
             Payload=json.dumps({"action": "cleanup"})
         )

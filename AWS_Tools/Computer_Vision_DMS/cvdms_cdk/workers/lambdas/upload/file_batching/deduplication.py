@@ -6,15 +6,17 @@ import boto3
 
 from common.logging_utils import log
 from common.s3_utils import delete_s3_prefix
-from common.athena_utils import run_athena, athena_get_int_scalar
+from common.athena_utils import run_athena, athena_get_int_scalar, athena_count_job_rows, drop_table_if_exists
+from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
-ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]  # e.g. s3://<bucket>/athena-results/
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"] # a URI
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+
+TASK_NAME = "[DEDUP_FILE_BATCHING]"
 
 # Tunables (hardcoded)
 # Average row size in KB (conservative metadata estimate). Tune if you have better numbers.
@@ -26,9 +28,10 @@ MIN_ROWS_PER_SHARD = 1000
 MAX_ROWS_PER_SHARD = 20000
 # Max prefix length (hex chars). 1 => 16 prefixes, 2 => 256, 3 => 4096, 4 => 65536
 MAX_PREFIX_LENGTH = 3
+MAX_FILES_PER_MANIFEST = 500  # or 1000
 
-# Job memory (MB) used to compute target rows per shard. Default to 512 to match the job def.
-JOB_MEMORY_MB = 512
+# Job memory (MB) used to compute target rows per shard.
+JOB_MEMORY_MB = 2048
 
 s3 = boto3.client("s3")
 
@@ -100,7 +103,7 @@ def generate_start_athena_ctas_sql(job_id, export_s3_prefix, prefix_len):
     """
     return sql
 
-def _list_export_files(export_prefix):
+def list_export_files(export_prefix):
     """
     List objects under the export prefix and group them by sha_prefix partition.
     Returns dict: {sha_prefix: [s3://.../key, ...], ...}
@@ -109,11 +112,13 @@ def _list_export_files(export_prefix):
     files_by_prefix = {}
     export_prefix = export_prefix.rstrip("/") + "/"
     kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": export_prefix}
-    all_keys = []
+    sample_keys = []
     for page in paginator.paginate(**kwargs):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            all_keys.append(key)
+
+            if len(sample_keys) < 3:
+                sample_keys.append(key)
 
             if key.endswith("/"):
                 continue
@@ -129,12 +134,12 @@ def _list_export_files(export_prefix):
                     sha_prefix = p.split("=", 1)[1]
                     break
             if not sha_prefix:
-                raise RuntimeError(f"[DEDUP_FILE_BATCHING] Unable to extract sha_prefix from export key: {key}")
+                raise RuntimeError(f"{TASK_NAME} Unable to extract sha_prefix from export key: {key}")
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
-    return files_by_prefix, all_keys
+    return files_by_prefix, sample_keys
 
-def _write_manifest(job_id, shard_name, files, manifest_prefix):
+def write_manifest(job_id, shard_name, files, manifest_prefix):
     """
     Write a manifest JSON for a shard. Returns s3 uri.
     Manifest shape:
@@ -154,7 +159,7 @@ def _write_manifest(job_id, shard_name, files, manifest_prefix):
     s3.put_object(Bucket=FILE_BUCKET_NAME, Key=manifest_key, Body=body.encode("utf-8"), ContentType="application/json")
     return f"s3://{FILE_BUCKET_NAME}/{manifest_key}"
 
-def _choose_prefix_length(total_rows,
+def choose_prefix_length(total_rows,
                           job_memory_mb=JOB_MEMORY_MB,
                           avg_row_kb=AVG_ROW_KB,
                           safety_factor=MEMORY_SAFETY_FACTOR,
@@ -195,39 +200,34 @@ def handler(event, context):
         label_type = event["label_type"]
         data_source = event["data_source"]
     except KeyError as e:
-        raise RuntimeError(f"[DEDUP_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"{TASK_NAME} Batching Lambda failed: missing required key {e}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_FILE_BATCHING] Starting dedup batching for job {job_id}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting dedup batching for job {job_id}")
 
     # Prepare prefixes
     export_prefix_base = f"temp/image-upload/{job_id}/batches/deduplication-step/export/"
     manifest_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, "[DEDUP_FILE_BATCHING]")
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, TASK_NAME)
 
     # 0) Run COUNT(*) to estimate rows
     try:
-        table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-        safe_job_id = job_id.replace("'", "''")
-        count_sql = (
-            f"SELECT count(*) as cnt FROM {table} "
-            f"WHERE job_id = '{safe_job_id}'"
-        )
-        count_qid, wait_res = run_athena(count_sql,
-                                       "[DEDUP_FILE_BATCHING] RUN COUNT",
-                                       ATHENA_OUTPUT_S3,
-                                       ATHENA_WORKGROUP,
-                                       poll=2.0,
-                                       timeout=300)
+        total_rows = athena_count_job_rows(job_id,
+                                          TASK_NAME,
+                                          ICEBERG_DATABASE_NAME,
+                                          UPLOAD_STAGING_TABLE_NAME,
+                                          ATHENA_OUTPUT_S3,
+                                          ATHENA_WORKGROUP,
+                                          poll=2.0,
+                                          timeout=300)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to start Athena COUNT for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed to count rows from upload staging table for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    total_rows = athena_get_int_scalar(count_qid, "[DEDUP_FILE_BATCHING")
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DEDUP_FILE_BATCHING] Estimated total rows for job {job_id} = {total_rows} rows")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Estimated total rows for job {job_id} = {total_rows} rows")
 
     # 1) choose prefix length P dynamically
-    prefix_len, target_rows = _choose_prefix_length(
+    prefix_len, target_rows = choose_prefix_length(
         total_rows,
         job_memory_mb=JOB_MEMORY_MB,
         avg_row_kb=AVG_ROW_KB,
@@ -245,18 +245,18 @@ def handler(event, context):
         sql = generate_start_athena_max_shard_sql(job_id, p)
         try:
             qid, _ = run_athena(sql,
-                                 "[DEDUP_FILE_BATCHING] PROBE MAX SHARD",
+                                 f"{TASK_NAME} PROBE MAX SHARD",
                                  ATHENA_OUTPUT_S3,
                                  ATHENA_WORKGROUP,
                                  poll=2.0,
                                  timeout=300)
         except Exception as e:
-            err = f"[DEDUP_FILE_BATCHING] Failed max shard probe in Athena for p = {p}, {job_id}: {e}"
+            err = f"{TASK_NAME} Failed max shard probe in Athena for p = {p}, {job_id}: {e}"
             log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
             raise
 
-        max_cnt = athena_get_int_scalar(qid, "[DEDUP_FILE_BATCHING")
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DEDUP_FILE_BATCHING] Probe max shard rows for prefix_len={p}: max_cnt={max_cnt} (target={target_rows})")
+        max_cnt = athena_get_int_scalar(qid, TASK_NAME)
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Probe max shard rows for prefix_len={p}: max_cnt={max_cnt} (target={target_rows})")
 
         if max_cnt <= target_rows:
             prefix_len = p
@@ -264,56 +264,56 @@ def handler(event, context):
 
     # If still too big even at max prefix len, keep max and warn (can still proceed, but shard may be large).
     if max_cnt is not None and max_cnt > target_rows and prefix_len ==  MAX_PREFIX_LENGTH:
-        warn = (f"[DEDUP_FILE_BATCHING] WARNING: even at MAX_PREFIX_LENGTH={prefix_len}, "
+        warn = (f"{TASK_NAME} WARNING: even at MAX_PREFIX_LENGTH={prefix_len}, "
                 f"max shard rows={max_cnt} > target_rows={target_rows}. "
                 f"Proceeding; consider increasing MAX_PREFIX_LENGTH or raising target_rows/job memory.")
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, warn, level="error")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DEDUP_FILE_BATCHING] Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})")
 
     # 2) Run CTAS to export partitioned files with sha_prefix
     sanitized_job_id = ''.join(c if c.isalnum() else '_' for c in job_id)
-    table_name = f"{ICEBERG_DATABASE_NAME}.dedup_export_{sanitized_job_id}"
-    sql = f'DROP TABLE IF EXISTS {table_name}'
+    table_name = f"dedup_export_{sanitized_job_id}"
     try:
-        run_athena(sql,
-                   "[DEDUP_FILE_BATCHING] DROP CTAS IF EXISTS",
-                   ATHENA_OUTPUT_S3,
-                   ATHENA_WORKGROUP,
-                   poll=3.0,
-                   timeout=900)
+        drop_table_if_exists(ICEBERG_DATABASE_NAME,
+                             table_name,
+                             TASK_NAME,
+                             ATHENA_OUTPUT_S3,
+                             ATHENA_WORKGROUP,
+                             poll=3.0,
+                             timeout=900)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to drop CTAS if exists for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed to drop CTAS table if exists for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base, "[DEDUP_FILE_BATCHING]")
+    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base, TASK_NAME)
 
     sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, prefix_len)
     try:
         run_athena(sql,
-                   "[DEDUP_FILE_BATCHING] MAKE CTAS TABLE",
+                   f"{TASK_NAME} MAKE CTAS TABLE",
                    ATHENA_OUTPUT_S3,
                    ATHENA_WORKGROUP,
                    poll=3.0,
                    timeout=900)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed to make CTAS table and export for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed to make CTAS table and export for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}")
 
     # 3) List exported files and group by sha_prefix
     try:
-        files_by_prefix, all_keys = _list_export_files(export_prefix_base)
+        files_by_prefix, sample_keys = list_export_files(export_prefix_base)
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed listing export files for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed listing export files for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
     if not files_by_prefix:
-        err = f"[DEDUP_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys are: {all_keys[:10]}"
+        err = f"{TASK_NAME} No exported files found for job {job_id} under prefix {export_prefix_base}, sample of keys: {sample_keys}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
@@ -323,17 +323,19 @@ def handler(event, context):
         for shard_prefix, files in sorted(files_by_prefix.items()):
             if not files:
                 continue
-            # If a single shard has too many files/rows, split into sub-manifests of reasonable size.
-            # We use file count as a proxy for rows; split_size_files chosen conservatively.
-            # split_size_files = int(max(1, math.ceil(len(files) / max(1, math.ceil(total_rows / target_rows))))) if total_rows > 0 else 100
-            # split_size_files = max(50, min(split_size_files, 2000))
 
-            manifest_s3_uri = _write_manifest(job_id, shard_prefix, files, manifest_prefix)
-            manifest_uris.append(manifest_s3_uri)
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_FILE_BATCHING] Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}")
+            if len(files) > MAX_FILES_PER_MANIFEST:
+                for part_idx in range(0, len(files), MAX_FILES_PER_MANIFEST):
+                    sub = files[part_idx:part_idx + MAX_FILES_PER_MANIFEST]
+                    shard_name2 = f"{shard_prefix}{part_idx // MAX_FILES_PER_MANIFEST:04d}"
+                    manifest_uris.append(write_manifest(job_id, shard_name2, sub, manifest_prefix))
+            else:
+                manifest_s3_uri = write_manifest(job_id, shard_prefix, files, manifest_prefix)
+                manifest_uris.append(manifest_s3_uri)
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}")
 
     except Exception as e:
-        err = f"[DEDUP_FILE_BATCHING] Failed writing manifests for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed writing manifests for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
@@ -347,6 +349,6 @@ def handler(event, context):
         "manifests": manifest_uris
     }
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_FILE_BATCHING] Batching Lambda completed for job {job_id}. Created {len(manifest_uris)} manifests.")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Batching Lambda completed for job {job_id}. Created {len(manifest_uris)} manifests.")
 
     return result

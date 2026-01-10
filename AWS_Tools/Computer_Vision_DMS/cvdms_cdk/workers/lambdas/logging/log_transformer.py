@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 
 ALLOWED_LEVELS = {"info", "warning", "error"}
 
-def _normalize_level(v) -> str:
+TASK_NAME = "[FIREHOSE_LOG_TRANSFORMER]"
+
+def normalize_level(v) -> str:
     s = str(v).strip().lower()
     if s in ALLOWED_LEVELS:
         return s
@@ -17,7 +19,7 @@ def _normalize_level(v) -> str:
         return "info"
     return "warning"
 
-def _normalize_timestamp(ts) -> str:
+def normalize_timestamp(ts) -> str:
     # Return ISO8601 UTC "YYYY-mm-ddTHH:MM:SSZ"
     if isinstance(ts, (int, float)):
         return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -52,7 +54,7 @@ def normalize_record(record_body: str) -> dict:
             obj = {"message": record_body}
     except Exception:
         preview = record_body[:200].replace("\n", "\\n")
-        print(f"[FIREHOSE_LOG_TRANSFORMER] Could not parse JSON. Preview={preview!r}")
+        print(f"{TASK_NAME} Could not parse JSON. Preview={preview!r}")
         obj = {"message": record_body}
 
     job_id = obj.get("job_id") or "UNKNOWN"
@@ -64,9 +66,9 @@ def normalize_record(record_body: str) -> dict:
         "job_id": str(job_id),
         "user": str(user),
         "event_type": str(event_type),
-        "level": _normalize_level(obj.get("level")),
+        "level": normalize_level(obj.get("level")),
         "message": str(message),
-        "timestamp": _normalize_timestamp(obj.get("timestamp")),
+        "timestamp": normalize_timestamp(obj.get("timestamp")),
     }
     return out
 
@@ -81,7 +83,7 @@ def handler(event, context):
             raw = raw_bytes.decode("utf-8", errors="replace")
             raw = raw.lstrip("\ufeff").strip()
         except Exception as e:
-            print(f"[FIREHOSE_LOG_TRANSFORMER] decode failed rec_id={rec_id}: {e}")
+            print(f"{TASK_NAME} decode failed rec_id={rec_id}: {e}")
             raw = ""
 
         normalized = normalize_record(raw)

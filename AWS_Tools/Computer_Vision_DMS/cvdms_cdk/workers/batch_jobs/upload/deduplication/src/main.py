@@ -9,21 +9,28 @@ from common.logging_utils import log
 from common.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj, read_parquet_rows_from_s3_uris
 from common.ddb_utils import batch_get_dynamodb_items
 
-# Environment variables (provided by BatchingStage)
-MANIFEST_S3_URI = os.environ.get("MANIFEST_S3_URI")
-JOB_ID = os.environ.get("JOB_ID", "unknown")
-USER = os.environ.get("USER", "unknown")
-EVENT_TYPE = os.environ.get("EVENT_TYPE", "unknown")
-FILE_BUCKET_NAME = os.environ.get("FILE_BUCKET_NAME")
-LOG_FIREHOSE_STREAM_NAME = os.environ.get("LOG_FIREHOSE_STREAM_NAME")
-SHA256_TABLE_NAME = os.environ.get("SHA256_TABLE_NAME")
+MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
+JOB_ID = os.environ["JOB_ID"]
+USER = os.environ["USER"]
+LABEL_TYPE = os.environ["LABEL_TYPE"]
+DATA_SOURCE = os.environ["DATA_SOURCE"]
+EVENT_TYPE = os.environ["EVENT_TYPE"]
+FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
+
+TASK_NAME = "[DEDUP_JOB_DEF]"
 
 if not FILE_BUCKET_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] FILE_BUCKET_NAME not set")
+    raise RuntimeError(f"{TASK_NAME} FILE_BUCKET_NAME not set")
 if not LOG_FIREHOSE_STREAM_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
+    raise RuntimeError(f"{TASK_NAME} LOG_FIREHOSE_STREAM_NAME not set")
 if not SHA256_TABLE_NAME:
-    raise RuntimeError("[DEDUP_JOB_DEF] SHA256_TABLE_NAME not set")
+    raise RuntimeError(f"{TASK_NAME} SHA256_TABLE_NAME not set")
 
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/deduplication-step/processed"
 
@@ -64,7 +71,7 @@ def process_manifest(manifest):
         groups[sha].append(r)
 
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"[DEDUP_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
+            raise RuntimeError(f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
 
     processed_rows = []
     representatives = []  # list of (sha, rep_image_id)
@@ -80,7 +87,7 @@ def process_manifest(manifest):
         if (not warned_big_group) and (len(group) > MAX_GROUP_SIZE):
             warned_big_group = True
             logger.warning(
-                "[DEDUP_JOB_DEF] Shard %s has a large sha group: sha=%s size=%d exceeds MAX_GROUP_SIZE=%d",
+                f"{TASK_NAME} Shard %s has a large sha group: sha=%s size=%d exceeds MAX_GROUP_SIZE=%d",
                 shard_name, sha, len(group), MAX_GROUP_SIZE
             )
 
@@ -100,7 +107,7 @@ def process_manifest(manifest):
             internal_dup_count += 1
 
     sha_list = [s for s, _ in representatives]
-    ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, "[DEDUP_JOB_DEF]") if sha_list else {}
+    ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, TASK_NAME) if sha_list else {}
 
     external_dup_count = 0
 
@@ -141,11 +148,11 @@ def write_processed_outputs(shard_name, processed_rows, summary):
 
     body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
     if len(body) > 50_000_000:
-        raise RuntimeError("[DEDUP_JOB_DEF] JSONL too large for put_object; implement multipart upload")
+        raise RuntimeError(f"{TASK_NAME} JSONL too large for put_object; implement multipart upload")
 
-    write_s3_obj(bucket, jsonl_key, body, "application/x-ndjson", "[DEDUP_JOB_DEF]")
-    write_s3_obj(bucket, summary_key, json.dumps(summary), "application/json", "[DEDUP_JOB_DEF]")
-    write_s3_obj(bucket, success_key, "", "text/plain", "[DEDUP_JOB_DEF]")
+    write_s3_obj(bucket, jsonl_key, body, "application/x-ndjson", TASK_NAME)
+    write_s3_obj(bucket, summary_key, json.dumps(summary), "application/json", TASK_NAME)
+    write_s3_obj(bucket, success_key, "", "text/plain", TASK_NAME)
 
     return {
         "jsonl": f"s3://{bucket}/{jsonl_key}",
@@ -156,15 +163,15 @@ def write_processed_outputs(shard_name, processed_rows, summary):
 def main():
     start = time.time()
     if not MANIFEST_S3_URI:
-        raise RuntimeError("[DEDUP_JOB_DEF] MANIFEST_S3_URI not set in environment")
+        raise RuntimeError(f"{TASK_NAME} MANIFEST_S3_URI not set in environment")
 
-    mb, mk = parse_s3_uri(MANIFEST_S3_URI, "[DEDUP_JOB_DEF]")
-    manifest = s3_read_json(mb, mk, "[DEDUP_JOB_DEF]")
+    mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
+    manifest = s3_read_json(mb, mk, TASK_NAME)
 
     shard_name = manifest.get("shard_prefix", "shard")
 
     # START LOG (one line)
-    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"[DEDUP_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI}")
+    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI}")
 
 
     try:
@@ -172,7 +179,7 @@ def main():
         write_processed_outputs(shard_name, processed_rows, summary)
     except Exception as e:
         # ERROR LOG (one line)
-        log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"[DEDUP_JOB_DEF] error shard={shard_name} err={e}", level="error")
+        log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} error shard={shard_name} err={e}", level="error")
         raise
 
     elapsed = time.time() - start
@@ -181,7 +188,7 @@ def main():
     log(
         JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
         (
-            f"[DEDUP_JOB_DEF] done shard={shard_name} "
+            f"{TASK_NAME} done shard={shard_name} "
             f"rows_read={summary['rows_read']} "
             f"internal_duplicates={summary['internal_duplicates']} "
             f"external_duplicates={summary['external_duplicates']} "

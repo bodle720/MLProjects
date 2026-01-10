@@ -8,7 +8,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 lambda_client = boto3.client("lambda")
-DDL_FUNCTION_NAME = os.environ.get("DDL_FUNCTION_NAME")
+DDL_FUNCTION_NAME = os.environ["DDL_FUNCTION_NAME"]
 
 def handler(event, context):
     request_type = event.get("RequestType")

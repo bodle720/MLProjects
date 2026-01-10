@@ -14,28 +14,30 @@ from common.logging_utils import log
 from common.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
 from helpers import infer_dtype, create_and_save_labels, stable_uuid5
 
-# Env Variables from upload stack
-FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
-LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-
-# From the map state input
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
+FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
+TASK_NAME = "[VAL_JOB_DEF]"
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processed"
 
 s3 = boto3.client("s3")
 
-def _manifest_shard_name(manifest_s3_uri: str) -> str:
+def manifest_shard_name(manifest_s3_uri: str) -> str:
     try:
-        _, key = parse_s3_uri(manifest_s3_uri, "[VAL_JOB_DEF]")
+        _, key = parse_s3_uri(manifest_s3_uri, TASK_NAME)
     except ValueError as e:
-        raise RuntimeError(f"[VAL_JOB_DEF] Invalid manifest_s3_uri: {e}")
+        raise RuntimeError(f"{TASK_NAME} Invalid manifest_s3_uri: {e}")
 
     fname = key.rsplit("/", 1)[-1]
     # batch-001.jsonl -> batch-001
@@ -115,7 +117,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     }
 
     try:
-        bucket, key = parse_s3_uri(temp_source_ref, "[VAL_JOB_DEF]")
+        bucket, key = parse_s3_uri(temp_source_ref, TASK_NAME)
     except ValueError as e:
         row["validation_status"] = "failed"
         row["validation_error"] = str(e)
@@ -220,35 +222,35 @@ def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary
                   jsonl_key,
                   body,
                   "application/x-ndjson",
-                 "[VAL_JOB_DEF]")
+                 TASK_NAME)
     write_s3_obj(FILE_BUCKET_NAME,
                   summary_key,
                   json.dumps(summary),
                   "application/json",
-                  "[VAL_JOB_DEF]")
+                  TASK_NAME)
     # write SUCCESS last
     write_s3_obj(FILE_BUCKET_NAME,
                   success_key,
                   "",
                   "text/plain",
-                  "[VAL_JOB_DEF]")
+                  TASK_NAME)
 
 def main():
     start = time.time()
 
-    shard_name = _manifest_shard_name(MANIFEST_S3_URI)
+    shard_name = manifest_shard_name(MANIFEST_S3_URI)
 
     log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
-        f"[VAL_JOB_DEF] start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
+        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
 
     try:
-        mb, mk = parse_s3_uri(MANIFEST_S3_URI, "[VAL_JOB_DEF]")
+        mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
     except ValueError as e:
-        raise RuntimeError(f"[VAL_JOB_DEF] Invalid MANIFEST_S3_URI: {e}")
+        raise RuntimeError(f"{TASK_NAME} Invalid MANIFEST_S3_URI: {e}")
 
-    obj = read_obj_with_retry(mb, mk, "[VAL_JOB_DEF]")
+    obj = read_obj_with_retry(mb, mk, TASK_NAME)
     if not obj:
-        raise RuntimeError(f"[VAL_JOB_DEF] Could not read manifest: {MANIFEST_S3_URI}")
+        raise RuntimeError(f"{TASK_NAME} Could not read manifest: {MANIFEST_S3_URI}")
 
     processed_rows = []
     total = 0
@@ -279,7 +281,7 @@ def main():
         processed_rows.append(row)
 
     if total == 0:
-        raise RuntimeError(f"[VAL_JOB_DEF] No images found in manifest for shard={shard_name}")
+        raise RuntimeError(f"{TASK_NAME} No images found in manifest for shard={shard_name}")
 
     summary = {
         "job_id": JOB_ID,
@@ -295,7 +297,7 @@ def main():
 
     elapsed = time.time() - start
     log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
-        f"[VAL_JOB_DEF] done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}")
+        f"{TASK_NAME} done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}")
 
 if __name__ == "__main__":
     main()

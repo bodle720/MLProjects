@@ -18,21 +18,23 @@ JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
-ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
-ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
+
+TASK_NAME = "[DLQ_PROCESSOR]"
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
 
-def _split_ext(name: str) -> Tuple[str, str]:
+def split_ext(name: str) -> Tuple[str, str]:
     if "." not in name:
         return name, ""
     stem, ext = name.rsplit(".", 1)
     return stem, ext.lower()
 
-def _get_job_sha256s(job_id: str) -> List[str]:
+def get_job_sha256s(job_id: str) -> List[str]:
     safe_job = escape_sql_string(job_id)
     db = ICEBERG_DATABASE_NAME
     t = UPLOAD_STAGING_TABLE_NAME
@@ -46,7 +48,7 @@ def _get_job_sha256s(job_id: str) -> List[str]:
     """
 
     qid, _ = run_athena(sql,
-                         "[DLQ_PROCESSOR]",
+                         TASK_NAME,
                          ATHENA_OUTPUT_S3,
                          ATHENA_WORKGROUP,
                          poll=2.0,
@@ -67,7 +69,7 @@ def _get_job_sha256s(job_id: str) -> List[str]:
             uniq.append(s)
     return uniq
 
-def _delete_sha256_entries_for_job(job_id: str, shas: List[str]) -> tuple[int, int]:
+def delete_sha256_entries_for_job(job_id: str, shas: List[str]) -> tuple[int, int]:
     deleted = 0
     skipped = 0
 
@@ -90,7 +92,7 @@ def _delete_sha256_entries_for_job(job_id: str, shas: List[str]) -> tuple[int, i
 
     return deleted, skipped
 
-def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
+def get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
     """
     Pull enough columns from upload_staging to compute rollback targets.
     """
@@ -114,7 +116,7 @@ def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
     """
 
     qid, _ = run_athena(sql,
-                         "[DLQ_PROCESSOR]",
+                         TASK_NAME,
                          ATHENA_OUTPUT_S3,
                          ATHENA_WORKGROUP,
                          poll=2.0,
@@ -123,7 +125,7 @@ def _get_registered_upload_rows(job_id: str) -> List[Dict[str, Optional[str]]]:
     rows = athena_fetch_all_rows(qid)
     return rows
 
-def _derive_canonical_image_key(data_source: str, image_id: str, temp_source_ref: str) -> Optional[str]:
+def derive_canonical_image_key(data_source: str, image_id: str, temp_source_ref: str) -> Optional[str]:
     """
     canonical/imagery/<data_source>/<image_id>.<ext>
     ext is derived from temp_source_ref filename.
@@ -131,27 +133,27 @@ def _derive_canonical_image_key(data_source: str, image_id: str, temp_source_ref
     if not (data_source and image_id and temp_source_ref):
         return None
     try:
-        _, src_key = parse_s3_uri(temp_source_ref, "[DLQ_PROCESSOR]")
+        _, src_key = parse_s3_uri(temp_source_ref, TASK_NAME)
         fname = get_key_basename(src_key)
-        _, ext = _split_ext(fname)
+        _, ext = split_ext(fname)
         if ext not in ("png", "jpg", "jpeg"):
             return None
         return f"canonical/imagery/{data_source}/{image_id}.{ext}"
     except Exception:
         return None
 
-def _label_uuid_from_temp_ref(uri: str) -> Optional[str]:
+def label_uuid_from_temp_ref(uri: str) -> Optional[str]:
     if not uri:
         return None
     try:
-        _, key = parse_s3_uri(uri, "[DLQ_PROCESSOR]")
+        _, key = parse_s3_uri(uri, TASK_NAME)
         fname = get_key_basename(key)
-        stem, _ = _split_ext(fname)
+        stem, _ = split_ext(fname)
         return stem or None
     except Exception:
         return None
 
-def _derive_canonical_label_keys(row: Dict[str, Optional[str]]) -> List[str]:
+def derive_canonical_label_keys(row: Dict[str, Optional[str]]) -> List[str]:
     """
     Based on which temp label refs exist, derive canonical label keys deterministically.
     """
@@ -165,14 +167,14 @@ def _derive_canonical_label_keys(row: Dict[str, Optional[str]]) -> List[str]:
 
     # object detection
     if bbox:
-        lu = _label_uuid_from_temp_ref(bbox)
+        lu = label_uuid_from_temp_ref(bbox)
         if lu:
             out.append(f"canonical/labels/object-detection/{lu}.json")
 
     # semantic
     if sem_png or sem_meta:
-        lu1 = _label_uuid_from_temp_ref(sem_png) if sem_png else None
-        lu2 = _label_uuid_from_temp_ref(sem_meta) if sem_meta else None
+        lu1 = label_uuid_from_temp_ref(sem_png) if sem_png else None
+        lu2 = label_uuid_from_temp_ref(sem_meta) if sem_meta else None
         lu = lu1 or lu2
         # only add if we have a UUID; if mismatch, still best-effort delete both UUIDs
         if lu1 and lu2 and lu1 != lu2:
@@ -186,8 +188,8 @@ def _derive_canonical_label_keys(row: Dict[str, Optional[str]]) -> List[str]:
 
     # instance
     if ins_png or ins_meta:
-        lu1 = _label_uuid_from_temp_ref(ins_png) if ins_png else None
-        lu2 = _label_uuid_from_temp_ref(ins_meta) if ins_meta else None
+        lu1 = label_uuid_from_temp_ref(ins_png) if ins_png else None
+        lu2 = label_uuid_from_temp_ref(ins_meta) if ins_meta else None
         lu = lu1 or lu2
         if lu1 and lu2 and lu1 != lu2:
             out.append(f"canonical/labels/instance-segmentation/{lu1}.png")
@@ -207,11 +209,11 @@ def _derive_canonical_label_keys(row: Dict[str, Optional[str]]) -> List[str]:
             uniq.append(k)
     return uniq
 
-def _chunked(iterable: List[str], n: int) -> Iterable[List[str]]:
+def chunked(iterable: List[str], n: int) -> Iterable[List[str]]:
     for i in range(0, len(iterable), n):
         yield iterable[i:i+n]
 
-def _delete_s3_keys_best_effort(bucket: str, keys: List[str], batch_size: int = 1000) -> Tuple[int, int]:
+def delete_s3_keys_best_effort(bucket: str, keys: List[str], batch_size: int = 1000) -> Tuple[int, int]:
     """
     Returns (deleted_count_estimate, error_count).
     """
@@ -221,7 +223,7 @@ def _delete_s3_keys_best_effort(bucket: str, keys: List[str], batch_size: int = 
     deleted = 0
     errors_total = 0
 
-    for chunk in _chunked(keys, batch_size):
+    for chunk in chunked(keys, batch_size):
         try:
             resp = s3.delete_objects(
                 Bucket=bucket,
@@ -237,7 +239,7 @@ def _delete_s3_keys_best_effort(bucket: str, keys: List[str], batch_size: int = 
 
     return deleted, errors_total
 
-def _delete_iceberg_by_image_ids(table_name: str, image_ids: List[str], chunk_size: int = 500) -> None:
+def delete_iceberg_by_image_ids(table_name: str, image_ids: List[str], chunk_size: int = 500) -> None:
     """
     DELETE FROM <table> WHERE image_id IN ('...', ...), chunked to keep SQL size sane.
     """
@@ -245,11 +247,11 @@ def _delete_iceberg_by_image_ids(table_name: str, image_ids: List[str], chunk_si
         return
 
     db = ICEBERG_DATABASE_NAME
-    for chunk in _chunked(image_ids, chunk_size):
+    for chunk in chunked(image_ids, chunk_size):
         in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
         sql = f'DELETE FROM "{db}"."{table_name}" WHERE image_id IN ({in_list})'
         _, _ = run_athena(sql,
-                            "[DLQ_PROCESSOR]",
+                            TASK_NAME,
                             ATHENA_OUTPUT_S3,
                             ATHENA_WORKGROUP,
                             poll=2.0,
@@ -268,7 +270,7 @@ def handler(event, context):
         try:
             body = json.loads(record["body"])
         except Exception:
-            print("[DLQ_PROCESSOR] Skipping non-JSON message")
+            print(f"{TASK_NAME} Skipping non-JSON message")
             continue
 
         source = body.get("source")
@@ -277,30 +279,30 @@ def handler(event, context):
         event_type = body.get("event_type")
 
         if source not in ("stepfunctions", "kickoff", "lambda"):
-            print(f"[DLQ_PROCESSOR] Skipping unknown source={source}")
+            print(f"{TASK_NAME} Skipping unknown source={source}")
             continue
 
         if (job_id in (None, "unknown")) or (user is None) or (event_type is None):
-            print(f"[DLQ_PROCESSOR] Ignoring non-job DLQ message: {body}")
+            print(f"{TASK_NAME} Ignoring non-job DLQ message: {body}")
             continue
 
         # Original failure reason
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Original failure reason", level="error")
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] DLQ received message: {body}")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Original failure reason", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} DLQ received message: {body}")
 
         # 1) Delete temp folder for this job (always)
         prefix = f"temp/image-upload/{job_id}/"
         try:
-            delete_s3_prefix(FILE_BUCKET_NAME, prefix, "[DLQ_PROCESSOR]")
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Deleted temp s3 prefix")
+            delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted temp s3 prefix")
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Temp S3 cleanup failed", level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Temp S3 cleanup failed", level="error")
 
         # 2) Roll back canonical writes (Iceberg + S3) best-effort
         try:
-            registered_rows = _get_registered_upload_rows(job_id)
+            registered_rows = get_registered_upload_rows(job_id)
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Failed querying upload_staging for rollback targets", level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed querying upload_staging for rollback targets", level="error")
             registered_rows = []
 
         # If we have rows that claim registration passed, rollback the canonical side-effects
@@ -319,12 +321,12 @@ def handler(event, context):
                     # Determine canonical image key (use row's data_source, else message data_source)
                     row_ds = r.get("data_source") or ""
                     temp_ref = r.get("temp_source_ref") or ""
-                    img_key = _derive_canonical_image_key(row_ds, image_id or "", temp_ref)
+                    img_key = derive_canonical_image_key(row_ds, image_id or "", temp_ref)
                     if img_key:
                         s3_keys_to_delete.append(img_key)
 
                     # Label keys (based on temp label refs)
-                    s3_keys_to_delete.extend(_derive_canonical_label_keys(r))
+                    s3_keys_to_delete.extend(derive_canonical_label_keys(r))
 
                 # de-dupe image_ids preserve order
                 seen = set()
@@ -337,13 +339,13 @@ def handler(event, context):
 
                 # 2a) delete canonical iceberg rows (tables first to avoid dangling refs)
                 try:
-                    _delete_iceberg_by_image_ids(CANONICAL_IMAGERY_TABLE_NAME, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_BBOX_TABLE_NAME, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_SEMANTIC_TABLE_NAME, image_ids)
-                    _delete_iceberg_by_image_ids(CANONICAL_INSTANCE_TABLE_NAME, image_ids)
-                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Deleted canonical iceberg rows for {len(image_ids)} image_id(s)")
+                    delete_iceberg_by_image_ids(CANONICAL_IMAGERY_TABLE_NAME, image_ids)
+                    delete_iceberg_by_image_ids(CANONICAL_BBOX_TABLE_NAME, image_ids)
+                    delete_iceberg_by_image_ids(CANONICAL_SEMANTIC_TABLE_NAME, image_ids)
+                    delete_iceberg_by_image_ids(CANONICAL_INSTANCE_TABLE_NAME, image_ids)
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted canonical iceberg rows for {len(image_ids)} image_id(s)")
                 except Exception as e:
-                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Canonical Iceberg cleanup failed", level="error")
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Canonical Iceberg cleanup failed", level="error")
 
                 # 2b) delete canonical s3 objects
                 try:
@@ -355,19 +357,19 @@ def handler(event, context):
                             seenk.add(k)
                             uniqk.append(k)
 
-                    deleted_est, errors = _delete_s3_keys_best_effort(FILE_BUCKET_NAME, uniqk, batch_size=1000)
-                    msg = f"[DLQ_PROCESSOR] Deleted canonical S3 objects: attempted={len(uniqk)} deleted_est={deleted_est} errors={errors}"
+                    deleted_est, errors = delete_s3_keys_best_effort(FILE_BUCKET_NAME, uniqk, batch_size=1000)
+                    msg = f"{TASK_NAME} Deleted canonical S3 objects: attempted={len(uniqk)} deleted_est={deleted_est} errors={errors}"
                     if errors:
                         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level='warning')
                     else:
                         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
                 except Exception as e:
-                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Canonical S3 cleanup failed", level="error")
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Canonical S3 cleanup failed", level="error")
 
             except Exception as e:
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] Rollback orchestration failed", level="error")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Rollback orchestration failed", level="error")
         else:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, "[DLQ_PROCESSOR] No registration-passed rows found; skipping canonical rollback")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} No registration-passed rows found; skipping canonical rollback")
 
         # 3) Mark job FAILED
         try:
@@ -380,20 +382,20 @@ def handler(event, context):
                                                             error_msg=None)
 
             if update_success:
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Updated job to status to FAILED successfully.")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job to status to FAILED successfully.")
             else:
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DLQ_PROCESSOR] Failed to set job status to FAILED, message = {update_msg}", level="error")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Failed to set job status to FAILED, message = {update_msg}", level="error")
 
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Updating job status FAILED with exception: {e}", level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updating job status FAILED with exception: {e}", level="error")
 
         # 4) Remove any registered hashes in the hash table if error occurred after registration
         try:
-            shas = _get_job_sha256s(job_id)
-            d, s = _delete_sha256_entries_for_job(job_id, shas)
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] SHA256 rollback: deleted={d} skipped={s} candidates={len(shas)}")
+            shas = get_job_sha256s(job_id)
+            d, s = delete_sha256_entries_for_job(job_id, shas)
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} SHA256 rollback: deleted={d} skipped={s} candidates={len(shas)}")
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] SHA256 rollback failed: {e}", level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} SHA256 rollback failed: {e}", level="error")
 
         # 5) Release global lock
         try:
@@ -404,12 +406,12 @@ def handler(event, context):
                                                         event_type=event_type)
 
             if release_success:
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Release lock attempt success.")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Release lock attempt success.")
             else:
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"[DLQ_PROCESSOR] Release lock failed, message = {release_msg}", level="error")
+                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Release lock failed, message = {release_msg}", level="error")
 
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DLQ_PROCESSOR] Release lock failed with exception: {e}", level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Release lock failed with exception: {e}", level="error")
 
         # Did we at least fail the job + unlock?
         if update_success and release_success:

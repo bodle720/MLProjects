@@ -132,21 +132,16 @@ def athena_count_job_rows(job_id: str,
                        poll,
                        timeout)
 
-    s = athena_get_scalar(qid, task_name)  # row 1 col 0
-    if s is None:
-        return 0
-    try:
-        return int(s)
-    except (TypeError, ValueError) as e:
-        raise RuntimeError(f"{task_name} expected integer count, got {s!r} (qid={qid})") from e
+    count = athena_get_int_scalar(qid, task_name)  # row 1 col 0
+    return count
 
-def drop_ctas_table_if_exists(db_name: str,
-                               table_name: str,
-                               task_name: str,
-                               athena_output_s3: str,
-                               athena_workgroup: str = "primary",
-                               poll: Union[int, float] = 2.0,
-                               timeout: Union[int, float] = 600) -> str:
+def drop_table_if_exists(db_name: str,
+                           table_name: str,
+                           task_name: str,
+                           athena_output_s3: str,
+                           athena_workgroup: str = "primary",
+                           poll: Union[int, float] = 2.0,
+                           timeout: Union[int, float] = 600) -> str:
     if '"' in db_name or '"' in table_name:
         raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
 
@@ -187,17 +182,16 @@ def athena_get_cell(qid: str,
 
     return data[col_index].get("VarCharValue")
 
-def athena_get_scalar(qid: str, task_name: str) -> Optional[str]:
-    return athena_get_cell(qid, task_name, row_index=1, col_index=0)
+def athena_get_int_scalar(qid: str, task_name: str) -> int:
+    s = athena_get_cell(qid, task_name, row_index=1, col_index=0)
 
-def athena_get_int_scalar(qid: str, task_name: str, default: int = 0) -> int:
-    s = athena_get_scalar(qid, task_name)
     if s is None:
-        return default
+        raise Exception(f"{task_name} ATHENA get int scalar failed, athena get cell returned None")
+
     try:
         return int(s)
-    except (TypeError, ValueError):
-        return default
+    except (TypeError, ValueError) as e:
+        raise Exception(f"{task_name} ATHENA get int scalar failed, athena get cell returned invalid type: {type(s)}, returned = {s}, exception: {e}")
 
 def athena_fetch_all_rows(qid: str) -> List[Dict[str, Optional[str]]]:
     """

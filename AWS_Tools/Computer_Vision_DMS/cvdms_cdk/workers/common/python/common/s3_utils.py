@@ -17,8 +17,7 @@ s3 = boto3.client("s3")
 _TRANSIENT_CODES = {
     "Throttling", "ThrottlingException",
     "RequestTimeout", "RequestTimeoutException",
-    "SlowDown",
-    "InternalError", "ServiceUnavailable",
+    "SlowDown",  "InternalError", "ServiceUnavailable"
 }
 
 def delete_s3_prefix(bucket: str, prefix: str, task_name: str, batch_size: int = 100) -> None:
@@ -206,6 +205,11 @@ def s3_read_jsonl_list(bucket: str,
             strict_json=strict_json
         )
 
+def jsonl_content_converter(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""  # empty file (valid jsonl)
+    return "".join(json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n" for r in rows)
+
 def write_s3_obj(bucket: str,
                 key: str,
                 content: Union[str, bytes, bytearray, memoryview],
@@ -281,6 +285,31 @@ def read_obj_with_retry(bucket: str,
 
     return None
 
+def s3_copy_with_retry(src_bucket: str,
+                       src_key: str,
+                       dst_bucket: str,
+                       dst_key: str,
+                       task_name: str,
+                       retries: int = 6,
+                       base_delay: float = 0.5) -> None:
+    last_err = None
+    for attempt in range(retries):
+        try:
+            s3.copy_object(
+                Bucket=dst_bucket,
+                Key=dst_key,
+                CopySource={"Bucket": src_bucket, "Key": src_key},
+            )
+            return
+        except ClientError as e:
+            last_err = e
+            code = e.response.get("Error", {}).get("Code", "")
+            # fail fast on auth-ish issues
+            if code in ("AccessDenied", "AccessDeniedException", "InvalidAccessKeyId", "SignatureDoesNotMatch"):
+                raise Exception(f"{task_name}: {e}")
+            time.sleep(min(base_delay * (2 ** attempt), 5.0))
+    raise RuntimeError(f"{task_name} S3 copy failed after retries: s3://{src_bucket}/{src_key} -> s3://{dst_bucket}/{dst_key}: {last_err}")
+
 def to_jsonable(v: Any) -> Any:
     if v is None:
         return None
@@ -324,3 +353,13 @@ def read_parquet_rows_from_s3_uris(s3_uris: Iterable[str]) -> Iterator[dict[str,
 
 def get_key_basename(key: str) -> str:
     return key.rsplit("/", 1)[-1]
+
+def make_s3_uri(bucket: str, key: str) -> str:
+    return f"s3://{bucket}/{key}"
+
+def s3_delete_best_effort(bucket: str, key: str) -> None:
+    try:
+        s3.delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        # best effort: swallow
+        pass

@@ -27,21 +27,20 @@ class TableSchema:
             if k not in cols_set:
                 raise ValueError(f"key_col {k} not in cols")
 
-CANONICAL_IMAGERY_COLS = [
-    "image_id",
-    "source_ref",
-    "img_type",
-    "img_height",
-    "img_width",
-    "num_channels",
-    "dtype",
-    "file_size_mb",
-    "uploaded_at",
-    "data_source",
-    "sha256_hash"
-]
 CANONICAL_IMAGERY_SCHEMA = TableSchema(
-    cols=CANONICAL_IMAGERY_COLS,
+    cols=[
+        "image_id",
+        "source_ref",
+        "img_type",
+        "img_height",
+        "img_width",
+        "num_channels",
+        "dtype",
+        "file_size_mb",
+        "uploaded_at",
+        "data_source",
+        "sha256_hash"
+    ],
     key_cols=["image_id"],
     types={
         "image_id": "string",
@@ -58,13 +57,12 @@ CANONICAL_IMAGERY_SCHEMA = TableSchema(
     },
 )
 
-IMAGE_LABELS_COLS = [
-    "image_id",
-    "label_id",
-    "label_type"
-]
 IMAGE_LABELS_SCHEMA = TableSchema(
-    cols=IMAGE_LABELS_COLS,
+    cols=[
+        "image_id",
+        "label_id",
+        "label_type"
+    ],
     key_cols=["image_id", "label_id", "label_type"],
     types={
         "image_id": "string",
@@ -73,14 +71,13 @@ IMAGE_LABELS_SCHEMA = TableSchema(
     },
 )
 
-CANONICAL_BOUNDING_BOXES_COLS = [
-    "bbox_annotation_id",
-    "image_id",
-    "source_ref_meta",
-    "classes_present"
-]
 CANONICAL_BOUNDING_BOXES_SCHEMA = TableSchema(
-    cols=CANONICAL_BOUNDING_BOXES_COLS,
+    cols=[
+        "bbox_annotation_id",
+        "image_id",
+        "source_ref_meta",
+        "classes_present"
+    ],
     key_cols=["bbox_annotation_id"],
     types={
         "bbox_annotation_id": "string",
@@ -90,15 +87,14 @@ CANONICAL_BOUNDING_BOXES_SCHEMA = TableSchema(
     },
 )
 
-CANONICAL_SEMANTIC_MASKS_COLS = [
-    "semantic_mask_id",
-    "image_id",
-    "source_ref_png",
-    "source_ref_meta",
-    "classes_present"
-]
 CANONICAL_SEMANTIC_MASKS_SCHEMA = TableSchema(
-    cols=CANONICAL_SEMANTIC_MASKS_COLS,
+    cols=[
+        "semantic_mask_id",
+        "image_id",
+        "source_ref_png",
+        "source_ref_meta",
+        "classes_present"
+    ],
     key_cols=["semantic_mask_id"],
     types={
         "semantic_mask_id": "string",
@@ -109,15 +105,14 @@ CANONICAL_SEMANTIC_MASKS_SCHEMA = TableSchema(
     },
 )
 
-CANONICAL_INSTANCE_ANNOTATIONS_COLS = [
-    "instance_annotation_id",
-    "image_id",
-    "source_ref_png",
-    "source_ref_meta",
-    "classes_present"
-]
 CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA = TableSchema(
-    cols=CANONICAL_INSTANCE_ANNOTATIONS_COLS,
+    cols=[
+        "instance_annotation_id",
+        "image_id",
+        "source_ref_png",
+        "source_ref_meta",
+        "classes_present"
+    ],
     key_cols=["instance_annotation_id"],
     types={
         "instance_annotation_id": "string",
@@ -128,37 +123,36 @@ CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA = TableSchema(
     },
 )
 
-UPLOAD_STAGING_COLS = [
-    "job_id",
-    "image_id",
-    "temp_source_ref",
-    "img_type",
-    "img_height",
-    "img_width",
-    "num_channels",
-    "dtype",
-    "file_size_mb",
-    "uploaded_at",
-    "data_source",
-    "sha256_hash",
-    "string_labels",
-    "temp_source_ref_bbox_meta",
-    "temp_source_ref_semantic_png",
-    "temp_source_ref_semantic_meta",
-    "temp_source_ref_instance_png",
-    "temp_source_ref_instance_meta",
-    "label_fingerprint",
-    "classes_present",
-    "validation_status",
-    "validation_error",
-    "dedup_status",
-    "dedup_error",
-    "registration_status",
-    "registration_error",
-    "matched_image_id"
-]
 UPLOAD_STAGING_SCHEMA = TableSchema(
-    cols=UPLOAD_STAGING_COLS,
+    cols=[
+        "job_id",
+        "image_id",
+        "temp_source_ref",
+        "img_type",
+        "img_height",
+        "img_width",
+        "num_channels",
+        "dtype",
+        "file_size_mb",
+        "uploaded_at",
+        "data_source",
+        "sha256_hash",
+        "string_labels",
+        "temp_source_ref_bbox_meta",
+        "temp_source_ref_semantic_png",
+        "temp_source_ref_semantic_meta",
+        "temp_source_ref_instance_png",
+        "temp_source_ref_instance_meta",
+        "label_fingerprint",
+        "classes_present",
+        "validation_status",
+        "validation_error",
+        "dedup_status",
+        "dedup_error",
+        "registration_status",
+        "registration_error",
+        "matched_image_id"
+    ],
     key_cols=["job_id", "image_id"],
     types={
         "job_id": "string",

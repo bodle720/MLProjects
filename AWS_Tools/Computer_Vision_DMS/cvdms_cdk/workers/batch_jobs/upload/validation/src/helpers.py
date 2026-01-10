@@ -8,12 +8,14 @@ from typing import Optional
 import boto3
 from PIL import Image
 import numpy as np
+from numpy.typing import NDArray
 
 from common.s3_utils import write_s3_obj
 
-s3 = boto3.client("s3")
-
+TASK_NAME = "[VAL_JOB_DEF_HELPER]"
 LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
+
+s3 = boto3.client("s3")
 
 def stable_uuid5(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
@@ -41,7 +43,7 @@ def normalize_hex(h: str) -> str:
         return f"#{h[1]}{h[1]}{h[2]}{h[2]}{h[3]}{h[3]}"
     if len(h) == 7:
         return h
-    raise ValueError(f"Bad hex color: {h}")
+    raise ValueError(f"{TASK_NAME} Bad hex color: {h}")
 
 def create_and_save_labels(line: dict,
                            label_type: str,
@@ -85,30 +87,30 @@ def create_and_save_labels(line: dict,
             else:
                 return [], classes_present, None, None
         elif label_type == "object-detection":
-            paths, classes_present, label_fingerprint = _create_object_detection_label(line, job_id, file_bucket_name)
+            paths, classes_present, label_fingerprint = create_object_detection_label(line, job_id, file_bucket_name)
             return paths, classes_present, label_fingerprint, None
         elif label_type == "semantic-segmentation":
-            paths, classes_present, label_fingerprint = _create_semantic_segmentation_label(line, job_id, file_bucket_name)
+            paths, classes_present, label_fingerprint = create_semantic_segmentation_label(line, job_id, file_bucket_name)
             return paths, classes_present, label_fingerprint, None
         elif label_type == "instance-segmentation":
-            paths, classes_present, label_fingerprint = _create_instance_segmentation_label(line, job_id, file_bucket_name)
+            paths, classes_present, label_fingerprint = create_instance_segmentation_label(line, job_id, file_bucket_name)
             return paths, classes_present, label_fingerprint, None
 
         return [], [], None, f"Unsupported label_type: {label_type}"
 
     except Exception as e:
-        return [], [], None, f"[VAL_JOB_DEF] Error creating and saving label for label type {label_type}: {e}"
+        return [], [], None, f"{TASK_NAME} Error creating and saving label for label type {label_type}: {e}"
 
-def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
+def create_object_detection_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     od = line.get("object-detection", {})
     meta = line.get("object-detection-metadata", {})
     anns = od.get("annotations", None)
     class_map = meta.get("class-map", None)
 
     if not isinstance(anns, list) or len(anns) == 0:
-        raise ValueError("object-detection.annotations missing/empty")
+        raise ValueError(f"{TASK_NAME} object-detection.annotations missing/empty")
     if not isinstance(class_map, dict) or len(class_map) == 0:
-        raise ValueError("object-detection-metadata.class-map missing/empty")
+        raise ValueError(f"{TASK_NAME} object-detection-metadata.class-map missing/empty")
 
     tuples_anns = [] # out anns, but as a list of tuples
     classes_present = []
@@ -122,14 +124,14 @@ def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: st
             try:
                 cid = int(cid)
             except:
-                raise ValueError(f"class id in bbox annotation is not int or string version of int: {cid}")
+                raise ValueError(f"{TASK_NAME} class id in bbox annotation is not int or string version of int: {cid}")
 
         if not isinstance(cid, int):
-            raise ValueError("object-detection annotation missing int class_id")
+            raise ValueError(f"{TASK_NAME} object-detection annotation missing int class_id")
 
         class_name = class_map.get(str(cid))
         if not isinstance(class_name, str) or not class_name.strip():
-            raise ValueError(f"class-map missing class for class_id={cid}")
+            raise ValueError(f"{TASK_NAME} class-map missing class for class_id={cid}")
 
         cn = class_name.strip().lower()
         classes_present.append(cn)
@@ -142,10 +144,10 @@ def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: st
                 try:
                     v = int(v)
                 except:
-                    raise ValueError(f"coord {f} in bbox annotation is not int or string version of int: {v}")
+                    raise ValueError(f"{TASK_NAME} coord {f} in bbox annotation is not int or string version of int: {v}")
 
             if not isinstance(v, int):
-                raise ValueError(f"object-detection annotation.{f} must be number")
+                raise ValueError(f"{TASK_NAME} object-detection annotation.{f} must be number")
 
             coords[f] = v
 
@@ -153,7 +155,7 @@ def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: st
 
     # make label fingerprint
     if not tuples_anns:
-        raise ValueError("object-detection.annotations contained no valid annotation objects")
+        raise ValueError(f"{TASK_NAME} object-detection.annotations contained no valid annotation objects")
 
     tuples_anns.sort()
     payload = {"v": 1, "label_type": "object-detection", "boxes": [list(t) for t in tuples_anns]}
@@ -179,11 +181,11 @@ def _create_object_detection_label(line: dict, job_id: str, file_bucket_name: st
                           key,
                           json.dumps({"annotations": out_anns}),
                           "application/json",
-                          "[VAL_JOB_DEF]")
+                          TASK_NAME)
 
     return [uri], classes_present, label_fingerprint
 
-def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
+def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     """
     Color-invariant semantic fingerprinting:
     - Uses internal-color-map to map RGB colors -> class names
@@ -196,9 +198,9 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
     icm = meta.get("internal-color-map", None)
 
     if not isinstance(mask_ref, str) or not mask_ref.startswith("s3://"):
-        raise ValueError("semantic-segmentation-ref missing/invalid")
+        raise ValueError(f"{TASK_NAME} semantic-segmentation-ref missing/invalid")
     if not isinstance(icm, dict) or len(icm) == 0:
-        raise ValueError("semantic internal-color-map missing/empty")
+        raise ValueError(f"{TASK_NAME} semantic internal-color-map missing/empty")
 
     # Build class_name -> set(hex_colors), require a background class
     class_to_hexes: dict[str, set[str]] = {}
@@ -227,8 +229,16 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
 
     if bg_class is None:
         raise ValueError(
-            "semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background"
+            f"{TASK_NAME} semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background"
         )
+
+    hex_to_class: dict[str, str] = {}
+    for cls, hexes in class_to_hexes.items():
+        for hc in hexes:
+            prev = hex_to_class.get(hc)
+            if prev is not None and prev != cls:
+                raise ValueError(f"{TASK_NAME} semantic: hex color {hc} appears in multiple classes: {prev} and {cls}")
+            hex_to_class[hc] = cls
 
     # Deterministic class IDs by CLASS NAME ONLY (color-independent)
     non_bg_classes = sorted([c for c in class_to_hexes.keys() if c not in LOWERCASE_BG_NAMES_POSSIBLE])
@@ -239,7 +249,7 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
     next_id = 1
     for c in non_bg_classes:
         if next_id > 255:
-            raise ValueError("too many classes for uint8 mask")
+            raise ValueError(f"{TASK_NAME} Too many classes for uint8 mask")
         class_to_id[c] = next_id
         id_to_class[str(next_id)] = c
         next_id += 1
@@ -304,7 +314,7 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
     classes_present = uniq
 
     if not classes_present:
-        raise ValueError("semantic mask contains only background")
+        raise ValueError(f"{TASK_NAME} semantic mask contains only background")
 
     # Save PNG + meta JSON using fingerprint as key
     png_key = f"temp/image-upload/{job_id}/semantic-segmentation/{label_fingerprint}.png"
@@ -314,17 +324,17 @@ def _create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_nam
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
 
-    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", "[VAL_JOB_DEF]")
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", TASK_NAME)
 
-    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", "[VAL_JOB_DEF]")
+    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", TASK_NAME)
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
 
-def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
+def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     meta = line.get("instance-segmentation-metadata", {})
     wrr = meta.get("worker-response-ref")
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):
-        raise ValueError("instance: worker-response-ref missing/invalid")
+        raise ValueError(f"{TASK_NAME} instance: worker-response-ref missing/invalid")
 
     wb, wk = wrr[5:].split("/", 1)
     wrr_bytes = s3.get_object(Bucket=wb, Key=wk)["Body"].read()
@@ -332,16 +342,16 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
 
     answers = wrr_json.get("answers", [])
     if not isinstance(answers, list) or not answers:
-        raise ValueError("instance: worker response missing answers")
+        raise ValueError(f"{TASK_NAME} instance: worker response missing answers")
 
     ar = answers[0].get("answerContent", {}).get("annotatedResult", {})
     instances = ar.get("instances", [])
     png_b64 = ar.get("labeledImage", {}).get("pngImageData")
 
     if not isinstance(instances, list) or not instances:
-        raise ValueError("instance: worker response missing instances")
+        raise ValueError(f"{TASK_NAME} instance: worker response missing instances")
     if not isinstance(png_b64, str) or not png_b64.strip():
-        raise ValueError("instance: worker response missing labeledImage.pngImageData")
+        raise ValueError(f"{TASK_NAME} instance: worker response missing labeledImage.pngImageData")
 
     # Parse instances: keep (hex_color, label)
     parsed = []
@@ -355,19 +365,19 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
             continue
         hc = normalize_hex(hc)
         if hc in seen_colors:
-            raise ValueError(f"duplicate instance color in worker response: {hc}")
+            raise ValueError(f"{TASK_NAME} duplicate instance color in worker response: {hc}")
         seen_colors.add(hc)
         parsed.append((hc, lab.strip().lower()))
 
     if not parsed:
-        raise ValueError("instance: no valid instances parsed from worker response")
+        raise ValueError(f"{TASK_NAME} instance: no valid instances parsed from worker response")
 
     # decode and load RGB mask
     mask_bytes = base64.b64decode(png_b64)
     rgb = np.array(Image.open(io.BytesIO(mask_bytes)).convert("RGB"), dtype=np.uint8)
     h, w, _ = rgb.shape
 
-    packed = (
+    packed: NDArray[np.uint32] = (
         (rgb[:, :, 0].astype(np.uint32) << 16)
         | (rgb[:, :, 1].astype(np.uint32) << 8)
         | rgb[:, :, 2].astype(np.uint32)
@@ -381,10 +391,10 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
         b = int(hc[5:7], 16)
         tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
 
-        m = (packed == tgt)
+        m: NDArray[np.bool_] = (packed == tgt)
 
         if not m.any():
-            raise ValueError(f"instance: instance color {hc} ({lab}) has 0 pixels in mask")
+            raise ValueError(f"{TASK_NAME} instance: instance color {hc} ({lab}) has 0 pixels in mask")
 
         area = int(m.sum())
         ys, xs = np.where(m)
@@ -409,7 +419,11 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
     next_id = 1
     for _, lab, m in instance_masks:
         if next_id > 255:
-            raise ValueError("too many instances for uint8 mask")
+            raise ValueError(f"{TASK_NAME} too many instances for uint8 mask")
+
+        if np.any(idx[m] != 0):
+            raise ValueError(f"{TASK_NAME} instance: overlapping instance masks detected")
+
         idx[m] = np.uint8(next_id)
         id_to_class[str(next_id)] = lab
         next_id += 1
@@ -441,7 +455,7 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
     classes_present = uniq
 
     if not classes_present:
-        raise ValueError("instance segmentation mask contains only background")
+        raise ValueError(f"{TASK_NAME} instance segmentation mask contains only background")
 
     # Save outputs using fingerprint as key
     png_key = f"temp/image-upload/{job_id}/instance-segmentation/{label_fingerprint}.png"
@@ -451,7 +465,7 @@ def _create_instance_segmentation_label(line: dict, job_id: str, file_bucket_nam
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
 
-    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", "[VAL_JOB_DEF]")
-    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", "[VAL_JOB_DEF]")
+    png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", TASK_NAME)
+    meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", TASK_NAME)
 
     return [png_uri, meta_uri], classes_present, label_fingerprint

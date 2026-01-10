@@ -56,9 +56,6 @@ class BatchingStage(Construct):
             "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
             "ATHENA_WORKGROUP": "primary",
             "ICEBERG_DATABASE_NAME": iceberg_database_name,
-            "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
-            "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
-            "SHA256_TABLE_NAME": sha256_table.table_name,
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name
         }
 
@@ -309,13 +306,7 @@ class BatchingStage(Construct):
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
             "AWS_REGION": region,
             "AWS_DEFAULT_REGION": region,
-            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time"),
-            "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
-            "IMAGE_LABELS_TABLE_NAME": "image_labels",
-            "CANONICAL_BBOXES_TABLE_NAME": "canonical_bounding_boxes",
-            "CANONICAL_SEMANTIC_MASKS_TABLE_NAME": "canonical_semantic_masks",
-            "CANONICAL_INSTANCE_ANNS_TABLE_NAME": "canonical_instance_annotations",
-            "UPLOAD_STAGING_TABLE_NAME": "upload_staging"
+            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time")
         }
         if extra_container_env:
             container_env.update(extra_container_env)
@@ -336,9 +327,9 @@ class BatchingStage(Construct):
                 "manifest.$": "$$.Map.Item.Value",
                 "job_id.$": "$.job_id", # keys ending with .$ tell Step Functions “this value comes from a JSONPath expression.”
                 "user.$": "$.user",
-                "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
+                "event_type.$": "$.event_type",
                 "registration_time.$": "$.registration_time"
         }
 

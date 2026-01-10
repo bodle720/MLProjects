@@ -2,19 +2,16 @@
 import os
 import json
 import time
-import logging
 from typing import Any, Dict, Iterable, List, Tuple
 
 import boto3
 import pyarrow as pa
-import pyarrow.dataset as ds
 import s3fs
 
-from common.utils import log
+from common.logging_utils import log
+from common.s3_utils import write_s3_obj, parse_s3_uri, s3_read_json, read_parquet_rows_from_s3_uris, jsonl_content_converter
 
 from helpers import (
-    normalize_row,
-    parse_s3_uri,
     build_canonical_image_dest,
     build_canonical_label_dests,
     build_canonical_imagery_row,
@@ -23,54 +20,36 @@ from helpers import (
     cleanup_copied_best_effort
 )
 
-MANIFEST_S3_URI = os.environ.get("MANIFEST_S3_URI")
-JOB_ID = os.environ.get("JOB_ID", "unknown")
-USER = os.environ.get("USER", "unknown")
-LABEL_TYPE = os.environ.get("LABEL_TYPE", "unknown")
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "unknown")
-EVENT_TYPE = os.environ.get("EVENT_TYPE", "unknown")
-FILE_BUCKET_NAME = os.environ.get("FILE_BUCKET_NAME")
-LOG_FIREHOSE_STREAM_NAME = os.environ.get("LOG_FIREHOSE_STREAM_NAME")
+MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
+JOB_ID = os.environ["JOB_ID"]
+USER = os.environ["USER"]
+LABEL_TYPE = os.environ["LABEL_TYPE"]
+DATA_SOURCE = os.environ["DATA_SOURCE"]
+EVENT_TYPE = os.environ["EVENT_TYPE"]
+FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
+TASK_NAME = "[REG_JOB_DEF]"
+
 if not MANIFEST_S3_URI:
-    raise RuntimeError("[REG_JOB_DEF] MANIFEST_S3_URI not set")
+    raise RuntimeError(f"{TASK_NAME} MANIFEST_S3_URI not set")
 if not FILE_BUCKET_NAME:
-    raise RuntimeError("[REG_JOB_DEF] FILE_BUCKET_NAME not set")
+    raise RuntimeError(f"{TASK_NAME} FILE_BUCKET_NAME not set")
 if not LOG_FIREHOSE_STREAM_NAME:
-    raise RuntimeError("[REG_JOB_DEF] LOG_FIREHOSE_STREAM_NAME not set")
+    raise RuntimeError(f"{TASK_NAME} LOG_FIREHOSE_STREAM_NAME not set")
 
 # This is the “stage processed area” analogous to deduplication-step
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/registration-step/processed"
 
 # Safety
-MAX_ROWS_IN_MEMORY = int(os.environ.get("REG_MAX_ROWS_IN_MEMORY", "200000"))
+MAX_ROWS_IN_MEMORY = 200000
 
 s3 = boto3.client("s3")
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def s3_read_json(uri: str) -> Dict[str, Any]:
-    b, k = parse_s3_uri(uri)
-    resp = s3.get_object(Bucket=b, Key=k)
-    return json.loads(resp["Body"].read().decode("utf-8"))
-
-def iter_parquet_rows_from_s3_uris(s3_uris: List[str]) -> Iterable[Dict[str, Any]]:
-    """
-    Yield normalized dict rows from a list of parquet s3://... URIs.
-    Uses pyarrow.dataset + s3fs.
-    """
-    fs = s3fs.S3FileSystem()
-    for uri in s3_uris:
-        # pyarrow dataset expects path without scheme when filesystem is provided
-        path = uri.replace("s3://", "")
-        dataset = ds.dataset(path, filesystem=fs, format="parquet")
-
-        scanner = dataset.scanner(use_threads=True, batch_size=10_000)
-        for batch in scanner.to_batches():
-            for row in batch.to_pylist():
-                yield normalize_row(row)
 
 def write_jsonl_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
     """
@@ -82,9 +61,6 @@ def write_jsonl_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> 
     with fs.open(path, "wb") as f:
         for r in rows:
             f.write((json.dumps(r) + "\n").encode("utf-8"))
-
-def write_text_to_s3(bucket: str, key: str, text: str, content_type: str) -> None:
-    s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType=content_type)
 
 def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -107,10 +83,10 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
     canonical_imagery_rows: List[Dict[str, Any]] = []
     canonical_label_rows: List[Dict[str, Any]] = []
 
-    for row in iter_parquet_rows_from_s3_uris(files):
+    for row in read_parquet_rows_from_s3_uris(files):
         total_rows += 1
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"[REG_JOB_DEF] Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY={MAX_ROWS_IN_MEMORY}")
+            raise RuntimeError(f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY={MAX_ROWS_IN_MEMORY}")
 
         # Carry-forward default: do not touch registration_* unless we actually process the row.
         # registration_status is expected to be 'pending' until we complete processing for eligible rows.
@@ -158,18 +134,18 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
             copy_plan: List[Tuple[str, str, str, str]] = []
 
             # image copy
-            src_b, src_k = parse_s3_uri(temp_image_uri)
+            src_b, src_k = parse_s3_uri(temp_image_uri, TASK_NAME)
             copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, canonical_image_key))
 
             # label copies (if any)
             if LABEL_TYPE == "object-detection":
-                src_b, src_k = parse_s3_uri(row.get("temp_source_ref_bbox_meta"))
+                src_b, src_k = parse_s3_uri(row.get("temp_source_ref_bbox_meta"), TASK_NAME)
                 # only one dest
                 copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, label_dst_keys[0]))
 
             elif LABEL_TYPE == "semantic-segmentation":
-                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_semantic_png"))
-                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_semantic_meta"))
+                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_semantic_png"), TASK_NAME)
+                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_semantic_meta"), TASK_NAME)
                 # dst keys include png and json
                 dst_png = next(k for k in label_dst_keys if k.endswith(".png"))
                 dst_json = next(k for k in label_dst_keys if k.endswith(".json"))
@@ -177,8 +153,8 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Li
                 copy_plan.append((src_b2, src_k2, FILE_BUCKET_NAME, dst_json))
 
             elif LABEL_TYPE == "instance-segmentation":
-                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_instance_png"))
-                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_instance_meta"))
+                src_b1, src_k1 = parse_s3_uri(row.get("temp_source_ref_instance_png"), TASK_NAME)
+                src_b2, src_k2 = parse_s3_uri(row.get("temp_source_ref_instance_meta"), TASK_NAME)
                 dst_png = next(k for k in label_dst_keys if k.endswith(".png"))
                 dst_json = next(k for k in label_dst_keys if k.endswith(".json"))
                 copy_plan.append((src_b1, src_k1, FILE_BUCKET_NAME, dst_png))
@@ -258,25 +234,26 @@ def write_outputs(shard_name: str,
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
-    write_jsonl_to_s3(bucket, upload_key, updated_upload_rows)
-    write_jsonl_to_s3(bucket, imagery_key, canonical_imagery_rows)
+    write_s3_obj(bucket, upload_key, jsonl_content_converter(updated_upload_rows), "application/x-ndjson", TASK_NAME)
+    write_s3_obj(bucket, imagery_key, jsonl_content_converter(canonical_imagery_rows), "application/x-ndjson", TASK_NAME)
 
     # always write a labels file (may be empty) for predictable ingest logic
-    write_jsonl_to_s3(bucket, labels_key, canonical_label_rows)
+    write_s3_obj(bucket, labels_key, jsonl_content_converter(canonical_label_rows), "application/x-ndjson", TASK_NAME)
 
-    write_text_to_s3(bucket, summary_key, json.dumps(summary), "application/json")
-    write_text_to_s3(bucket, success_key, "", "text/plain")
+    write_s3_obj(bucket, summary_key, json.dumps(summary, separators=(",", ":"), ensure_ascii=False) + "\n", "application/json", TASK_NAME)
+    write_s3_obj(bucket, success_key, b"", "text/plain", TASK_NAME)
 
 def main():
     start = time.time()
 
-    manifest = s3_read_json(MANIFEST_S3_URI)
+    mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
+    manifest = s3_read_json(mb, mk, TASK_NAME)
+
     shard_name = manifest["shard_prefix"]
 
     # Start log (one line)
-    log(JOB_ID, USER, EVENT_TYPE,
-        f"[REG_JOB_DEF] Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE} pyarrow={pa.__version__}",
-        LOG_FIREHOSE_STREAM_NAME)
+    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE} pyarrow={pa.__version__}")
 
     try:
         updated_upload_rows, canonical_imagery_rows, canonical_label_rows, summary = process_manifest(manifest)
@@ -284,20 +261,15 @@ def main():
 
         elapsed = time.time() - start
         # Finish log (one line)
-        log(JOB_ID, USER, EVENT_TYPE,
-            f"[REG_JOB_DEF] Finish shard={shard_name} rows={summary['rows_read']} eligible={summary['eligible_rows']} "
+        log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Finish shard={shard_name} rows={summary['rows_read']} eligible={summary['eligible_rows']} "
             f"passed={summary['registration_passed']} failed={summary['registration_failed']} "
             f"canon_imagery={summary['canonical_imagery_rows']} canon_labels={summary['canonical_label_rows']} "
-            f"time_s={elapsed:.1f}",
-            LOG_FIREHOSE_STREAM_NAME)
+            f"time_s={elapsed:.1f}")
 
     except Exception as e:
         # Error log (one line)
-        log(JOB_ID, USER, EVENT_TYPE,
-            f"[REG_JOB_DEF] ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
-            LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error")
+        log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}", level="error")
         raise
 
 if __name__ == "__main__":

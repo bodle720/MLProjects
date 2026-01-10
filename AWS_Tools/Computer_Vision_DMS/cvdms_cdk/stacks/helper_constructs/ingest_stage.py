@@ -60,12 +60,6 @@ class IngestStage(Construct):
                 "ATHENA_WORKGROUP": "primary",
                 "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
-                "CANONICAL_IMAGERY_TABLE_NAME": "canonical_imagery",
-                "IMAGE_LABELS_TABLE_NAME": "image_labels",
-                "CANONICAL_BBOXES_TABLE_NAME": "canonical_bounding_boxes",
-                "CANONICAL_SEMANTIC_MASKS_TABLE_NAME": "canonical_semantic_masks",
-                "CANONICAL_INSTANCE_ANNS_TABLE_NAME": "canonical_instance_annotations",
-                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "SHA256_TABLE_NAME": self.sha256_table.table_name
         }
 

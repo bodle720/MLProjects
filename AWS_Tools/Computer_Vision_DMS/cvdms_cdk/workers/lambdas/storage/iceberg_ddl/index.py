@@ -9,9 +9,11 @@ import boto3
 athena = boto3.client("athena")
 glue = boto3.client("glue")
 
-ICEBERG_DATABASE_NAME = os.environ.get("ICEBERG_DATABASE_NAME")
-S3_ATHENA_OUTPUT_URI = os.environ.get("S3_ATHENA_OUTPUT_URI")
+ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
+ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ICEBERG_BUCKET_NAME = os.environ["ICEBERG_BUCKET_NAME"]
+
+TASK_NAME = "[TABLE_CONSTRUCTOR]"
 
 # Configurable retry parameters
 MAX_ATTEMPTS = 5
@@ -22,7 +24,7 @@ INTER_STATEMENT_DELAY = 1.5  # seconds
 class AthenaError(RuntimeError):
     pass
 
-def _remaining_seconds(context) -> float:
+def remaining_seconds(context) -> float:
     return max(0.0, (context.get_remaining_time_in_millis() / 1000.0) - 2.0)
 
 def start_query_with_retries(query: str, context, max_attempts: int = MAX_ATTEMPTS) -> str:
@@ -34,23 +36,23 @@ def start_query_with_retries(query: str, context, max_attempts: int = MAX_ATTEMP
             resp = athena.start_query_execution(
                 QueryString=query,
                 QueryExecutionContext={"Database": ICEBERG_DATABASE_NAME},
-                ResultConfiguration={"OutputLocation": S3_ATHENA_OUTPUT_URI},
+                ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
             )
             qid = resp["QueryExecutionId"]
-            print(f"[TABLE_CONSTRUCTOR] Started Athena query (attempt={attempt}): qid={qid}")
-            print(f"[TABLE_CONSTRUCTOR] Athena output URI (expected): {S3_ATHENA_OUTPUT_URI}/{qid}.csv")
+            print(f"{TASK_NAME} Started Athena query (attempt={attempt}): qid={qid}")
+            print(f"{TASK_NAME} Athena output URI (expected): {ATHENA_OUTPUT_S3}/{qid}.csv")
             return qid
         except Exception as e:
-            print(f"[TABLE_CONSTRUCTOR] start_query_execution failed (attempt={attempt}): {e}")
-            if attempt >= max_attempts or _remaining_seconds(context) < 5.0:
-                raise AthenaError(f"[TABLE_CONSTRUCTOR] start_query_execution failed after {attempt} attempts: {e}")
+            print(f"{TASK_NAME} start_query_execution failed (attempt={attempt}): {e}")
+            if attempt >= max_attempts or remaining_seconds(context) < 5.0:
+                raise AthenaError(f"{TASK_NAME} start_query_execution failed after {attempt} attempts: {e}")
             backoff = min(BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)) + random.random(), MAX_BACKOFF_SECONDS)
             time.sleep(backoff)
 
 def wait_for_query(qid: str, context, max_attempts: int = MAX_ATTEMPTS) -> dict:
     """Wait for Athena query execution to finish, with retries for get_query_execution polling."""
     start = time.time()
-    max_wait = _remaining_seconds(context)
+    max_wait = remaining_seconds(context)
     poll_delay = 2.0
 
     while True:
@@ -58,18 +60,18 @@ def wait_for_query(qid: str, context, max_attempts: int = MAX_ATTEMPTS) -> dict:
             status = athena.get_query_execution(QueryExecutionId=qid)
             state = status["QueryExecution"]["Status"]["State"]
             if state in ["SUCCEEDED", "FAILED", "CANCELLED"]:
-                print(f"[TABLE_CONSTRUCTOR] Query {qid} finished with state {state}")
+                print(f"{TASK_NAME} Query {qid} finished with state {state}")
                 return status
             if time.time() - start > max_wait:
-                raise AthenaError(f"[TABLE_CONSTRUCTOR] Timeout waiting for query {qid}. Waited {max_wait} seconds.")
+                raise AthenaError(f"{TASK_NAME} Timeout waiting for query {qid}. Waited {max_wait} seconds.")
             time.sleep(poll_delay)
             # small jitter on polling
             poll_delay = min(poll_delay * 1.2 + random.random() * 0.5, 10.0)
         except Exception as e:
-            print(f"[TABLE_CONSTRUCTOR] get_query_execution transient error for qid={qid}: {e}")
+            print(f"{TASK_NAME} get_query_execution transient error for qid={qid}: {e}")
             # If remaining time is low or max attempts exhausted, fail
-            if _remaining_seconds(context) < 5.0:
-                raise AthenaError(f"[TABLE_CONSTRUCTOR] get_query_execution failed and not enough remaining time: {e}")
+            if remaining_seconds(context) < 5.0:
+                raise AthenaError(f"{TASK_NAME} get_query_execution failed and not enough remaining time: {e}")
             time.sleep(min(2 ** random.randint(0, 3), 5.0))
 
 def run_athena_query(query: str, context):
@@ -80,7 +82,7 @@ def run_athena_query(query: str, context):
 
     if state != "SUCCEEDED":
         reason = result["QueryExecution"]["Status"].get("StateChangeReason", "<no reason>")
-        raise AthenaError(f"[TABLE_CONSTRUCTOR] Athena query {qid} failed with state={state}. Reason: {reason}. Query: {query}")
+        raise AthenaError(f"{TASK_NAME} Athena query {qid} failed with state={state}. Reason: {reason}. Query: {query}")
     return qid
 
 def glue_table_exists_with_retry(database: str, table: str, context, attempts: int = 10) -> bool:
@@ -88,15 +90,15 @@ def glue_table_exists_with_retry(database: str, table: str, context, attempts: i
     for attempt in range(1, attempts + 1):
         try:
             glue.get_table(DatabaseName=database, Name=table)
-            print(f"[TABLE_CONSTRUCTOR] Glue table found: {database}.{table} (attempt={attempt})")
+            print(f"{TASK_NAME} Glue table found: {database}.{table} (attempt={attempt})")
             return True
         except glue.exceptions.EntityNotFoundException:
-            print(f"[TABLE_CONSTRUCTOR] Glue table not found yet: {database}.{table} (attempt={attempt})")
+            print(f"{TASK_NAME} Glue table not found yet: {database}.{table} (attempt={attempt})")
         except Exception as e:
-            print(f"[TABLE_CONSTRUCTOR] Glue get_table error for {database}.{table} (attempt={attempt}): {e}")
+            print(f"{TASK_NAME} Glue get_table error for {database}.{table} (attempt={attempt}): {e}")
 
         # Respect remaining time
-        if _remaining_seconds(context) < 5.0:
+        if remaining_seconds(context) < 5.0:
             break
         backoff = min(1.0 * attempt + random.random(), 8.0)
         time.sleep(backoff)
@@ -112,20 +114,20 @@ def safe_split_sql(sql_text: str) -> list:
 
 def handler(event, context):
     start_time = time.time()
-    print(json.dumps({"msg": "[TABLE_CONSTRUCTOR] DDL lambda start", "database": ICEBERG_DATABASE_NAME, "bucket": ICEBERG_BUCKET_NAME}))
+    print(json.dumps({"msg": f"{TASK_NAME} DDL lambda start", "database": ICEBERG_DATABASE_NAME, "bucket": ICEBERG_BUCKET_NAME}))
 
     # 0. Create database (idempotent)
     db_q = f"CREATE DATABASE IF NOT EXISTS {ICEBERG_DATABASE_NAME}"
     try:
         run_athena_query(db_q, context)
     except Exception as e:
-        print(f"[TABLE_CONSTRUCTOR] Failed to create database: {e}")
+        print(f"{TASK_NAME} Failed to create database: {e}")
         raise
 
     # 1. Load SQL file
     sql_path = Path(__file__).parent / "tables.sql"
     if not sql_path.exists():
-        raise FileNotFoundError(f"[TABLE_CONSTRUCTOR] tables.sql not found at {sql_path}")
+        raise FileNotFoundError(f"{TASK_NAME} tables.sql not found at {sql_path}")
 
     sql_text = sql_path.read_text()
     statements = safe_split_sql(sql_text)
@@ -141,12 +143,12 @@ def handler(event, context):
         if not stmt or stmt.startswith("--"):
             continue
 
-        print(f"[TABLE_CONSTRUCTOR] Executing statement (truncated): {stmt[:320]}{'...' if len(stmt) > 320 else ''}")
+        print(f"{TASK_NAME} Executing statement (truncated): {stmt[:320]}{'...' if len(stmt) > 320 else ''}")
         try:
             qid = run_athena_query(stmt, context)
-            print(f"[TABLE_CONSTRUCTOR] Athena query succeeded: qid={qid}")
+            print(f"{TASK_NAME} Athena query succeeded: qid={qid}")
         except Exception as e:
-            print(f"[TABLE_CONSTRUCTOR] Statement failed: {e}")
+            print(f"{TASK_NAME} Statement failed: {e}")
             raise
 
         # Add small delay between DDL statements to reduce race conditions
@@ -169,12 +171,12 @@ def handler(event, context):
                     db_name = db_name.strip().strip("`").strip('"')
                     valid = glue_table_exists_with_retry(db_name, table_name, context)
                     if not valid:
-                        print(f'[TABLE_CONSTRUCTOR] Warning: table {table_name} has not been verified to exist in Glue yet.')
+                        print(f'{TASK_NAME} Warning: table {table_name} has not been verified to exist in Glue yet.')
             except Exception as e:
-                print(f"[TABLE_CONSTRUCTOR] Glue validation parsing error for statement: {e}")
+                print(f"{TASK_NAME} Glue validation parsing error for statement: {e}")
                 # Not fatal in all cases, but surface; if you want strictness, raise here
                 raise
 
     elapsed = time.time() - start_time
-    print(json.dumps({"msg": "[TABLE_CONSTRUCTOR] DDL lambda completed", "duration_seconds": elapsed}))
+    print(json.dumps({"msg": f"{TASK_NAME} DDL lambda completed", "duration_seconds": elapsed}))
     return {"status": "ok", "duration_seconds": elapsed}

@@ -7,15 +7,17 @@ from common.logging_utils import log
 from common.s3_utils import s3_list_keys, s3_read_json
 from common.athena_utils import athena_count_job_rows
 from common.iceberg_utils import delete_job_rows_from_table
+from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
+TASK_NAME = "[DEDUP_INGEST_PRE]"
+
+def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     Try to extract shard names from batching manifests.
     Expected manifest pattern: .../manifest-shard-<name>.json
@@ -42,7 +44,7 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             out.append(s)
     return out
 
-def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
+def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
     Locate per-shard dedup processed outputs
     We expect for each shard:
@@ -62,7 +64,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/processed"
-    expected_shards = _extract_expected_shards_from_manifests(manifests)
+    expected_shards = extract_expected_shards_from_manifests(manifests)
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
 
     shard_jsonl: Dict[str, str] = {}
@@ -99,7 +101,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = s3_read_json(bucket, summary_key, "[DEDUP_INGEST_PRE]")
+        summary = s3_read_json(bucket, summary_key, TASK_NAME)
         rows_read = int(summary.get("rows_read", 0))
         processed_rows = int(summary.get("processed_rows", 0))
 
@@ -136,25 +138,25 @@ def handler(event, context):
         event_type = event["event_type"]
         manifests = event["manifests"]
     except KeyError as e:
-        raise RuntimeError(f"[DEDUP_INGEST_PRE] Missing key: {e}, event={json.dumps(event)}")
+        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
 
     if not job_id or job_id == "unknown":
-        raise RuntimeError("[DEDUP_INGEST_PRE] missing job_id in event")
+        raise RuntimeError(f"{TASK_NAME} missing job_id in event")
     if not manifests or not isinstance(manifests, list):
-        raise RuntimeError("[DEDUP_INGEST_PRE] manifests must be a non-empty list of s3 URIs")
+        raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Starting dedup pre-ingest for job {job_id}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting dedup pre-ingest for job {job_id}")
 
     # 1) Collect processed shard outputs and verify completeness
     try:
-        collected = _collect_processed_shards(job_id, manifests)
+        collected = collect_processed_shards(job_id, manifests)
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Failed collecting processed shards: {e}", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed collecting processed shards: {e}", level="error")
         raise
 
     missing = collected["missing_shards"]
     if missing:
-        err = f"[DEDUP_INGEST_PRE] Missing processed outputs for shards: {missing}"
+        err = f"{TASK_NAME} Missing processed outputs for shards: {missing}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
@@ -167,27 +169,27 @@ def handler(event, context):
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
-        f"[DEDUP_INGEST_PRE] Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}"
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}"
     )
 
     # 2) Verify original count via Athena (before deletion)
     try:
         original_count = athena_count_job_rows(
             job_id,
-            "[DEDUP_INGEST_PRE]",
+            TASK_NAME,
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
             ATHENA_WORKGROUP
         )
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Athena count failed: {e}", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena count failed: {e}", level="error")
         raise
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Athena original_count={original_count}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena original_count={original_count}")
 
     if total_rows_read != original_count:
-        err = f"[DEDUP_INGEST_PRE] Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
+        err = f"{TASK_NAME} Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
@@ -195,15 +197,15 @@ def handler(event, context):
     try:
         delete_result = delete_job_rows_from_table(
             job_id,
-            "[DEDUP_INGEST_PRE]",
+            TASK_NAME,
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
             ATHENA_WORKGROUP
         )
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Deleted upload_staging partition, result={delete_result}")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"[DEDUP_INGEST_PRE] Failed deleting upload_staging partition: {e}", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")
         raise
 
     # Return the per-shard plan for the Map state

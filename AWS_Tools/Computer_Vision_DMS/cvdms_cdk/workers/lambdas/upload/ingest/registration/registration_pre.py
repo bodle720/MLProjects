@@ -1,38 +1,27 @@
 #!/usr/bin/env python3
 import os
 import json
-import logging
 from typing import Dict, List
 
-from common.utils import (
-    log,
-    s3_list_keys,
-    athena_count_job_rows,
-    delete_iceberg_partition_rows
-)
-from common.ingest import s3_read_json
+from common.logging_utils import log
+from common.s3_utils import s3_list_keys, s3_read_json
+from common.athena_utils import athena_count_job_rows
+from common.iceberg_utils import delete_job_rows_from_table
+from common.table_schemas import CANONICAL_IMAGERY_TABLE_NAME, CANONICAL_BBOX_TABLE_NAME, \
+                                 CANONICAL_SEMANTIC_TABLE_NAME, CANONICAL_INSTANCE_TABLE_NAME, \
+                                 UPLOAD_STAGING_TABLE_NAME
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Env
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-
-UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
-CANONICAL_IMAGERY_TABLE_NAME = os.environ.get("CANONICAL_IMAGERY_TABLE_NAME", "canonical_imagery")
-
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-# Label table names (must match the schema + writer’s __table routing)
-CANONICAL_BBOX_TABLE = "canonical_bounding_boxes"
-CANONICAL_SEMANTIC_TABLE = "canonical_semantic_masks"
-CANONICAL_INSTANCE_TABLE = "canonical_instance_annotations"
-LABEL_TABLES: List[str] = [CANONICAL_BBOX_TABLE, CANONICAL_SEMANTIC_TABLE, CANONICAL_INSTANCE_TABLE]
+LABEL_TABLES: List[str] = [CANONICAL_BBOX_TABLE_NAME, CANONICAL_SEMANTIC_TABLE_NAME, CANONICAL_INSTANCE_TABLE_NAME]
 
-def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
+TASK_NAME = "[REG_INGEST_PRE]"
+
+def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     expected: List[str] = []
     for m in manifests:
         try:
@@ -55,7 +44,7 @@ def _extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             out.append(s)
     return out
 
-def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
+def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
     Locate per-shard registration processed outputs
 
@@ -89,7 +78,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"temp/image-upload/{job_id}/batches/registration-step/processed"
 
-    expected_shards = _extract_expected_shards_from_manifests(manifests)
+    expected_shards = extract_expected_shards_from_manifests(manifests)
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
 
     shard_upload: Dict[str, str] = {}
@@ -146,7 +135,7 @@ def _collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             missing.append(shard)
             continue
 
-        summary = s3_read_json(bucket, sum_k)
+        summary = s3_read_json(bucket, sum_k, TASK_NAME)
         rows_read = int(summary.get("rows_read", 0))
         canon_im_rows = int(summary.get("canonical_imagery_rows", 0))
         canon_lbl_rows = int(summary.get("canonical_label_rows", 0))
@@ -187,42 +176,41 @@ def handler(event, context):
         user = event["user"]
         event_type = event["event_type"]
         manifests = event["manifests"]
-        label_type = event.get("label_type", "unknown")
+        label_type = event["label_type"]
     except KeyError as e:
-        raise RuntimeError(f"[REG_INGEST_PRE] Missing key: {e}, event={json.dumps(event)}")
+        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
 
     if not job_id or job_id == "unknown":
-        raise RuntimeError("[REG_INGEST_PRE] missing job_id")
+        raise RuntimeError(f"{TASK_NAME} missing job_id")
     if not manifests or not isinstance(manifests, list):
-        raise RuntimeError("[REG_INGEST_PRE] manifests must be a non-empty list of s3 URIs")
+        raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
     log(
         job_id,
         user,
         event_type,
-        f"[REG_INGEST_PRE] Starting registration pre-ingest for job {job_id} label_type={label_type}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Starting registration pre-ingest for job {job_id} label_type={label_type}"
     )
 
     # 1) Collect processed shard outputs and verify completeness
     try:
-        collected = _collect_processed_shards(job_id, manifests)
+        collected = collect_processed_shards(job_id, manifests)
     except Exception as e:
         log(
             job_id,
             user,
             event_type,
-            f"[REG_INGEST_PRE] Failed collecting processed shards: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"{TASK_NAME} Failed collecting processed shards: {e}",
+            level="error"
         )
         raise
 
     missing = collected["missing_shards"]
     if missing:
-        err = f"[REG_INGEST_PRE] Missing processed outputs for shards: {missing}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        err = f"{TASK_NAME} Missing processed outputs for shards: {missing}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     shards = collected["shards"]
@@ -234,30 +222,29 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[REG_INGEST_PRE] Collected {len(shards)} shard outputs. "
-        f"rows_read={total_rows_read}, canon_imagery_rows={total_canon_imagery_rows}, canon_label_rows={total_canon_label_rows}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. "
+        f"rows_read={total_rows_read}, canon_imagery_rows={total_canon_imagery_rows}, canon_label_rows={total_canon_label_rows}"
     )
 
     # 2) Verify original count via Athena (before deletion)
     try:
         original_count = athena_count_job_rows(
             job_id,
+            TASK_NAME,
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            "REG_INGEST_PRE",
-            athena_workgroup=ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
     except Exception as e:
         log(
             job_id,
             user,
             event_type,
-            f"[REG_INGEST_PRE] Athena count failed: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"{TASK_NAME} Athena count failed: {e}",
+            level="error"
         )
         raise
 
@@ -265,40 +252,40 @@ def handler(event, context):
         job_id,
         user,
         event_type,
-        f"[REG_INGEST_PRE] Athena original_count={original_count} for job {job_id}",
         LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Athena original_count={original_count} for job {job_id}"
     )
 
     if total_rows_read != original_count:
-        err = f"[REG_INGEST_PRE] Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        err = f"{TASK_NAME} Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # 3) Delete upload_staging partition rows once (before Map reinserts)
     try:
-        delete_result = delete_iceberg_partition_rows(
+        delete_result = delete_job_rows_from_table(
             job_id,
+            TASK_NAME,
             ICEBERG_DATABASE_NAME,
             UPLOAD_STAGING_TABLE_NAME,
             ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP,
+            ATHENA_WORKGROUP
         )
         log(
             job_id,
             user,
             event_type,
-            f"[REG_INGEST_PRE] Deleted upload_staging partition, result={delete_result}",
             LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}"
         )
     except Exception as e:
         log(
             job_id,
             user,
             event_type,
-            f"[REG_INGEST_PRE] Failed deleting upload_staging partition: {e}",
             LOG_FIREHOSE_STREAM_NAME,
-            error=str(e),
-            level="error",
+            f"{TASK_NAME} Failed deleting upload_staging partition: {e}",
+            level="error"
         )
         raise
 

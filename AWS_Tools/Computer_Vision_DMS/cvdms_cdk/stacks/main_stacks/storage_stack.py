@@ -121,6 +121,16 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
+        # Dataset versions table (one row per dataset_id + dataset_version snapshot)
+        dataset_versions_table = dynamodb.Table(
+            self,
+            "DatasetVersionsTable",
+            partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="dataset_version", type=dynamodb.AttributeType.NUMBER),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Job table
         job_table = dynamodb.Table(
             self, "JobsTable",
@@ -170,7 +180,7 @@ class StorageStack(Stack):
             environment={
                     "ICEBERG_BUCKET_NAME": iceberg_bucket.bucket_name,
                     "ICEBERG_DATABASE_NAME": iceberg_database_name,
-                    "S3_ATHENA_OUTPUT_URI": f"s3://{file_bucket.bucket_name}/athena-results/"
+                    "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/"
                 }
         )
 
@@ -398,7 +408,6 @@ class StorageStack(Stack):
                 "JOB_TABLE_NAME": job_table.table_name,
                 "FILE_BUCKET_NAME": file_bucket.bucket_name,
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOCK_TABLE_NAME": lock_table.table_name,
                 "ATHENA_WORKGROUP": "primary",
                 "ICEBERG_DATABASE_NAME": iceberg_database_name,
@@ -500,7 +509,6 @@ class StorageStack(Stack):
         self.sha256_table = sha256_table
         self.lock_table = lock_table
         self.global_dlq = dlq
-        self.datasets_table = datasets_table
         self.iceberg_database_name = iceberg_database_name
         self.upload_events_queue = upload_events_queue
 
@@ -531,6 +539,11 @@ class StorageStack(Stack):
         ssm.StringParameter(self, "DatasetsTableNameParam",
                             parameter_name=f"/cvdms/{app_name}/storage/datasets_table_name",
                             string_value=datasets_table.table_name
+                            )
+
+        ssm.StringParameter(self, "DatasetVersionsTableNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/dataset_versions_table_name",
+                            string_value=dataset_versions_table.table_name
                             )
 
         ssm.StringParameter(self, "LockTableNameParam",

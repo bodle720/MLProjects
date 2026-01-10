@@ -329,11 +329,8 @@ class ImageUploadStack(Stack):
                 "JOB_TABLE_NAME": self.job_table.table_name,
                 "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
                 "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                "UPLOAD_STAGING_TABLE_NAME": "upload_staging",
                 "LOCK_TABLE_NAME": self.lock_table.table_name,
-                "ATHENA_WORKGROUP": "primary",
-                "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
-                "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/"
+                "ATHENA_WORKGROUP": "primary"
             }
         )
 

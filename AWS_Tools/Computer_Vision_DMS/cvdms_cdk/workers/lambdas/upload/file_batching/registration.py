@@ -4,78 +4,33 @@ import math
 
 import boto3
 
-from common.utils import log, wait_for_athena, delete_s3_prefix
-from common.ingest import drop_ctas_table_if_exists
+from common.logging_utils import log
+from common.athena_utils import drop_table_if_exists, run_athena, athena_count_job_rows
+from common.s3_utils import delete_s3_prefix
+from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
-# Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]  # e.g. s3://<bucket>/athena-results/
-ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
+ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
-UPLOAD_STAGING_TABLE_NAME = os.environ.get("UPLOAD_STAGING_TABLE_NAME", "upload_staging")
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-# Tunables (defaults; overridable via env)
-AVG_ROW_KB = float(os.environ.get("REG_AVG_ROW_KB", "2.0"))
-MEMORY_SAFETY_FACTOR = float(os.environ.get("REG_MEMORY_SAFETY_FACTOR", "0.5"))
-MIN_ROWS_PER_SHARD = int(os.environ.get("REG_MIN_ROWS_PER_SHARD", "1000"))
-MAX_ROWS_PER_SHARD = int(os.environ.get("REG_MAX_ROWS_PER_SHARD", "20000"))
-JOB_MEMORY_MB = int(os.environ.get("REG_JOB_MEMORY_MB", "512"))
+TASK_NAME = "[REG_FILE_BATCHING]"
+
+# Tunables
+AVG_ROW_KB = 2.0
+MEMORY_SAFETY_FACTOR = 0.5
+MIN_ROWS_PER_SHARD = 1000
+MAX_ROWS_PER_SHARD = 20000
+JOB_MEMORY_MB = 2048
 
 # Hard cap to prevent creating absurdly many partitions
-MAX_SHARDS = int(os.environ.get("REG_MAX_SHARDS", "4096"))
+MAX_SHARDS = 4096
+MAX_FILES_PER_MANIFEST = 500  # or 1000
 
 s3 = boto3.client("s3")
-athena = boto3.client("athena")
 
-def _start_athena_count(job_id: str) -> str:
-    table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
-    safe_job_id = job_id.replace("'", "''")
-    sql = f"SELECT count(*) as cnt FROM {table} WHERE job_id = '{safe_job_id}'"
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )
-    return resp["QueryExecutionId"]
-
-def _read_count_from_athena_result(qid: str) -> int:
-    resp = athena.get_query_results(QueryExecutionId=qid, MaxResults=2)
-    rows = resp.get("ResultSet", {}).get("Rows", [])
-    if len(rows) < 2:
-        return 0
-    val = rows[1]["Data"][0].get("VarCharValue")
-    try:
-        return int(val)
-    except Exception:
-        return 0
-
-def _choose_target_rows_per_shard(total_rows: int) -> int:
-    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
-    usable_kb = usable_mb * 1024.0
-    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
-
-    estimated_rows = int(usable_kb / avg_row_kb)
-    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
-
-    # In pathological small-memory cases, ensure >= 1
-    return max(1, target)
-
-def _compute_num_shards(total_rows: int, target_rows: int) -> int:
-    if total_rows <= 0:
-        return 1
-    n = int(math.ceil(total_rows / float(target_rows)))
-    if n < 1:
-        n = 1
-    if n > MAX_SHARDS:
-        n = MAX_SHARDS
-    return n
-
-def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> str:
-    """
-    Export job_id partition into Parquet files partitioned by shard_id (0..num_shards-1),
-    where shard_id is derived from hashing image_id. No sha256 dependency.
-    """
+def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shards: int) -> str:
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
     safe_job_id = job_id.replace("'", "''")
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
@@ -124,15 +79,30 @@ def _start_athena_ctas(job_id: str, export_s3_prefix: str, num_shards: int) -> s
     FROM {table}
     WHERE job_id = '{safe_job_id}'
     """
+    return sql
 
-    resp = athena.start_query_execution(
-        QueryString=sql,
-        ResultConfiguration={"OutputLocation": ATHENA_OUTPUT_S3},
-        WorkGroup=ATHENA_WORKGROUP,
-    )
-    return resp["QueryExecutionId"]
+def choose_target_rows_per_shard(total_rows: int) -> int:
+    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
+    usable_kb = usable_mb * 1024.0
+    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
 
-def _list_export_files_by_shard(export_prefix: str):
+    estimated_rows = int(usable_kb / avg_row_kb)
+    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
+
+    # In pathological small-memory cases, ensure >= 1
+    return max(1, target)
+
+def compute_num_shards(total_rows: int, target_rows: int) -> int:
+    if total_rows <= 0:
+        return 1
+    n = int(math.ceil(total_rows / float(target_rows)))
+    if n < 1:
+        n = 1
+    if n > MAX_SHARDS:
+        n = MAX_SHARDS
+    return n
+
+def list_export_files_by_shard(export_prefix: str):
     """
     Group exported Parquet files by shard_id partition.
     Expected key path like: .../shard_id=000123/part-....parquet
@@ -140,13 +110,15 @@ def _list_export_files_by_shard(export_prefix: str):
     """
     paginator = s3.get_paginator("list_objects_v2")
     files_by_shard = {}
-    all_keys = []
+    sample_keys = []
     export_prefix = export_prefix.rstrip("/") + "/"
 
     for page in paginator.paginate(Bucket=FILE_BUCKET_NAME, Prefix=export_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            all_keys.append(key)
+
+            if len(sample_keys) < 3:
+                sample_keys.append(key)
 
             if key.endswith("/"):
                 continue
@@ -161,13 +133,13 @@ def _list_export_files_by_shard(export_prefix: str):
                     break
 
             if not shard_id:
-                raise RuntimeError(f"[REG_FILE_BATCHING] Unable to extract shard_id from export key: {key}")
+                raise RuntimeError(f"{TASK_NAME} Unable to extract shard_id from export key: {key}")
 
             files_by_shard.setdefault(shard_id, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
-    return files_by_shard, all_keys
+    return files_by_shard, sample_keys
 
-def _write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -> str:
+def write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -> str:
     # Keep same manifest shape as your other stages for reuse in map workers:
     # shard_prefix is now shard_id
     manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
@@ -188,71 +160,76 @@ def handler(event, context):
         label_type = event["label_type"]
         data_source = event["data_source"]
     except KeyError as e:
-        raise RuntimeError(f"[REG_FILE_BATCHING] Batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"{TASK_NAME} Batching Lambda failed: missing required key {e}")
 
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Starting registration batching for job {job_id}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting registration batching for job {job_id}")
 
     export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export/"
     manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix)
+    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, TASK_NAME)
 
     # 0) COUNT(*)
-    count_qid = _start_athena_count(job_id)
-    athena_res = wait_for_athena(count_qid, poll=2.0, timeout=300)
-    if athena_res["state"] != "SUCCEEDED":
-        resp = athena_res["metadata"]
-        err = f"[REG_FILE_BATCHING] Athena COUNT failed for job {job_id}. Response = {resp}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise RuntimeError(err)
-
-    total_rows = _read_count_from_athena_result(count_qid)
+    try:
+        total_rows = athena_count_job_rows(job_id,
+                                          TASK_NAME,
+                                          ICEBERG_DATABASE_NAME,
+                                          UPLOAD_STAGING_TABLE_NAME,
+                                          ATHENA_OUTPUT_S3,
+                                          ATHENA_WORKGROUP,
+                                          poll=2.0,
+                                          timeout=300)
+    except Exception as e:
+        err = f"{TASK_NAME} Failed to count rows from upload staging table for job {job_id}: {e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise
 
     if total_rows <= 0:
-        raise RuntimeError(f"[REG_FILE_BATCHING] No rows in upload_staging for job_id={job_id}")
+        raise RuntimeError(f"{TASK_NAME} No rows in upload_staging for job_id={job_id}")
 
-    target_rows = _choose_target_rows_per_shard(total_rows)
-    num_shards = _compute_num_shards(total_rows, target_rows)
+    target_rows = choose_target_rows_per_shard(total_rows)
+    num_shards = compute_num_shards(total_rows, target_rows)
 
-    log(
-        job_id, user, event_type,
-        f"[REG_FILE_BATCHING] total_rows={total_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}",
-        LOG_FIREHOSE_STREAM_NAME
-    )
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} total_rows={total_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}")
 
     # 1) CTAS export partitioned by shard_id
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     table_name = f"reg_export_{sanitized_job_id}"
+    try:
+        drop_table_if_exists(ICEBERG_DATABASE_NAME,
+                                 table_name,
+                                 TASK_NAME,
+                                 ATHENA_OUTPUT_S3,
+                                 ATHENA_WORKGROUP,
+                                 poll=3.0,
+                                 timeout=900)
+    except Exception as e:
+        err = f"{TASK_NAME} Failed to drop CTAS table if it exists for job {job_id}: {e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise
 
-    drop_qid = drop_ctas_table_if_exists(ICEBERG_DATABASE_NAME,
-                                         table_name,
-                                         ATHENA_OUTPUT_S3,
-                                         ATHENA_WORKGROUP)
+    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base, TASK_NAME)
 
-    drop_res = wait_for_athena(drop_qid, poll=3.0, timeout=900)
-    if drop_res["state"] != "SUCCEEDED":
-        resp = drop_res["metadata"]
-        err = f"[REG_FILE_BATCHING] Failed to drop CTAS temp table for job {job_id}. Response = {resp}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise RuntimeError(err)
+    sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, num_shards)
+    try:
+        run_athena(sql,
+                   TASK_NAME,
+                   ATHENA_OUTPUT_S3,
+                   ATHENA_WORKGROUP,
+                   poll=3.0,
+                   timeout=900)
+    except Exception as e:
+        err = f"{TASK_NAME} Failed to start CTAS table for job {job_id}: {e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise
 
-    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base)
-
-    qid = _start_athena_ctas(job_id, export_prefix_base, num_shards)
-    ctas_res = wait_for_athena(qid, poll=3.0, timeout=900)
-    if ctas_res["state"] != "SUCCEEDED":
-        resp = ctas_res["metadata"]
-        err = f"[REG_FILE_BATCHING] Athena CTAS failed for job {job_id}. Response = {resp}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
-        raise RuntimeError(err)
-
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}")
 
     # 2) List exported files and group by shard_id
-    files_by_shard, all_keys = _list_export_files_by_shard(export_prefix_base)
+    files_by_shard, sample_keys = list_export_files_by_shard(export_prefix_base)
 
     if not files_by_shard:
-        err = f"[REG_FILE_BATCHING] No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {all_keys[:10]}"
-        log(job_id, user, event_type, err, LOG_FIREHOSE_STREAM_NAME, error=err, level="error")
+        err = f"{TASK_NAME} No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {sample_keys}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     # 3) Write manifests (one per shard_id)
@@ -260,7 +237,14 @@ def handler(event, context):
     for shard_id, files in sorted(files_by_shard.items()):
         if not files:
             continue
-        manifest_s3_uri = _write_manifest(job_id, shard_id, files, manifest_prefix)
+
+        if len(files) > MAX_FILES_PER_MANIFEST:
+            for part_idx in range(0, len(files), MAX_FILES_PER_MANIFEST):
+                sub = files[part_idx:part_idx + MAX_FILES_PER_MANIFEST]
+                shard_name2 = f"{shard_id}{part_idx // MAX_FILES_PER_MANIFEST:04d}"
+                manifest_uris.append(write_manifest(job_id, shard_name2, sub, manifest_prefix))
+
+        manifest_s3_uri = write_manifest(job_id, shard_id, files, manifest_prefix)
         manifest_uris.append(manifest_s3_uri)
 
     result = {
@@ -272,6 +256,6 @@ def handler(event, context):
         "manifests": manifest_uris
     }
 
-    log(job_id, user, event_type, f"[REG_FILE_BATCHING] Completed for job {job_id}. Created {len(manifest_uris)} manifests.", LOG_FIREHOSE_STREAM_NAME)
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Completed for job {job_id}. Created {len(manifest_uris)} manifests.")
 
     return result

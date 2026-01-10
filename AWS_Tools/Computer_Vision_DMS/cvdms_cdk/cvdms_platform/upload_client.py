@@ -38,7 +38,7 @@ class UploadClient:
         self.lock_table = self.dynamodb.Table(self.lock_table_name)
 
     # small helper to mark job status (callable by client code)
-    def update_job_status(self, job_id: str, status: str, error_msg: Optional[str] = None) -> Tuple[bool, str]:
+    def _update_job_status(self, job_id: str, status: str, error_msg: Optional[str] = None) -> Tuple[bool, str]:
         valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
         if status not in valid_statuses:
             logging.error(f"Failed updating job status because specified status was invalid: {status}")
@@ -57,7 +57,7 @@ class UploadClient:
             logging.error(f"Failed updating job status: {e}")
             return False, f"dynamodb_error: {e}"
 
-    def acquire_lock(self) -> Tuple[bool, str]:
+    def _acquire_lock(self) -> Tuple[bool, str]:
         """
         Try to set locked = True, locked_by = holder (job_id).
         Returns (True, "") on success, (False, error_message) on failure.
@@ -82,7 +82,7 @@ class UploadClient:
                 return False, "lock_already_held"
             return False, f"dynamodb_error: {e}"
 
-    def release_lock(self, expected_holder: str = "") -> Tuple[bool, str]:
+    def _release_lock(self, expected_holder: str = "") -> Tuple[bool, str]:
         """
         Release lock only if current locked_by matches expected_holder (the job id holding the lock).
         Returns (True, "") on success.
@@ -104,7 +104,7 @@ class UploadClient:
                 return False, "lock_not_held_by_expected_holder"
             return False, f"dynamodb_error: {e}"
 
-    def create_job_row(self,
+    def _create_job_row(self,
                        job_id: str,
                        *,
                        summary: str = "") -> Tuple[bool, str]:
@@ -130,7 +130,7 @@ class UploadClient:
                 return False, "job_already_exists"
             return False, f"dynamodb_error: {e}"
 
-    def delete_temp_job_folder(self, job_id: str) -> Tuple[bool, str]:
+    def _delete_temp_job_folder(self, job_id: str) -> Tuple[bool, str]:
         """
         Deletes all S3 objects under temp/image-upload/<job_id>/.
         Returns (True, "deleted") or (False, error_message).
@@ -160,7 +160,7 @@ class UploadClient:
         except Exception as e:
             return False, f"delete_error: {e}"
 
-    def upload_files_to_s3(self,
+    def _upload_files_to_s3(self,
                            job_id: str,
                            label_type: str,
                            manifest_path: str,
@@ -209,7 +209,7 @@ class UploadClient:
             return True, "success"
 
         except Exception as e:
-            delete_ok, delete_msg = self.delete_temp_job_folder(job_id)
+            delete_ok, delete_msg = self._delete_temp_job_folder(job_id)
 
             if not delete_ok:
                 logging.error(f"Failed to delete temp folder for job {job_id} after a failed upload attempt. Delete error: {delete_msg}, upload error: {e}")
@@ -238,21 +238,21 @@ class UploadClient:
             return {"error": f"Invalid label type: {label_type}, must be one of {ALLOWED_LABEL_TYPES}"}
 
         # try to acquire lock
-        ok, holder_or_err = self.acquire_lock()
+        ok, holder_or_err = self._acquire_lock()
         if not ok:
             logging.error(f"Failed to acquire lock: {holder_or_err}")
-            return {"error": f"could_not_acquire_lock: {holder_or_err}"}
+            return {"error": f"could not acquire lock: {holder_or_err}"}
 
-        job_id = holder_or_err  # we used holder as generated job id in acquire_lock
+        job_id = holder_or_err  # we used holder as generated job id in acquire lock
         logging.info(f"Acquired lock: {job_id}")
 
         # create job row
-        ok, err = self.create_job_row(job_id, summary=job_summary)
+        ok, err = self._create_job_row(job_id, summary=job_summary)
         if not ok:
             logging.error(f"Failed to create job row: {err}")
             # release lock before returning
-            self.release_lock(expected_holder=job_id)
-            return {"error": f"could_not_create_job_row: {err}"}
+            self._release_lock(expected_holder=job_id)
+            return {"error": f"could not create job row: {err}"}
 
         logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
 
@@ -262,25 +262,25 @@ class UploadClient:
             err = validation_dict.get('error')
             # mark job failed and release lock
             logging.error(f"Failed to load and validate manifest: {err}")
-            self.update_job_status(job_id, "FAILED", error_msg=err)
-            self.release_lock(expected_holder=job_id)
+            self._update_job_status(job_id, "FAILED", error_msg=err)
+            self._release_lock(expected_holder=job_id)
             return {"error": err}
         else:
             manifest_path = validation_dict['local_path']
 
         # At this point we have job_id, PENDING row, and manifest json loaded in.
         logging.info("Manifest validated. Uploading to S3...")
-        ok, msg = self.upload_files_to_s3(job_id,
+        ok, msg = self._upload_files_to_s3(job_id,
                                           label_type,
                                           manifest_path,
                                           data_source=data_source)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
-            self.update_job_status(job_id, "FAILED", error_msg=msg)
-            self.release_lock(expected_holder=job_id)
+            self._update_job_status(job_id, "FAILED", error_msg=msg)
+            self._release_lock(expected_holder=job_id)
             return {"error": f"Failed upload step: {msg}"}
 
         logging.info("Done uploading manifest and job.json to S3.")
-        self.update_job_status(job_id, "IN_PROGRESS", error_msg=msg)
+        self._update_job_status(job_id, "IN_PROGRESS", error_msg=msg)
 
         return {"submission_status": "success", "job_id": job_id}
