@@ -166,7 +166,7 @@ class BatchingStage(Construct):
 
         # Athena: start queries and poll results (scoped to workgroup)
         job_role.add_to_policy(iam.PolicyStatement(
-            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"],
             resources=[f"arn:aws:athena:{region}:{account}:workgroup/primary"]
         ))
 
@@ -205,24 +205,25 @@ class BatchingStage(Construct):
         ))
         # allow listing only for athena-results prefix on all buckets (need to be able to load in images everywhere)
         job_role.add_to_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::*"]
+            actions=["s3:GetBucketLocation"],
+            resources=[file_bucket.bucket_arn, iceberg_bucket.bucket_arn]
         ))
 
         # S3: read/write/delete Iceberg files for upload_staging prefix
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"]
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*",
+                       f"arn:aws:s3:::{iceberg_bucket.bucket_name}/canonical/*"]
         ))
         # allow listing only for upload_staging prefix on iceberg_bucket
         job_role.add_to_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}}
         ))
 
         job_role.add_to_policy(iam.PolicyStatement(
-            actions=["s3:GetObject", "s3:PutObject"],
+            actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
             resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
         ))
 
@@ -240,7 +241,7 @@ class BatchingStage(Construct):
         job_role.add_to_policy(iam.PolicyStatement(
             actions=[
                 "s3:PutObject",
-                "s3:AbortMultipartUpload",  # good to include for some SDK behaviors
+                "s3:AbortMultipartUpload"
             ],
             resources=[
                 f"arn:aws:s3:::{file_bucket.bucket_name}/canonical/*",

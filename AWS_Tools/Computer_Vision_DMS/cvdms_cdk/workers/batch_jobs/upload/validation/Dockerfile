@@ -28,6 +28,7 @@ COPY batch_jobs/upload/validation/src/ .
 COPY common/python/ /opt/common/
 
 ENV PYTHONPATH=/opt/common:/usr/local/lib/python3.12/site-packages:/usr/local/lib/python3/site-packages
+ENV PYTHONUNBUFFERED=1
 
 # Set the default command to run your validation job
 CMD ["python", "main.py"]

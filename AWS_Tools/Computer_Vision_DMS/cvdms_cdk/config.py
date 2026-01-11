@@ -67,8 +67,8 @@ CONFIG = AppConfig(
             timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
-            vcpus=1,
-            memory_limit_mib=2048,
+            vcpus=2,
+            memory_limit_mib=4096,
             directory="workers",
             file="batch_jobs/upload/registration/Dockerfile"
         )

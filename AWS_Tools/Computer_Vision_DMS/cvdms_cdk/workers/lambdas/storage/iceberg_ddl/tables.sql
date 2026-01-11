@@ -21,7 +21,7 @@ TBLPROPERTIES (
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.image_labels (
     image_id string COMMENT 'UUID foreign key for the image from canonical_imagery.image_id',
     label_id string COMMENT 'Can be a string label lowercase, or a label id from a label table: bbox_annotation_id or semantic_mask_id or instance_annotation_id',
-    label_type string COMMENT 'one of single-label, object-detection, semantic-segmentation, or instance-segmentation'
+    label_type string COMMENT 'one of string-label, object-detection, semantic-segmentation, or instance-segmentation'
 )
 PARTITIONED BY (label_type)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/image-labels/'
@@ -32,7 +32,6 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_bounding_boxes (
     bbox_annotation_id string,
-    image_id string COMMENT 'UUID foreign key for the image in the table canonical_imagery',
     source_ref_meta string,
     classes_present array<string>
 )
@@ -44,7 +43,6 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_semantic_masks (
     semantic_mask_id string,
-    image_id string COMMENT 'UUID foreign key for the image in the table canonical_imagery',
     source_ref_png string,
     source_ref_meta string,
     classes_present array<string>
@@ -57,7 +55,6 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_instance_annotations (
     instance_annotation_id string,
-    image_id string COMMENT 'UUID foreign key for the image in the table canonical_imagery',
     source_ref_png string,
     source_ref_meta string,
     classes_present array<string>
@@ -93,7 +90,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     validation_error string,
     dedup_status string COMMENT 'one of pending, passed, internal_duplicate, external_duplicate',
     dedup_error string,
-    registration_status string COMMENT 'one of pending, passed, failed',
+    registration_status string COMMENT 'one of pending, passed, failed, enriched, no_op',
     registration_error string,
     matched_image_id string COMMENT 'present when dedup_status = external_duplicate'
 )

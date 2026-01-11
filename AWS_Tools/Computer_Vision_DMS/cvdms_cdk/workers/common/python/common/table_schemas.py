@@ -74,14 +74,12 @@ IMAGE_LABELS_SCHEMA = TableSchema(
 CANONICAL_BOUNDING_BOXES_SCHEMA = TableSchema(
     cols=[
         "bbox_annotation_id",
-        "image_id",
         "source_ref_meta",
         "classes_present"
     ],
     key_cols=["bbox_annotation_id"],
     types={
         "bbox_annotation_id": "string",
-        "image_id": "string",
         "source_ref_meta": "string",
         "classes_present": "array_string"
     },
@@ -90,7 +88,6 @@ CANONICAL_BOUNDING_BOXES_SCHEMA = TableSchema(
 CANONICAL_SEMANTIC_MASKS_SCHEMA = TableSchema(
     cols=[
         "semantic_mask_id",
-        "image_id",
         "source_ref_png",
         "source_ref_meta",
         "classes_present"
@@ -98,7 +95,6 @@ CANONICAL_SEMANTIC_MASKS_SCHEMA = TableSchema(
     key_cols=["semantic_mask_id"],
     types={
         "semantic_mask_id": "string",
-        "image_id": "string",
         "source_ref_png": "string",
         "source_ref_meta": "string",
         "classes_present": "array_string"
@@ -108,7 +104,6 @@ CANONICAL_SEMANTIC_MASKS_SCHEMA = TableSchema(
 CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA = TableSchema(
     cols=[
         "instance_annotation_id",
-        "image_id",
         "source_ref_png",
         "source_ref_meta",
         "classes_present"
@@ -116,7 +111,6 @@ CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA = TableSchema(
     key_cols=["instance_annotation_id"],
     types={
         "instance_annotation_id": "string",
-        "image_id": "string",
         "source_ref_png": "string",
         "source_ref_meta": "string",
         "classes_present": "array_string"

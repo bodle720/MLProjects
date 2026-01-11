@@ -1,11 +1,10 @@
 import os
 import json
 import math
-
 import boto3
 
 from common.logging_utils import log
-from common.athena_utils import drop_table_if_exists, run_athena, athena_count_job_rows
+from common.athena_utils import drop_table_if_exists, run_athena, athena_get_scalar
 from common.s3_utils import delete_s3_prefix
 from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
@@ -24,11 +23,42 @@ MIN_ROWS_PER_SHARD = 1000
 MAX_ROWS_PER_SHARD = 20000
 JOB_MEMORY_MB = 2048
 
-# Hard cap to prevent creating absurdly many partitions
 MAX_SHARDS = 4096
-MAX_FILES_PER_MANIFEST = 500  # or 1000
+MAX_FILES_PER_MANIFEST = 500
 
 s3 = boto3.client("s3")
+
+
+def choose_target_rows_per_shard(total_rows: int) -> int:
+    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
+    usable_kb = usable_mb * 1024.0
+    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
+    estimated_rows = int(usable_kb / avg_row_kb)
+    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
+    return max(1, target)
+
+
+def compute_num_shards(total_rows: int, target_rows: int) -> int:
+    if total_rows <= 0:
+        return 1
+    n = int(math.ceil(total_rows / float(target_rows)))
+    n = max(1, min(n, MAX_SHARDS))
+    return n
+
+
+def generate_count_sql(job_id: str) -> str:
+    table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
+    safe_job_id = job_id.replace("'", "''")
+
+    # Only the rows registration will actually process.
+    return f"""
+    SELECT CAST(count(*) AS bigint) AS c
+    FROM {table}
+    WHERE job_id = '{safe_job_id}'
+      AND validation_status = 'passed'
+      AND dedup_status IN ('passed', 'external_duplicate')
+    """
+
 
 def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shards: int) -> str:
     table = f'"{ICEBERG_DATABASE_NAME}"."{UPLOAD_STAGING_TABLE_NAME}"'
@@ -38,9 +68,13 @@ def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shard
     tmp_table = f"{ICEBERG_DATABASE_NAME}.reg_export_{sanitized_job_id}"
     export_location = f"s3://{FILE_BUCKET_NAME}/{export_s3_prefix.rstrip('/')}/"
 
-    num_shards = max(1, num_shards)
+    num_shards = max(1, int(num_shards))
 
-    sql = f"""
+    # NOTE: shard is computed from target_image_id to keep all mutations for a canonical image in one shard.
+    # target_image_id:
+    #   - external_duplicate -> matched_image_id (canonical image)
+    #   - passed            -> image_id (new canonical image id)
+    return f"""
     CREATE TABLE {tmp_table}
     WITH (
         format = 'PARQUET',
@@ -75,37 +109,43 @@ def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shard
         registration_status,
         registration_error,
         matched_image_id,
-        lpad(CAST(mod(from_base(substr(replace(coalesce(image_id, ''), '-', ''), 1, 8), 16), {num_shards}) AS varchar), 6, '0') AS shard_id
+
+        -- For debugging + for the Batch job if you want it:
+        CASE
+          WHEN dedup_status = 'external_duplicate' THEN matched_image_id
+          ELSE image_id
+        END AS target_image_id,
+
+        lpad(
+          CAST(
+            mod(
+              from_base(
+                substr(replace(
+                  CASE
+                    WHEN dedup_status = 'external_duplicate' THEN coalesce(matched_image_id, '')
+                    ELSE coalesce(image_id, '')
+                  END
+                , '-', ''), 1, 8),
+                16
+              ),
+              {num_shards}
+            ) AS varchar
+          ),
+          6,
+          '0'
+        ) AS shard_id
+
     FROM {table}
     WHERE job_id = '{safe_job_id}'
+      AND validation_status = 'passed'
+      AND dedup_status IN ('passed', 'external_duplicate')
     """
-    return sql
 
-def choose_target_rows_per_shard(total_rows: int) -> int:
-    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
-    usable_kb = usable_mb * 1024.0
-    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
-
-    estimated_rows = int(usable_kb / avg_row_kb)
-    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
-
-    # In pathological small-memory cases, ensure >= 1
-    return max(1, target)
-
-def compute_num_shards(total_rows: int, target_rows: int) -> int:
-    if total_rows <= 0:
-        return 1
-    n = int(math.ceil(total_rows / float(target_rows)))
-    if n < 1:
-        n = 1
-    if n > MAX_SHARDS:
-        n = MAX_SHARDS
-    return n
 
 def list_export_files_by_shard(export_prefix: str):
     """
     Group exported Parquet files by shard_id partition.
-    Expected key path like: .../shard_id=000123/part-....parquet
+    Expected key path: .../shard_id=000123/part-....parquet
     Returns dict: {shard_id: [s3://.../key, ...], ...}
     """
     paginator = s3.get_paginator("list_objects_v2")
@@ -132,16 +172,15 @@ def list_export_files_by_shard(export_prefix: str):
                     shard_id = part.split("=", 1)[1]
                     break
 
-            if not shard_id:
+            if shard_id is None:
                 raise RuntimeError(f"{TASK_NAME} Unable to extract shard_id from export key: {key}")
 
             files_by_shard.setdefault(shard_id, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
     return files_by_shard, sample_keys
 
+
 def write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) -> str:
-    # Keep same manifest shape as your other stages for reuse in map workers:
-    # shard_prefix is now shard_id
     manifest = {"job_id": job_id, "shard_prefix": shard_name, "files": files}
     manifest_key = f"{manifest_prefix}manifest-shard-{shard_name}.json"
     s3.put_object(
@@ -152,6 +191,7 @@ def write_manifest(job_id: str, shard_name: str, files, manifest_prefix: str) ->
     )
     return f"s3://{FILE_BUCKET_NAME}/{manifest_key}"
 
+
 def handler(event, context):
     try:
         job_id = event["job_id"]
@@ -160,49 +200,61 @@ def handler(event, context):
         label_type = event["label_type"]
         data_source = event["data_source"]
     except KeyError as e:
-        raise RuntimeError(f"{TASK_NAME} Batching Lambda failed: missing required key {e}")
+        raise RuntimeError(f"{TASK_NAME} missing required key {e}; event={json.dumps(event)}")
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting registration batching for job {job_id}")
 
     export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export/"
     manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests/"
     main_prefix = f"temp/image-upload/{job_id}/batches/registration-step/"
+
+    # clean old artifacts (safe even on first run)
     delete_s3_prefix(FILE_BUCKET_NAME, main_prefix, TASK_NAME)
 
-    # 0) COUNT(*)
+    # 0) COUNT eligible rows only
     try:
-        total_rows = athena_count_job_rows(job_id,
-                                          TASK_NAME,
-                                          ICEBERG_DATABASE_NAME,
-                                          UPLOAD_STAGING_TABLE_NAME,
-                                          ATHENA_OUTPUT_S3,
-                                          ATHENA_WORKGROUP,
-                                          poll=2.0,
-                                          timeout=300)
+        count_sql = generate_count_sql(job_id)
+        eligible_rows = int(athena_get_scalar(
+            count_sql,
+            TASK_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+            poll=2.0,
+            timeout=300
+        ) or 0)
     except Exception as e:
-        err = f"{TASK_NAME} Failed to count rows from upload staging table for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed to count eligible rows for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    if total_rows <= 0:
-        raise RuntimeError(f"{TASK_NAME} No rows in upload_staging for job_id={job_id}")
+    if eligible_rows <= 0:
+        raise RuntimeError(
+            f"{TASK_NAME} No eligible rows for registration for job_id={job_id} "
+            f"(need validation_status='passed' and dedup_status in ('passed','external_duplicate'))"
+        )
 
-    target_rows = choose_target_rows_per_shard(total_rows)
-    num_shards = compute_num_shards(total_rows, target_rows)
+    target_rows = choose_target_rows_per_shard(eligible_rows)
+    num_shards = compute_num_shards(eligible_rows, target_rows)
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} total_rows={total_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}")
+    log(
+        job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} eligible_rows={eligible_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}"
+    )
 
-    # 1) CTAS export partitioned by shard_id
+    # 1) CTAS export partitioned by shard_id (computed from target_image_id)
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     table_name = f"reg_export_{sanitized_job_id}"
+
     try:
-        drop_table_if_exists(ICEBERG_DATABASE_NAME,
-                                 table_name,
-                                 TASK_NAME,
-                                 ATHENA_OUTPUT_S3,
-                                 ATHENA_WORKGROUP,
-                                 poll=3.0,
-                                 timeout=900)
+        drop_table_if_exists(
+            ICEBERG_DATABASE_NAME,
+            table_name,
+            TASK_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+            poll=3.0,
+            timeout=900
+        )
     except Exception as e:
         err = f"{TASK_NAME} Failed to drop CTAS table if it exists for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
@@ -210,41 +262,42 @@ def handler(event, context):
 
     sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, num_shards)
     try:
-        run_athena(sql,
-                   TASK_NAME,
-                   ATHENA_OUTPUT_S3,
-                   ATHENA_WORKGROUP,
-                   poll=3.0,
-                   timeout=900)
+        run_athena(
+            sql,
+            TASK_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+            poll=3.0,
+            timeout=900
+        )
     except Exception as e:
-        err = f"{TASK_NAME} Failed to start CTAS table for job {job_id}: {e}"
+        err = f"{TASK_NAME} CTAS failed for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena CTAS succeeded for job {job_id}, export prefix = {export_prefix_base}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Athena CTAS succeeded for job {job_id}, export prefix={export_prefix_base}")
 
     # 2) List exported files and group by shard_id
     files_by_shard, sample_keys = list_export_files_by_shard(export_prefix_base)
-
     if not files_by_shard:
-        err = f"{TASK_NAME} No exported files found for job {job_id} under prefix {export_prefix_base}, sample keys: {sample_keys}"
+        err = f"{TASK_NAME} No exported files found under {export_prefix_base}, sample keys: {sample_keys}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    # 3) Write manifests (one per shard_id)
+    # 3) Write manifests (one per shard_id, optionally chunked)
     manifest_uris = []
-    for shard_id, files in sorted(files_by_shard.items()):
-        if not files:
-            continue
+    try:
+        for shard_id, files in sorted(files_by_shard.items()):
+            if not files:
+                continue
 
-        if len(files) > MAX_FILES_PER_MANIFEST:
-            for part_idx in range(0, len(files), MAX_FILES_PER_MANIFEST):
-                sub = files[part_idx:part_idx + MAX_FILES_PER_MANIFEST]
-                shard_name2 = f"{shard_id}{part_idx // MAX_FILES_PER_MANIFEST:04d}"
-                manifest_uris.append(write_manifest(job_id, shard_name2, sub, manifest_prefix))
+            manifest_uris.append(write_manifest(job_id, shard_id, files, manifest_prefix))
 
-        manifest_s3_uri = write_manifest(job_id, shard_id, files, manifest_prefix)
-        manifest_uris.append(manifest_s3_uri)
+    except Exception as e:
+        err = f"{TASK_NAME} Failed writing manifests for job {job_id}: {e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise
 
     result = {
         "job_id": job_id,
@@ -252,9 +305,12 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
+        "eligible_rows": eligible_rows,
+        "num_shards": num_shards,
         "manifests": manifest_uris
     }
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Completed for job {job_id}. Created {len(manifest_uris)} manifests.")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Completed for job {job_id}. Created {len(manifest_uris)} manifests from {len(files_by_shard)} shard partitions.")
 
     return result
