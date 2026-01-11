@@ -2,7 +2,8 @@ import re
 import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Union, Optional
+from typing import Union, Optional, Iterable
+from collections.abc import Iterable as AbcIterable
 
 from common.table_schemas import TABLES, TableSchema
 from common.athena_utils import run_athena
@@ -238,31 +239,28 @@ def build_delete_sql_by_keys(batch: list[dict],
 
     return f"DELETE FROM {table} WHERE {cols_sql} IN ({tuples_sql})"
 
-def chunked_insert(rows: list[dict],
-                    task_name: str,
-                    iceberg_db_name: str,
-                    table_name: str,
-                    athena_workgroup: str,
-                    athena_output_s3: str,
-                    chunk_size: int = 200,
-                    poll: Union[int, float] = 5,
-                    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
+def chunked_insert(rows: Iterable[dict],
+                   task_name: str,
+                   iceberg_db_name: str,
+                   table_name: str,
+                   athena_workgroup: str,
+                   athena_output_s3: str,
+                   chunk_size: int = 200,
+                   poll: Union[int, float] = 5,
+                   timeout: Union[int, float] = 1800) -> tuple[bool, str]:
 
     if not isinstance(chunk_size, int):
         return False, f"chunk_size must be int, got {type(chunk_size).__name__}"
     if not isinstance(timeout, (int, float)):
-        return False, f"timeout must be int oo float, got {type(timeout).__name__}"
+        return False, f"timeout must be int or float, got {type(timeout).__name__}"
     if not isinstance(poll, (int, float)):
         return False, f"poll must be int or float, got {type(poll).__name__}"
     if not (0 < chunk_size <= 1000):
         return False, f"chunk_size must be 1..1000, got {chunk_size}"
-    if not isinstance(rows, list):
-        return False, f"rows to insert is not a list, got {type(rows).__name__}"
-    if len(rows) == 0:
-        return True, ""
-    if not all(isinstance(r, dict) for r in rows):
-        bad = next((r for r in rows if not isinstance(r, dict)), rows[0])
-        return False, f"not all rows to insert is a dict, a bad row = {bad}"
+    if rows is None:
+        return False, "rows is None"
+    if not isinstance(rows, AbcIterable):
+        return False, f"rows to insert is not iterable, got {type(rows).__name__}"
 
     schema = TABLES.get(table_name)
     if schema is None:
@@ -270,42 +268,59 @@ def chunked_insert(rows: list[dict],
 
     full_table = f"\"{iceberg_db_name}\".\"{table_name}\""
 
+    batch: list[dict] = []
     chunk_counter = 1
-    for i in range(0, len(rows), chunk_size):
-        batch = rows[i:i + chunk_size]
-        if not batch:
-            continue
+    total_rows = 0
+    saw_any = False  # <-- NEW
 
+    def flush_one_batch(b: list[dict], chunk_no: int) -> tuple[bool, str]:
         try:
-            delete_sql = build_delete_sql_by_keys(batch, full_table, task_name, schema.key_cols)
-            run_athena(
-                delete_sql,
-                f"{task_name} DELETE",
-                athena_output_s3,
-                athena_workgroup,
-                poll,
-                timeout
-            )
+            delete_sql = build_delete_sql_by_keys(b, full_table, task_name, schema.key_cols)
+            run_athena(delete_sql, f"{task_name} DELETE", athena_output_s3, athena_workgroup, poll, timeout)
 
-            insert_sql = build_insert_sql(batch, full_table, task_name, schema)
-            run_athena(
-                insert_sql,
-                f"{task_name} INSERT",
-                athena_output_s3,
-                athena_workgroup,
-                poll,
-                timeout
-            )
+            insert_sql = build_insert_sql(b, full_table, task_name, schema)
+            run_athena(insert_sql, f"{task_name} INSERT", athena_output_s3, athena_workgroup, poll, timeout)
 
+            return True, ""
         except Exception as e:
-            sample = batch[0] if batch else {}
+            sample = b[0] if b else {}
             sample_types = row_type_summary(sample, schema.cols)
-            error_msg = f"{e} | table={table_name} | chunk number={chunk_counter} of chunks of size {chunk_size} for {len(rows)} rows | sample_row_types: {sample_types}"
-            return False, error_msg
-        else:
-            chunk_counter += 1
+            return False, (
+                f"{e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
+                f"| rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
+            )
+
+    try:
+        for r in rows:
+            saw_any = True  # <-- NEW
+            total_rows += 1
+
+            if not isinstance(r, dict):
+                return False, f"row {total_rows} is not a dict, got {type(r).__name__}: {r!r}"
+
+            batch.append(r)
+            if len(batch) >= chunk_size:
+                ok, err = flush_one_batch(batch, chunk_counter)
+                if not ok:
+                    return False, err
+                batch = []
+                chunk_counter += 1
+
+        # <-- NEW: treat empty iterable as an error
+        if not saw_any:
+            return False, f"empty iterator of type: {type(rows).__name__}"
+
+        # flush tail
+        if batch:
+            ok, err = flush_one_batch(batch, chunk_counter)
+            if not ok:
+                return False, err
+
+    except Exception as e:
+        return False, f"{task_name} chunked_insert iteration failed after {total_rows} rows: {e}"
 
     return True, ""
+
 
 def delete_job_rows_from_table(job_id: str,
                                 task_name: str,

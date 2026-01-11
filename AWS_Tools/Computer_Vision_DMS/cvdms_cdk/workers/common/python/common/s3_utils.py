@@ -9,6 +9,7 @@ from typing import List, Iterator, Union, Any, Iterable, Mapping, Optional, Sequ
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionClosedError
 import pyarrow.dataset as ds
+import s3fs
 
 logger = logging.getLogger(__name__)
 

@@ -192,6 +192,8 @@ class IngestStage(Construct):
             })
         )
 
+        post_ingest_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
+
         post_ingest_task.add_catch(
             handler=self.dlq_chain_factory(),
             errors=["States.ALL"],

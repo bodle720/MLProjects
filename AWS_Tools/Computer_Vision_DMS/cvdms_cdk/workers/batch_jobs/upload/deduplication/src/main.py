@@ -2,7 +2,7 @@
 import os
 import json
 import time
-import logging
+import hashlib
 from collections import defaultdict
 
 from common.logging_utils import log
@@ -33,13 +33,44 @@ if not SHA256_TABLE_NAME:
     raise RuntimeError(f"{TASK_NAME} SHA256_TABLE_NAME not set")
 
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/deduplication-step/processed"
-
 DDB_BATCH_GET_MAX = 100
 MAX_ROWS_IN_MEMORY = 200000
 MAX_GROUP_SIZE = 10000
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+def norm_string_labels(row: dict) -> list[str]:
+    labels = row.get("string_labels")
+    if not isinstance(labels, list) or not labels:
+        labels = row.get("classes_present")
+    if not isinstance(labels, list):
+        return []
+    out = []
+    seen = set()
+    for x in labels:
+        s = str(x).strip().lower()
+        if not s:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return sorted(out)
+
+def label_signature(row: dict) -> str:
+    """
+    Deterministic signature for "are these labels identical?"
+    - Prefer label_fingerprint when present (OD/semantic/instance)
+    - Else hash normalized string labels (single/multi)
+    """
+    fp = row.get("label_fingerprint")
+    if isinstance(fp, str) and fp.strip():
+        return f"fp:{fp.strip()}"
+
+    labels = norm_string_labels(row)
+    if labels:
+        blob = ("|".join(labels)).encode("utf-8")
+        return "str:" + hashlib.sha256(blob).hexdigest()
+
+    # Should not happen for validation_status=passed, but treat as conflict-ish
+    return "__MISSING_LABEL_SIG__"
 
 def pick_representative(group):
     if len(group) == 1:
@@ -62,10 +93,17 @@ def process_manifest(manifest):
     for r in row_iter:
         total_rows += 1
         sha = r.get("sha256_hash")
+
         if not sha:
-            # carry forward; dedup will skip these later stages
-            # keep dedup_status as-is unless caller wants to set it elsewhere
+            r["dedup_status"] = "failed"
+            r["dedup_error"] = "missing sha256_hash"
             groups[f"__MISSING_SHA__{total_rows}"].append(r)
+            continue
+
+        if r.get("validation_status") != "passed":
+            r["dedup_status"] = "failed"
+            r["dedup_error"] = f"skipped dedup because validation_status={r.get('validation_status')}"
+            groups[f"__VAL_FAILED__{total_rows}"].append(r)
             continue
 
         groups[sha].append(r)
@@ -80,16 +118,24 @@ def process_manifest(manifest):
     warned_big_group = False  # cap warning to once per shard
 
     for sha, group in groups.items():
-        if sha.startswith("__MISSING_SHA__"):
+        if sha.startswith("__MISSING_SHA__") or sha.startswith("__VAL_FAILED__"):
             processed_rows.extend(group)
             continue
 
         if (not warned_big_group) and (len(group) > MAX_GROUP_SIZE):
             warned_big_group = True
-            logger.warning(
-                f"{TASK_NAME} Shard %s has a large sha group: sha=%s size=%d exceeds MAX_GROUP_SIZE=%d",
-                shard_name, sha, len(group), MAX_GROUP_SIZE
-            )
+            log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Shard {shard_name} has a large sha group: sha={sha} size={len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}",
+                level='warning')
+
+        sigs = {label_signature(r) for r in group}
+        if "__MISSING_LABEL_SIG__" in sigs or len(sigs) > 1:
+            for r in group:
+                r["dedup_status"] = "failed"
+                r["dedup_error"] = "duplicate images with different labels not allowed"
+                r["matched_image_id"] = None
+            processed_rows.extend(group)
+            continue
 
         rep = pick_representative(group)
         rep_image_id = rep.get("image_id")
@@ -100,7 +146,7 @@ def process_manifest(manifest):
             representatives.append((sha, rep_image_id))
 
         for r in group:
-            if r.get("image_id") == rep_image_id:
+            if r is rep:
                 continue
             r["dedup_status"] = "internal_duplicate"
             processed_rows.append(r)
@@ -110,7 +156,6 @@ def process_manifest(manifest):
     ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, TASK_NAME) if sha_list else {}
 
     external_dup_count = 0
-
     rep_index = {}
     for r in processed_rows:
         if r.get("sha256_hash") and r.get("image_id"):
@@ -122,6 +167,9 @@ def process_manifest(manifest):
             continue
 
         matched_image_id = item.get("image_id", {}).get("S")
+        if not matched_image_id:
+            continue
+
         rep_row = rep_index.get((sha, rep_image_id))
         if rep_row:
             rep_row["dedup_status"] = "external_duplicate"
@@ -170,21 +218,17 @@ def main():
 
     shard_name = manifest.get("shard_prefix", "shard")
 
-    # START LOG (one line)
     log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI}")
-
 
     try:
         processed_rows, summary = process_manifest(manifest)
         write_processed_outputs(shard_name, processed_rows, summary)
     except Exception as e:
-        # ERROR LOG (one line)
         log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} error shard={shard_name} err={e}", level="error")
         raise
 
     elapsed = time.time() - start
 
-    # FINISH LOG (one line with counts + elapsed)
     log(
         JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
         (

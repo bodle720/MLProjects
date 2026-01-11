@@ -176,13 +176,16 @@ class UploadClient:
                 raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
 
             manifest_key = f"{prefix}/{job_id}.manifest"
-            with local_manifest.open("rb") as mf:
-                self.s3.put_object(
-                    Bucket=self.file_bucket_name,
-                    Key=manifest_key,
-                    Body=mf.read(),
-                    ContentType="application/x-ndjson",  # JSON Lines / NDJSON
-                )
+
+            # Streaming upload from disk (no file_obj.read()), better memory usage.
+            self.s3.upload_file(
+                Filename=str(local_manifest),
+                Bucket=self.file_bucket_name,
+                Key=manifest_key,
+                ExtraArgs={
+                    "ContentType": "application/x-ndjson",  # JSON Lines / NDJSON
+                },
+            )
 
             logging.info(f"Upload of manifest success: s3://{self.file_bucket_name}/{manifest_key}")
 
@@ -269,7 +272,15 @@ class UploadClient:
             manifest_path = validation_dict['local_path']
 
         # At this point we have job_id, PENDING row, and manifest json loaded in.
-        logging.info("Manifest validated. Uploading to S3...")
+        skipped_count = validation_dict["skipped_count"]
+        kept_count = validation_dict["kept_count"]
+        total_nonempty = validation_dict["total_nonempty"]
+
+        logging.info(f'Manifest validated, skipped row count = {skipped_count}, kept row count = {kept_count}, total nonempty row count = {total_nonempty}')
+        if skipped_count > 0:
+            logging.info(f"Skipped rows, so needed to save filtered manifest to: {manifest_path}")
+
+        logging.info('Uploading files to S3.')
         ok, msg = self._upload_files_to_s3(job_id,
                                           label_type,
                                           manifest_path,

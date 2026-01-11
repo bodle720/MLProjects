@@ -1,7 +1,6 @@
 import os
 import sys
 import logging
-from functools import lru_cache
 from typing import Optional, Dict
 
 import boto3
@@ -18,7 +17,6 @@ def _session_for_profile(profile_name: Optional[str]) -> boto3.Session:
     # prefer explicit profile; boto3 will use default if profile_name is None
     return boto3.Session(profile_name=profile_name) if profile_name else boto3.Session()
 
-@lru_cache(maxsize=32)
 def _load_ssm_params(session: boto3.Session, app_name: str, region_name: str) -> Dict[str, str]:
     ssm = session.client("ssm", region_name=region_name)
     prefix = SSM_PREFIX_TEMPLATE.format(app=app_name)

@@ -64,7 +64,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
             "img_width": None,
             "num_channels": None,
             "dtype": None,
-            "file_size_mb": 0.0,
+            "file_size_mb": None,
             "uploaded_at": REGISTRATION_TIME,
             "data_source": DATA_SOURCE,
             "sha256_hash": None,
@@ -95,7 +95,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         "img_width": None,
         "num_channels": None,
         "dtype": None,
-        "file_size_mb": 0.0,
+        "file_size_mb": None,
         "uploaded_at": REGISTRATION_TIME,
         "data_source": DATA_SOURCE,
         "sha256_hash": None,
@@ -144,6 +144,10 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     try:
         img = Image.open(buf)
         img.load()
+    except Image.DecompressionBombError as e:
+        row["validation_status"] = "failed"
+        row["validation_error"] = f"DecompressionBombError: {e}"
+        return row
     except Exception as e:
         row["validation_status"] = "failed"
         row["validation_error"] = f"Cannot open image {temp_source_ref}: {e}"

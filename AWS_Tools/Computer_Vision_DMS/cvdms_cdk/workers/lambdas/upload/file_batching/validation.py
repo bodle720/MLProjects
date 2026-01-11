@@ -29,7 +29,9 @@ def handler(event, context):
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Starting batching of images for image upload validation job id {job_id}.")
     manifest_prefix = f"temp/image-upload/{job_id}/batches/validation-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, TASK_NAME)
+    main_prefix = f"temp/image-upload/{job_id}/batches/validation-step/"
+
+    delete_s3_prefix(FILE_BUCKET_NAME, main_prefix, TASK_NAME)
 
     # Get the json lines from the original manifest
     # original_manifest_s3_uri: s3://bucket/key
@@ -39,6 +41,9 @@ def handler(event, context):
         raise RuntimeError(f"{TASK_NAME} Invalid original_manifest_s3_uri: {e}")
 
     resp = read_obj_with_retry(manifest_bucket, manifest_key, TASK_NAME)
+
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} unable to load s3://{manifest_bucket}/{manifest_key} after retries")
 
     batch_lines = []
     manifest_uris = []

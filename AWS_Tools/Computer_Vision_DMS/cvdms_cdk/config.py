@@ -23,7 +23,7 @@ CONFIG = AppConfig(
             path="workers/lambdas/storage",
             handler="dlq_processor.handler",
             memory_size=512,
-            timeout_sec=120
+            timeout_sec=600
         ),
     compute_env=ComputeEnvConfig(
         minv_cpus=0,
@@ -35,8 +35,8 @@ CONFIG = AppConfig(
         file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="validation.handler",
-            memory_size=512,
-            timeout_sec=300
+            memory_size=1024,
+            timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
             vcpus=1,
@@ -49,7 +49,7 @@ CONFIG = AppConfig(
         file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="deduplication.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
@@ -63,7 +63,7 @@ CONFIG = AppConfig(
         file_batching=LambdaConfig(
             path="workers/lambdas/upload/file_batching",
             handler="registration.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         batch_task_job_def=BatchTaskJobDefConfig(
@@ -77,20 +77,20 @@ CONFIG = AppConfig(
         pre_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/validation",
             handler="validation_pre.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         map_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/validation",
             handler="validation_map.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/validation",
             handler="validation_post.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         )
     ),
@@ -98,20 +98,20 @@ CONFIG = AppConfig(
         pre_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_pre.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         map_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_map.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/deduplication",
             handler="deduplication_post.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         )
     ),
@@ -119,33 +119,33 @@ CONFIG = AppConfig(
         pre_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/registration",
             handler="registration_pre.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         ),
         map_ingest_lambda=LambdaConfig(
                     path="workers/lambdas/upload/ingest/registration",
                     handler="registration_map.handler",
-                    memory_size=512,
+                    memory_size=1024,
                     timeout_sec=900
                 ),
         map_max_concurrency=5,
         post_ingest_lambda=LambdaConfig(
             path="workers/lambdas/upload/ingest/registration",
             handler="registration_post.handler",
-            memory_size=512,
+            memory_size=1024,
             timeout_sec=900
         )
     ),
     kickoff_lambda=LambdaConfig(
         path="workers/lambdas/upload",
         handler="kickoff.handler",
-        memory_size=512,
+        memory_size=1024,
         timeout_sec=60
     ),
     cleanup_lambda=LambdaConfig(
         path="workers/lambdas/upload",
         handler="cleanup.handler",
-        memory_size=512,
+        memory_size=1024,
         timeout_sec=500
     )
 )

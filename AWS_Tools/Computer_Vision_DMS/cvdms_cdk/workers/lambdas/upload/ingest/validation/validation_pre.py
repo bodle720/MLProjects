@@ -7,7 +7,7 @@ import boto3
 
 from common.logging_utils import log
 from common.iceberg_utils import delete_job_rows_from_table
-from common.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json
+from common.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json, read_obj_with_retry
 from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -28,11 +28,14 @@ def count_manifest_lines(manifests: List[str]) -> int:
     for uri in manifests:
         try:
             b, k = parse_s3_uri(uri, TASK_NAME)
-        except:
-            raise ValueError(f"{TASK_NAME} Invalid s3 uri: {uri}")
+        except Exception as e:
+            raise ValueError(f"{TASK_NAME} Unable to parse s3 uri: {uri}, reason: {e}")
 
-        obj = s3.get_object(Bucket=b, Key=k)
-        body = obj["Body"]
+        resp = read_obj_with_retry(b, k, TASK_NAME)
+        if resp is None:
+            raise RuntimeError(f"{TASK_NAME} Failed to read {uri}, parsed bucket and key are {b} and {k}")
+
+        body = resp["Body"]
         for line in body.iter_lines():
             if not line:
                 continue
@@ -50,8 +53,8 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
 
         try:
             _, key = parse_s3_uri(m, TASK_NAME)
-        except:
-            raise ValueError(f"{TASK_NAME} Invalid s3 uri: {m}")
+        except Exception as e:
+            raise ValueError(f"{TASK_NAME} Unable to parse s3 uri: {m}, reason: {e}")
 
         try:
             fname = key.split("/")[-1]
@@ -202,13 +205,8 @@ def handler(event, context):
     total_rows_read = collected["total_rows_read"]
     total_failed_rows = collected["total_failed_rows"]
 
-    log(
-        job_id,
-        user,
-        event_type,
-        LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}"
-    )
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}")
 
     # 2) Verify counts: workers rows_read must equal expected_count
     if total_rows_read != expected_count:
@@ -218,14 +216,12 @@ def handler(event, context):
 
     # 3) Delete upload_staging partition once (safe even if empty)
     try:
-        delete_result = delete_job_rows_from_table(
-            job_id,
-            TASK_NAME,
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP
-        )
+        delete_result = delete_job_rows_from_table(job_id,
+                                                    TASK_NAME,
+                                                    ICEBERG_DATABASE_NAME,
+                                                    UPLOAD_STAGING_TABLE_NAME,
+                                                    ATHENA_OUTPUT_S3,
+                                                    ATHENA_WORKGROUP)
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")

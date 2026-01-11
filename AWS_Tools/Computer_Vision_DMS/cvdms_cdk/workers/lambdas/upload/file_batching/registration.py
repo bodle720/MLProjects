@@ -166,7 +166,8 @@ def handler(event, context):
 
     export_prefix_base = f"temp/image-upload/{job_id}/batches/registration-step/export/"
     manifest_prefix = f"temp/image-upload/{job_id}/batches/registration-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, TASK_NAME)
+    main_prefix = f"temp/image-upload/{job_id}/batches/registration-step/"
+    delete_s3_prefix(FILE_BUCKET_NAME, main_prefix, TASK_NAME)
 
     # 0) COUNT(*)
     try:
@@ -206,8 +207,6 @@ def handler(event, context):
         err = f"{TASK_NAME} Failed to drop CTAS table if it exists for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
-
-    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base, TASK_NAME)
 
     sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, num_shards)
     try:

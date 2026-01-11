@@ -4,7 +4,7 @@ import json
 from typing import Dict, List
 
 from common.logging_utils import log
-from common.s3_utils import s3_list_keys, s3_read_json
+from common.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
 from common.athena_utils import athena_count_job_rows
 from common.iceberg_utils import delete_job_rows_from_table
 from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
@@ -25,15 +25,16 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     expected: List[str] = []
     for m in manifests:
         try:
-            _, key = m.replace("s3://", "").split("/", 1)
-            fname = key.split("/")[-1]
-            if fname.startswith("manifest-shard-") and fname.endswith(".json"):
-                shard_name = fname[len("manifest-shard-") : -len(".json")]
-            else:
-                shard_name = fname.rsplit(".", 1)[0]
-            expected.append(shard_name)
+            _, key = parse_s3_uri(m, TASK_NAME)
         except Exception:
-            continue
+            raise
+
+        fname = key.split("/")[-1]
+        if fname.startswith("manifest-shard-") and fname.endswith(".json"):
+            shard_name = fname[len("manifest-shard-") : -len(".json")]
+        else:
+            shard_name = fname.rsplit(".", 1)[0]
+        expected.append(shard_name)
 
     # stable unique
     seen = set()
@@ -164,24 +165,17 @@ def handler(event, context):
     total_rows_read = collected["total_rows_read"]
     total_processed_rows = collected["total_processed_rows"]
 
-    log(
-        job_id,
-        user,
-        event_type,
-        LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}"
-    )
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}")
 
     # 2) Verify original count via Athena (before deletion)
     try:
-        original_count = athena_count_job_rows(
-            job_id,
-            TASK_NAME,
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP
-        )
+        original_count = athena_count_job_rows(job_id,
+                                                TASK_NAME,
+                                                ICEBERG_DATABASE_NAME,
+                                                UPLOAD_STAGING_TABLE_NAME,
+                                                ATHENA_OUTPUT_S3,
+                                                ATHENA_WORKGROUP)
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena count failed: {e}", level="error")
         raise
@@ -193,16 +187,17 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
+    if total_processed_rows != total_rows_read:
+        raise RuntimeError(f"{TASK_NAME} processed_rows({total_processed_rows}) != rows_read({total_rows_read})")
+
     # 3) Delete original partition rows once (before Map inserts)
     try:
-        delete_result = delete_job_rows_from_table(
-            job_id,
-            TASK_NAME,
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_OUTPUT_S3,
-            ATHENA_WORKGROUP
-        )
+        delete_result = delete_job_rows_from_table(job_id,
+                                                    TASK_NAME,
+                                                    ICEBERG_DATABASE_NAME,
+                                                    UPLOAD_STAGING_TABLE_NAME,
+                                                    ATHENA_OUTPUT_S3,
+                                                    ATHENA_WORKGROUP)
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")

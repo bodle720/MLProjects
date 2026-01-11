@@ -15,13 +15,23 @@ ALLOWED_LABEL_TYPES = {
 
 def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:
     """
-    Validates and (optionally) filters a Ground Truth–style JSON Lines manifest.
+    Validates and filters a Ground Truth–style JSON Lines manifest in O(1) memory.
+
+    Strategy: always stream-write a filtered output file.
+      - Read input line-by-line
+      - Validate and decide skip
+      - Immediately write kept lines to output
+      - Track counters
+      - If nothing was skipped, return original path (and delete the filtered file)
 
     Returns:
       {
         "success": bool,
         "error": str,
-        "local_path": str,   # filtered file path if filtering occurred; else input manifest_path
+        "local_path": str,        # original path if no skips; else filtered path
+        "skipped_count": int,
+        "kept_count": int,
+        "total_nonempty": int,
       }
 
     Filtering rules:
@@ -45,21 +55,30 @@ def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:
                 "local_path": "",
             }
 
-        # ---- Parse + validate each line ----
-        kept_objects: List[Dict[str, Any]] = []
+        # Always choose an output path up-front. We'll delete it if we end up not needing it.
+        filtered_path = _make_filtered_path(p)
+
         skipped_count = 0
+        kept_count = 0
         total_nonempty = 0
 
-        with p.open("r", encoding="utf-8-sig") as f:
-            for lineno, raw in enumerate(f, start=1):
+        # Stream read + stream write (O(1) memory)
+        filtered_path.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("r", encoding="utf-8-sig") as fin, filtered_path.open("w", encoding="utf-8") as fout:
+            for lineno, raw in enumerate(fin, start=1):
                 line = raw.strip()
                 if not line:
                     continue  # ignore blank/whitespace-only lines
 
                 total_nonempty += 1
 
-                obj = _parse_json_object_line(line=line, lineno=lineno)
+                obj = _parse_json_object_line(line=line)
                 if obj is None:
+                    # delete partial output to avoid leaving confusing artifacts
+                    try:
+                        filtered_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                     return {
                         "success": False,
                         "error": f"Line {lineno}: not valid JSON (or not a single JSON object).",
@@ -69,28 +88,63 @@ def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:
                 # validate required "source-ref"
                 ok, err = _validate_source_ref(obj=obj, lineno=lineno)
                 if not ok:
+                    try:
+                        filtered_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                     return {"success": False, "error": err, "local_path": ""}
 
                 # validate per label type; may return skip=True for filtering rules
                 skip, err = _validate_per_label_type(obj=obj, label_type=label_type, lineno=lineno)
                 if err:
+                    try:
+                        filtered_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                     return {"success": False, "error": err, "local_path": ""}
 
                 if skip:
                     skipped_count += 1
-                else:
-                    kept_objects.append(obj)
+                    continue
+
+                # Keep: write immediately.
+                # Prefer writing the original (trimmed) JSON line to preserve fidelity and be fast.
+                # Ensure newline termination.
+                fout.write(line + "\n")
+                kept_count += 1
 
         if total_nonempty == 0:
+            try:
+                filtered_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             return {"success": False, "error": "Manifest has no JSON lines (file is empty or only blank lines).", "local_path": ""}
 
-        # ---- Write filtered file only if needed ----
-        if skipped_count > 0:
-            filtered_path = _make_filtered_path(p)
-            _write_jsonl(filtered_path, kept_objects)
-            return {"success": True, "error": "", "local_path": str(filtered_path)}
+        # If nothing was skipped, we can keep the original file path and remove the filtered output.
+        if skipped_count == 0:
+            try:
+                filtered_path.unlink(missing_ok=True)
+            except Exception:
+                # Not fatal; worst case we leave a duplicate filtered file behind
+                pass
+            return {
+                "success": True,
+                "error": "",
+                "local_path": str(p),
+                "skipped_count": 0,
+                "kept_count": kept_count,
+                "total_nonempty": total_nonempty,
+            }
 
-        return {"success": True, "error": "", "local_path": str(p)}
+        # Otherwise return the filtered path
+        return {
+            "success": True,
+            "error": "",
+            "local_path": str(filtered_path),
+            "skipped_count": skipped_count,
+            "kept_count": kept_count,
+            "total_nonempty": total_nonempty,
+        }
 
     except Exception as e:
         # Catch-all so caller always gets a structured result
@@ -99,7 +153,7 @@ def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:
 # --------------------------------
 # Helpers for manifest validation
 # --------------------------------
-def _parse_json_object_line(*, line: str, lineno: int) -> Optional[Dict[str, Any]]:
+def _parse_json_object_line(*, line: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = json.loads(line)
     except json.JSONDecodeError:

@@ -28,7 +28,6 @@ MIN_ROWS_PER_SHARD = 1000
 MAX_ROWS_PER_SHARD = 20000
 # Max prefix length (hex chars). 1 => 16 prefixes, 2 => 256, 3 => 4096, 4 => 65536
 MAX_PREFIX_LENGTH = 3
-MAX_FILES_PER_MANIFEST = 500  # or 1000
 
 # Job memory (MB) used to compute target rows per shard.
 JOB_MEMORY_MB = 2048
@@ -207,7 +206,9 @@ def handler(event, context):
     # Prepare prefixes
     export_prefix_base = f"temp/image-upload/{job_id}/batches/deduplication-step/export/"
     manifest_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/manifests/"
-    delete_s3_prefix(FILE_BUCKET_NAME, manifest_prefix, TASK_NAME)
+    main_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/"
+
+    delete_s3_prefix(FILE_BUCKET_NAME, main_prefix, TASK_NAME)
 
     # 0) Run COUNT(*) to estimate rows
     try:
@@ -267,7 +268,7 @@ def handler(event, context):
         warn = (f"{TASK_NAME} WARNING: even at MAX_PREFIX_LENGTH={prefix_len}, "
                 f"max shard rows={max_cnt} > target_rows={target_rows}. "
                 f"Proceeding; consider increasing MAX_PREFIX_LENGTH or raising target_rows/job memory.")
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, warn, level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, warn, level="warning")
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Chosen sha_prefix length = {prefix_len} (target rows per shard = {target_rows})")
 
@@ -286,8 +287,6 @@ def handler(event, context):
         err = f"{TASK_NAME} Failed to drop CTAS table if exists for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
-
-    delete_s3_prefix(FILE_BUCKET_NAME, export_prefix_base, TASK_NAME)
 
     sql = generate_start_athena_ctas_sql(job_id, export_prefix_base, prefix_len)
     try:
@@ -317,22 +316,16 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    # 4) Create manifests. If a single sha_prefix has too many files (edge case), split that prefix into multiple manifests
+    # 4) Create manifests.
     manifest_uris = []
     try:
         for shard_prefix, files in sorted(files_by_prefix.items()):
             if not files:
                 continue
 
-            if len(files) > MAX_FILES_PER_MANIFEST:
-                for part_idx in range(0, len(files), MAX_FILES_PER_MANIFEST):
-                    sub = files[part_idx:part_idx + MAX_FILES_PER_MANIFEST]
-                    shard_name2 = f"{shard_prefix}{part_idx // MAX_FILES_PER_MANIFEST:04d}"
-                    manifest_uris.append(write_manifest(job_id, shard_name2, sub, manifest_prefix))
-            else:
-                manifest_s3_uri = write_manifest(job_id, shard_prefix, files, manifest_prefix)
-                manifest_uris.append(manifest_s3_uri)
-                log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}")
+            manifest_s3_uri = write_manifest(job_id, shard_prefix, files, manifest_prefix)
+            manifest_uris.append(manifest_s3_uri)
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Wrote manifest for shard {shard_prefix} with {len(files)} files: {manifest_s3_uri}")
 
     except Exception as e:
         err = f"{TASK_NAME} Failed writing manifests for job {job_id}: {e}"

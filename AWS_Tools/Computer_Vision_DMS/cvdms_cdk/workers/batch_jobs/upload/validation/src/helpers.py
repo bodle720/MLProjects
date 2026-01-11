@@ -10,7 +10,7 @@ from PIL import Image
 import numpy as np
 from numpy.typing import NDArray
 
-from common.s3_utils import write_s3_obj
+from common.s3_utils import write_s3_obj, parse_s3_uri, read_obj_with_retry
 
 TASK_NAME = "[VAL_JOB_DEF_HELPER]"
 LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
@@ -255,8 +255,12 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
         next_id += 1
 
     # Load the RGB mask
-    mb, mk = mask_ref[5:].split("/", 1)
-    mask_bytes = s3.get_object(Bucket=mb, Key=mk)["Body"].read()
+    mb, mk = parse_s3_uri(mask_ref, TASK_NAME)
+    resp = read_obj_with_retry(mb, mk, TASK_NAME)
+    if resp is None:
+        raise ValueError(f"{TASK_NAME} semantic-segmentation-ref unable to be loaded with retry: {mask_ref}, parsed bucket = {mb}, parsed key = {mk}")
+
+    mask_bytes = resp["Body"].read()
     rgb = np.array(Image.open(io.BytesIO(mask_bytes)).convert("RGB"), dtype=np.uint8)
 
     # Convert to indexed mask (unknown colors remain 0 == background)
@@ -336,8 +340,12 @@ def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):
         raise ValueError(f"{TASK_NAME} instance: worker-response-ref missing/invalid")
 
-    wb, wk = wrr[5:].split("/", 1)
-    wrr_bytes = s3.get_object(Bucket=wb, Key=wk)["Body"].read()
+    wb, wk = parse_s3_uri(wrr, TASK_NAME)
+    resp = read_obj_with_retry(wb, wk, TASK_NAME)
+    if resp is None:
+        raise ValueError(f"{TASK_NAME} worker-response-ref unable to be loaded with retry: {wrr}, parsed bucket = {wb}, parsed key = {wk}")
+
+    wrr_bytes = resp["Body"].read()
     wrr_json = json.loads(wrr_bytes.decode("utf-8"))
 
     answers = wrr_json.get("answers", [])
