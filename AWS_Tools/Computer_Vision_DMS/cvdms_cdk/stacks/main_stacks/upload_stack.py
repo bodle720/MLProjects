@@ -170,7 +170,8 @@ class ImageUploadStack(Stack):
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
-            manifest_path="$.registrationStage.manifests"
+            manifest_path="$.registrationStage.manifests",
+            expected_count_path="$.registrationStage.eligible_rows"
         )
 
         # Make cleanup lambda to run once entire upload job is done.

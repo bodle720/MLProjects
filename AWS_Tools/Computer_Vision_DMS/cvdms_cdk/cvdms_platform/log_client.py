@@ -2,8 +2,8 @@ import logging
 import time
 from typing import Dict
 
-from botocore.client import BaseClient
 import pandas as pd
+from mypy_boto3_athena.client import AthenaClient
 
 class LogClient:
     """
@@ -14,7 +14,7 @@ class LogClient:
                  glue_db_name: str,
                  glue_table_name: str,
                  log_bucket_name: str,
-                 athena_client: BaseClient):
+                 athena_client: AthenaClient):
 
         self.glue_db_name = glue_db_name
         self.glue_table_name = glue_table_name

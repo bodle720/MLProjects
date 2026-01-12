@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict
 
 from botocore.exceptions import ClientError
-from botocore.client import BaseClient
-from boto3.resources.base import ServiceResource
+from mypy_boto3_s3.client import S3Client
+from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 from cvdms_platform.upload_client_utils import validate_manifest, ALLOWED_LABEL_TYPES
 
@@ -22,8 +22,8 @@ class UploadClient:
                  file_bucket_name: str,
                  job_table_name: str,
                  lock_table_name: str,
-                 s3_client: BaseClient,
-                 dynamodb_resource: ServiceResource):
+                 s3_client: S3Client,
+                 dynamodb_resource: DynamoDBServiceResource):
 
         self.event_type = "IMAGE_UPLOAD"
         self.user = user

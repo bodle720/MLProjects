@@ -3,16 +3,12 @@ import json
 
 import s3fs
 
-from common.s3_utils import (
-    make_s3_uri,
-    parse_s3_uri,
-    get_key_basename,
-    s3_copy_with_retry,
-    s3_delete_best_effort,
-)
+from common.s3_utils import (make_s3_uri,
+                            parse_s3_uri,
+                            get_key_basename,
+                            s3_copy_with_retry)
 
 TASK_NAME = "[REG_JOB_DEF_HELPER]"
-
 
 def split_ext(filename: str) -> Tuple[str, str]:
     if "." not in filename:
@@ -20,19 +16,12 @@ def split_ext(filename: str) -> Tuple[str, str]:
     stem, ext = filename.rsplit(".", 1)
     return stem, ext.lower()
 
-
 def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
     """
     copy_plan: list of (src_bucket, src_key, dst_bucket, dst_key)
     """
     for src_bucket, src_key, dst_bucket, dst_key in copy_plan:
         s3_copy_with_retry(src_bucket, src_key, dst_bucket, dst_key, TASK_NAME)
-
-
-def cleanup_copied_best_effort(dst_bucket: str, dst_keys: List[str]) -> None:
-    for k in dst_keys:
-        s3_delete_best_effort(dst_bucket, k)
-
 
 def build_canonical_image_dest(file_bucket: str, image_id: str, temp_image_uri: str) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri, TASK_NAME)
@@ -43,18 +32,15 @@ def build_canonical_image_dest(file_bucket: str, image_id: str, temp_image_uri: 
     dst_key = f"canonical/imagery/{image_id}.{ext}"
     return dst_key, make_s3_uri(file_bucket, dst_key)
 
-
-def build_canonical_label_dests_by_fingerprint(
-    *,
-    file_bucket: str,
-    label_type: str,
-    fingerprint: str,
-    temp_bbox_meta_uri: Optional[str],
-    temp_semantic_png_uri: Optional[str],
-    temp_semantic_meta_uri: Optional[str],
-    temp_instance_png_uri: Optional[str],
-    temp_instance_meta_uri: Optional[str],
-) -> Tuple[List[str], List[str], List[Tuple[str, str, str, str]]]:
+def build_canonical_label_dests_by_fingerprint( *,
+                                                file_bucket: str,
+                                                label_type: str,
+                                                fingerprint: str,
+                                                temp_bbox_meta_uri: Optional[str],
+                                                temp_semantic_png_uri: Optional[str],
+                                                temp_semantic_meta_uri: Optional[str],
+                                                temp_instance_png_uri: Optional[str],
+                                                temp_instance_meta_uri: Optional[str]) -> Tuple[List[str], List[str], List[Tuple[str, str, str, str]]]:
     """
     Returns:
       - dst_keys
@@ -111,7 +97,6 @@ def build_canonical_label_dests_by_fingerprint(
     # single-label / multi-label: no label files
     return [], [], []
 
-
 def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str, registration_time: str) -> Dict[str, Any]:
     image_id = row.get("image_id")
     if not image_id:
@@ -131,14 +116,11 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "sha256_hash": row.get("sha256_hash"),
     }
 
-
-def build_canonical_label_table_row(
-    *,
-    label_type: str,
-    fingerprint: str,
-    canonical_label_uris: List[str],
-    classes_present: Optional[List[str]],
-) -> Optional[Dict[str, Any]]:
+def build_canonical_label_table_row(*,
+                                    label_type: str,
+                                    fingerprint: str,
+                                    canonical_label_uris: List[str],
+                                    classes_present: Optional[List[str]]) -> Optional[Dict[str, Any]]:
     """
     Returns a dict with routing field __table plus the correct columns for that table.
     NOTE: model A => no image_id column in canonical label tables.
@@ -181,14 +163,11 @@ def build_canonical_label_table_row(
 
     return None
 
-
-def build_image_label_rows(
-    *,
-    job_label_type: str,
-    target_image_id: str,
-    string_labels: Optional[List[str]],
-    fingerprint: Optional[str],
-) -> List[Dict[str, str]]:
+def build_image_label_rows(*,
+                            job_label_type: str,
+                            target_image_id: str,
+                            string_labels: Optional[List[str]],
+                            fingerprint: Optional[str]) -> List[Dict[str, str]]:
     """
     image_labels schema: (image_id, label_id, label_type)
     - For single-label and multi-label jobs, label_type MUST be "string-label" and label_id is the lowercase string label.
@@ -213,7 +192,6 @@ def build_image_label_rows(
 
     # Unknown job label type
     return []
-
 
 def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
     """

@@ -10,6 +10,148 @@ from common.athena_utils import run_athena
 
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
+def qident(x: str) -> str:
+    return '"' + x.replace('"','""') + '"'
+
+def build_insert_where_not_exists_sql(batch: list[dict],
+                                    full_table: str,
+                                    task_name: str,
+                                    schema: TableSchema) -> str:
+    """
+    INSERT rows from VALUES only if the key does not already exist in the destination table.
+
+    Important:
+    - Requires schema.key_cols to be non-empty.
+    - Requires key values to be non-null (and for your schemas, they're strings).
+    - Dedupes within-batch by key to avoid duplicates inserted from the VALUES table itself.
+    """
+    if not batch:
+        raise ValueError(f"{task_name} batch is empty")
+    if not schema.key_cols:
+        raise ValueError(f"{task_name} schema.key_cols is empty for insert-only helper")
+
+    # Deduplicate by key_cols within this batch
+    uniq: list[dict] = []
+    seen = set()
+    for r in batch:
+        key_parts: list[str] = []
+        for k in schema.key_cols:
+            v = r.get(k)
+            # For your usage, keys are strings; enforce non-empty
+            if not isinstance(v, str) or not v.strip():
+                raise RuntimeError(f"{task_name} insert-only({full_table}): missing/invalid key {k}={v!r}")
+            key_parts.append(v.strip())
+        t = tuple(key_parts)
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(r)
+
+    cols = schema.cols
+    values_clause: list[str] = []
+    for r in uniq:
+        values = [to_sql_value(schema, r, c, task_name) for c in cols]
+        values_clause.append("(" + ", ".join(values) + ")")
+
+    col_list = ", ".join(qident(c) for c in cols)
+    select_list = ", ".join(f"v.{qident(c)}" for c in cols)
+
+    # predicate: t.k1 = v.k1 AND t.k2 = v.k2 ...
+    pred = " AND ".join(f"t.{qident(k)} = v.{qident(k)}" for k in schema.key_cols)
+
+    return f"""
+    INSERT INTO {full_table} ({col_list})
+    SELECT {select_list}
+    FROM (VALUES {", ".join(values_clause)}) AS v({col_list})
+    WHERE NOT EXISTS (
+        SELECT 1 FROM {full_table} t
+        WHERE {pred}
+    )
+    """.strip()
+
+def chunked_insert_where_not_exists(rows: Iterable[dict],
+                                    task_name: str,
+                                    iceberg_db_name: str,
+                                    table_name: str,
+                                    athena_workgroup: str,
+                                    athena_output_s3: str,
+                                    chunk_size: int = 200,
+                                    allow_empty: bool = True,
+                                    poll: Union[int, float] = 5,
+                                    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
+    """
+    Insert-only ingest (no delete step). Idempotent by key via WHERE NOT EXISTS.
+
+    This is intended for tables whose keyspace is NOT shard-owned (e.g. fingerprint tables),
+    or append-only mapping tables where you never want destructive deletes.
+    """
+    if not isinstance(chunk_size, int):
+        return False, f"{task_name} chunk_size must be int, got {type(chunk_size).__name__}"
+    if not isinstance(timeout, (int, float)):
+        return False, f"{task_name} timeout must be int or float, got {type(timeout).__name__}"
+    if not isinstance(poll, (int, float)):
+        return False, f"{task_name} poll must be int or float, got {type(poll).__name__}"
+    if not (0 < chunk_size <= 1000):
+        return False, f"{task_name} chunk_size must be 1..1000, got {chunk_size}"
+    if rows is None:
+        return False, "rows is None"
+    if not isinstance(rows, AbcIterable):
+        return False, f"{task_name} rows to insert is not iterable, got {type(rows).__name__}"
+
+    schema = TABLES.get(table_name)
+    if schema is None:
+        return False, f"{task_name} Unknown table_name: {table_name}"
+    if not schema.key_cols:
+        return False, f"{task_name} insert-only requires schema.key_cols for table={table_name}"
+
+    full_table = f"\"{iceberg_db_name}\".\"{table_name}\""
+
+    batch: list[dict] = []
+    chunk_counter = 1
+    total_rows = 0
+    saw_any = False
+
+    def flush_one_batch(b: list[dict], chunk_no: int) -> tuple[bool, str]:
+        try:
+            insert_sql = build_insert_where_not_exists_sql(b, full_table, task_name, schema)
+            run_athena(insert_sql, f"{task_name} INSERT_ONLY", athena_output_s3, athena_workgroup, poll, timeout)
+            return True, ""
+        except Exception as e:
+            sample = b[0] if b else {}
+            sample_types = row_type_summary(sample, schema.cols)
+            return False, (
+                f"{task_name} {e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
+                f"| rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
+            )
+
+    try:
+        for r in rows:
+            saw_any = True
+            total_rows += 1
+            if not isinstance(r, dict):
+                return False, f"{task_name} row {total_rows} is not a dict, got {type(r).__name__}: {r!r}"
+
+            batch.append(r)
+            if len(batch) >= chunk_size:
+                ok, err = flush_one_batch(batch, chunk_counter)
+                if not ok:
+                    return False, err
+                batch = []
+                chunk_counter += 1
+
+        if batch:
+            ok, err = flush_one_batch(batch, chunk_counter)
+            if not ok:
+                return False, err
+
+    except Exception as e:
+        return False, f"{task_name} chunked_insert_where_not_exists iteration failed after {total_rows} rows: {e}"
+
+    if not saw_any:
+        return (True, "") if allow_empty else (False, f"{task_name} empty iterator not allowed.")
+
+    return True, ""
+
 def validate_timestamp_str(s: str, task_name: str) -> None:
     # fast format check
     if not _TS_RE.match(s):
@@ -139,7 +281,9 @@ def build_insert_sql(batch: list[dict],
         values = [to_sql_value(schema, r, c, task_name) for c in cols]
         values_clause.append("(" + ", ".join(values) + ")")
 
-    return f"INSERT INTO {full_table} ({', '.join(cols)}) VALUES " + ", ".join(values_clause)
+    col_list = ", ".join(qident(c) for c in cols)
+
+    return f"INSERT INTO {full_table} ({col_list}) VALUES " + ", ".join(values_clause)
 
 def build_delete_sql_by_keys(batch: list[dict],
                              table: str,
@@ -246,6 +390,7 @@ def chunked_insert(rows: Iterable[dict],
                    athena_workgroup: str,
                    athena_output_s3: str,
                    chunk_size: int = 200,
+                   allow_empty: bool = True,
                    poll: Union[int, float] = 5,
                    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
 
@@ -271,7 +416,7 @@ def chunked_insert(rows: Iterable[dict],
     batch: list[dict] = []
     chunk_counter = 1
     total_rows = 0
-    saw_any = False  # <-- NEW
+    saw_any = False
 
     def flush_one_batch(b: list[dict], chunk_no: int) -> tuple[bool, str]:
         try:
@@ -292,7 +437,7 @@ def chunked_insert(rows: Iterable[dict],
 
     try:
         for r in rows:
-            saw_any = True  # <-- NEW
+            saw_any = True
             total_rows += 1
 
             if not isinstance(r, dict):
@@ -306,10 +451,6 @@ def chunked_insert(rows: Iterable[dict],
                 batch = []
                 chunk_counter += 1
 
-        # <-- NEW: treat empty iterable as an error
-        if not saw_any:
-            return False, f"empty iterator of type: {type(rows).__name__}"
-
         # flush tail
         if batch:
             ok, err = flush_one_batch(batch, chunk_counter)
@@ -319,8 +460,10 @@ def chunked_insert(rows: Iterable[dict],
     except Exception as e:
         return False, f"{task_name} chunked_insert iteration failed after {total_rows} rows: {e}"
 
-    return True, ""
+    if not saw_any:
+        return (True, "") if allow_empty else (False, f"{task_name} empty iterator not allowed.")
 
+    return True, ""
 
 def delete_job_rows_from_table(job_id: str,
                                 task_name: str,

@@ -1,5 +1,6 @@
 from re import sub
 from constructs import Construct
+import hashlib
 
 from aws_cdk import (
     Stack,
@@ -43,15 +44,22 @@ class StorageStack(Stack):
         self.common_utils_layer = common_utils_layer
         self.firehose_delivery_stream = firehose_delivery_stream
 
-        # Derive a unique glue database name from the stack name to store the iceberg table schema
+        # Derive a unique glue database name from the stack name to store the iceberg table schema.
+        # Make it deterministic, collision resistant, and length bounded.
         raw = sub(r"[^a-z0-9_]", "_", construct_id.lower())
-        raw = sub(r"_+", "_", raw).strip("_")  # optional cleanup
+        raw = sub(r"_+", "_", raw).strip("_")
         if not raw:
             raw = "db"
         elif raw[0].isdigit():
             raw = f"db_{raw}"
 
-        iceberg_database_name = f"{raw}_imagery_db"
+        h = hashlib.sha1(construct_id.encode("utf-8")).hexdigest()[:8]
+        suffix = "_imagery_db"
+        max_len = 255
+
+        base = f"{raw}_{h}"
+        base = base[: max_len - len(suffix)]
+        iceberg_database_name = f"{base}{suffix}"
 
         # File bucket (S3 file bucket to hold files)
         file_bucket = s3.Bucket(
