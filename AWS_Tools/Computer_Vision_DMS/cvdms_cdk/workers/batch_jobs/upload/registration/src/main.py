@@ -2,8 +2,7 @@
 import os
 import json
 import time
-from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 import pyarrow as pa
@@ -372,8 +371,7 @@ def write_outputs(
     # Always write image_labels file (possibly empty)
     jsonl_stream_to_s3(bucket, image_labels_key, image_labels_rows)
 
-    write_s3_obj(bucket, summary_key, json.dumps(summary, separators=(",", ":"), ensure_ascii=False) + "\n",
-                 "application/json", TASK_NAME)
+    write_s3_obj(bucket, summary_key, json.dumps(summary, separators=(",", ":"), ensure_ascii=False) + "\n", "application/json", TASK_NAME)
     write_s3_obj(bucket, success_key, b"", "text/plain", TASK_NAME)
 
 
