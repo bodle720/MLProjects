@@ -3,10 +3,12 @@ import os
 import json
 import time
 import hashlib
+from typing import Any
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from common.logging_utils import log
-from common.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj, read_parquet_rows_from_s3_uris
+from common.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj, read_parquet_rows_from_s3_uris, jsonl_stream_to_s3
 from common.ddb_utils import batch_get_dynamodb_items
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
@@ -36,6 +38,39 @@ PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/deduplication-step/proce
 DDB_BATCH_GET_MAX = 100
 MAX_ROWS_IN_MEMORY = 200000
 MAX_GROUP_SIZE = 10000
+
+def ts_sortable(v: Any) -> str:
+    """
+    Return a sortable timestamp string.
+    - datetime -> ISO-ish string in UTC
+    - string -> stripped string
+    - None/unknown -> far-future sentinel
+    """
+    if v is None:
+        return "9999-12-31 23:59:59"
+
+    if isinstance(v, datetime):
+        # Ensure tz-aware then convert to UTC
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        v = v.astimezone(timezone.utc)
+        # keep same style you already use elsewhere
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+
+    # some parquet readers may return numbers or other types
+    s = str(v).strip()
+    return s if s else "9999-12-31 23:59:59"
+
+
+def pick_representative(group):
+    if len(group) == 1:
+        return group[0]
+
+    def key_fn(r):
+        ts = ts_sortable(r.get("uploaded_at"))
+        return (ts, r.get("image_id") or "")
+
+    return min(group, key=key_fn)
 
 def norm_string_labels(row: dict) -> list[str]:
     labels = row.get("string_labels")
@@ -71,16 +106,6 @@ def label_signature(row: dict) -> str:
 
     # Should not happen for validation_status=passed, but treat as conflict-ish
     return "__MISSING_LABEL_SIG__"
-
-def pick_representative(group):
-    if len(group) == 1:
-        return group[0]
-
-    def key_fn(r):
-        ts = r.get("uploaded_at") or "9999-12-31 23:59:59"
-        return ts, r.get("image_id") or ""
-
-    return min(group, key=key_fn)
 
 def process_manifest(manifest):
     files = manifest.get("files", [])
@@ -194,11 +219,9 @@ def write_processed_outputs(shard_name, processed_rows, summary):
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
-    body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
-    if len(body) > 50_000_000:
-        raise RuntimeError(f"{TASK_NAME} JSONL too large for put_object; implement multipart upload")
 
-    write_s3_obj(bucket, jsonl_key, body, "application/x-ndjson", TASK_NAME)
+    jsonl_stream_to_s3(bucket, jsonl_key, processed_rows)
+
     write_s3_obj(bucket, summary_key, json.dumps(summary), "application/json", TASK_NAME)
     write_s3_obj(bucket, success_key, "", "text/plain", TASK_NAME)
 

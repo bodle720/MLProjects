@@ -210,17 +210,6 @@ def build_image_label_rows(
     return []
 
 
-def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
-    """
-    Stream JSONL to S3 (avoids building huge strings in memory).
-    """
-    fs = s3fs.S3FileSystem()
-    path = f"{bucket}/{key}"
-    with fs.open(path, "wb") as f:
-        for r in rows:
-            f.write((json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))
-
-
 def fingerprint_owner_shard_id(fingerprint: str, num_shards: int) -> str:
     """
     Deterministically map a fingerprint -> owner shard id.

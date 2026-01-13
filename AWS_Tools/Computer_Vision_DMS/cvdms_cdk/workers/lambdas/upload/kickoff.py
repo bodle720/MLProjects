@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Tuple
 from datetime import datetime
 from urllib.parse import unquote_plus
 
@@ -11,6 +12,7 @@ from common.logging_utils import log
 from common.s3_utils import s3_read_json, parse_s3_uri
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 GLOBAL_DLQ_URL = os.environ["GLOBAL_DLQ_URL"]
@@ -28,6 +30,47 @@ TASK_NAME = "[UPLOAD_KICKOFF]"
 sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
+ddb = boto3.client("dynamodb")
+
+def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
+    """
+    Ensures:
+      - lock exists
+      - locked == True
+      - locked_by == job_id
+
+    Returns (True, "") if ok, else (False, reason).
+    """
+    try:
+        resp = ddb.get_item(
+            TableName=LOCK_TABLE_NAME,
+            Key={"lock_id": {"S": "global"}},
+            ConsistentRead=True,
+        )
+        item = resp.get("Item")
+        if not item:
+            return False, "lock_item_missing"
+
+        locked_attr = item.get("locked")
+        locked_by_attr = item.get("locked_by")
+
+        locked = False
+        if locked_attr and "BOOL" in locked_attr:
+            locked = bool(locked_attr["BOOL"])
+
+        locked_by = ""
+        if locked_by_attr and "S" in locked_by_attr:
+            locked_by = locked_by_attr["S"] or ""
+
+        if not locked:
+            return False, "lock_not_held"
+
+        if locked_by != job_id:
+            return False, f"lock_held_by_other_job:{locked_by}"
+
+        return True, ""
+    except Exception as e:
+        return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
 def send_to_dlq(job_id, user, event_type, error):
     job_id = job_id or 'unknown'
@@ -118,6 +161,13 @@ def handler(event, context):
 
     if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid S3 URI original_manifest_s3_uri: {original_manifest_s3_uri}")
+
+    # Enforce: this job.json must correspond to the currently-held global lock
+    ok, reason = assert_lock_held_by_job(job_id)
+    if not ok:
+        msg = f"{TASK_NAME} Lock mismatch for job_id={job_id}: {reason}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
+        return fail(job_id, user, event_type, msg)
 
     manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri, TASK_NAME)
 

@@ -4,7 +4,7 @@ import logging
 import math
 from decimal import Decimal
 from datetime import datetime, date
-from typing import List, Iterator, Union, Any, Iterable, Mapping, Optional, Sequence
+from typing import List, Iterator, Union, Any, Iterable, Mapping, Optional, Sequence, Dict
 
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionClosedError
@@ -364,3 +364,10 @@ def s3_delete_best_effort(bucket: str, key: str) -> None:
     except Exception:
         # best effort: swallow
         pass
+
+def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
+    fs = s3fs.S3FileSystem()
+    path = f"s3://{bucket}/{key}"
+    with fs.open(path, "wb", block_size=8 * 1024 * 1024) as f:  # 8MB parts
+        for r in rows:
+            f.write((json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))

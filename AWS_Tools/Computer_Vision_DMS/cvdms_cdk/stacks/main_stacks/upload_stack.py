@@ -447,6 +447,7 @@ class ImageUploadStack(Stack):
                 timeout=Duration.seconds(kickoff_config.timeout_sec),
                 environment={
                     "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+                    "LOCK_TABLE_NAME": self.lock_table.table_name,
                     "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn,
                     "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
                     "GLOBAL_DLQ_URL": self.global_dlq.queue_url
@@ -458,6 +459,7 @@ class ImageUploadStack(Stack):
             # Permissions for the kickoff lambda
             self.job_table.grant_read_write_data(kickoff_lambda)
             self.file_bucket.grant_read(kickoff_lambda)
+            self.lock_table.grant_read_data(kickoff_lambda)
 
             # ensure S3 bucket-level list and get-location are permitted
             kickoff_lambda.add_to_role_policy(iam.PolicyStatement(

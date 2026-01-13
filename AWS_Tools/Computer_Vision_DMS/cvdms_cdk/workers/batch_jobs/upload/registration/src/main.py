@@ -2,7 +2,7 @@
 import os
 import json
 import time
-from typing import Any, Dict, List, Tuple, Iterable, Optional
+from typing import Any, Dict, List, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -13,6 +13,7 @@ from common.s3_utils import (
     parse_s3_uri,
     s3_read_json,
     read_parquet_rows_from_s3_uris,
+    jsonl_stream_to_s3
 )
 
 from helpers import (
@@ -22,7 +23,6 @@ from helpers import (
     build_canonical_label_table_row,
     build_image_label_rows,
     copy_objects_or_raise,
-    jsonl_stream_to_s3,
     fingerprint_owner_shard_id,
     build_owner_label_output_key,
 )
@@ -75,10 +75,10 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
         ddb.put_item(
             TableName=SHA256_TABLE_NAME,
             Item={
-                "sha256_hash": {"S": sha256_hash},
+                "sha256": {"S": sha256_hash},
                 "image_id": {"S": image_id},
             },
-            ConditionExpression="attribute_not_exists(sha256_hash)",
+            ConditionExpression="attribute_not_exists(sha256)",
         )
         return
     except ClientError as e:
@@ -88,7 +88,7 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
         # already exists: verify it's the same mapping
         resp = ddb.get_item(
             TableName=SHA256_TABLE_NAME,
-            Key={"sha256_hash": {"S": sha256_hash}},
+            Key={"sha256": {"S": sha256_hash}},
             ConsistentRead=True,
         )
         existing = resp.get("Item", {}).get("image_id", {}).get("S")
