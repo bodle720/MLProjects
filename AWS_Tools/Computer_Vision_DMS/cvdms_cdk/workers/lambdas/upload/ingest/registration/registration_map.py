@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List, Tuple, Iterable, Set
+from typing import Dict, List, Tuple, Iterable, Set, Optional
 import boto3
 
 from common.logging_utils import log
-from common.s3_utils import s3_read_jsonl_list
+from common.s3_utils import s3_read_jsonl_list, s3_list_keys
 from common.athena_utils import run_athena
 from common.iceberg_utils import chunked_insert, chunked_insert_where_not_exists
 from common.table_schemas import (
@@ -41,7 +41,7 @@ def _escape_sql_string(s: str) -> str:
 
 def _chunks(lst: List[str], n: int) -> Iterable[List[str]]:
     for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+        yield lst[i : i + n]
 
 
 def _athena_fetch_rows_3col(qid: str) -> List[Tuple[str, str, str]]:
@@ -56,10 +56,9 @@ def _athena_fetch_rows_3col(qid: str) -> List[Tuple[str, str, str]]:
     for page in paginator.paginate(QueryExecutionId=qid):
         rows = page["ResultSet"]["Rows"]
         for r in rows:
-            # Skip header row once
             if first:
                 first = False
-                continue
+                continue  # header
             data = r.get("Data", [])
             if len(data) < 3:
                 continue
@@ -85,10 +84,8 @@ def fetch_existing_image_label_keys(
     full_table = f"\"{ICEBERG_DATABASE_NAME}\".\"{IMAGE_LABELS_TABLE_NAME}\""
 
     lt_in = ", ".join("'" + _escape_sql_string(x) + "'" for x in sorted(set(label_types)))
-
     existing: Set[Tuple[str, str, str]] = set()
 
-    # Tune chunk size based on query length; 200 is usually safe.
     for chunk in _chunks(sorted(set(image_ids)), 200):
         iid_in = ", ".join("'" + _escape_sql_string(x) + "'" for x in chunk)
         sql = f"""
@@ -112,197 +109,49 @@ def fetch_existing_image_label_keys(
     return existing
 
 
-def _iter_jsonl(bucket: str, key: str, task: str) -> Iterable[Dict]:
-    # s3_read_jsonl_list takes list of keys
-    return s3_read_jsonl_list(bucket, [key], task)
+def _iter_jsonl_keys(keys: List[str], task: str) -> Iterable[Dict]:
+    # keys are S3 keys (NOT URIs)
+    return s3_read_jsonl_list(FILE_BUCKET_NAME, keys, task)
 
 
-def handler(event, context):
-    try:
-        job_id = event["job_id"]
-        user = event["user"]
-        event_type = event["event_type"]
-        label_type = event["label_type"]
-        shard = event["shard"]
-        upload_staging_key = event["upload_staging_key"]
-        canonical_imagery_key = event["canonical_imagery_key"]
-        canonical_labels_key = event["canonical_labels_key"]
-        image_labels_key = event["image_labels_key"]
-    except KeyError as e:
-        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
+def _list_owner_label_jsonl_keys(owner_prefix: str) -> List[str]:
+    """
+    owner_prefix is an S3 *prefix*, e.g.
+      temp/image-upload/<job_id>/batches/registration-step/processed/canonical_labels_by_fingerprint/owner-000123/
+    Returns sorted JSONL keys under that prefix.
+    """
+    prefix = owner_prefix.rstrip("/") + "/"
+    keys = s3_list_keys(FILE_BUCKET_NAME, prefix)
+    out = [k for k in keys if k.endswith(".jsonl")]
+    out.sort()
+    return out
 
-    if not job_id or job_id == "unknown":
-        raise RuntimeError(f"{TASK_NAME} missing job_id")
-    if not shard:
-        raise RuntimeError(f"{TASK_NAME} missing shard")
-    if not upload_staging_key:
-        raise RuntimeError(f"{TASK_NAME} missing upload_staging_key")
-    if not canonical_imagery_key:
-        raise RuntimeError(f"{TASK_NAME} missing canonical_imagery_key")
-    if not canonical_labels_key:
-        raise RuntimeError(f"{TASK_NAME} missing canonical_labels_key")
-    if not image_labels_key:
-        raise RuntimeError(f"{TASK_NAME} missing image_labels_key")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Start ingest shard={shard}")
+def _ingest_label_owner_shard(
+    *,
+    job_id: str,
+    user: str,
+    event_type: str,
+    shard: str,
+    owner_prefix: str,
+) -> Dict:
+    """
+    Insert-only ingest for canonical label tables from owner shard prefix.
+    """
+    label_keys = _list_owner_label_jsonl_keys(owner_prefix)
+    if not label_keys:
+        # legal: owner shard might be empty depending on data distribution
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Owner shard={shard} empty (no jsonl parts)")
+        return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": 0, "label_rows_ingested": 0}
 
-    # ---------------------------
-    # 0) Load image_labels rows and compute "existing" set for enriched/no_op
-    # ---------------------------
-    incoming_image_labels: List[Dict[str, str]] = []
-    incoming_keys: Set[Tuple[str, str, str]] = set()
-    incoming_image_ids: Set[str] = set()
-    incoming_label_types: Set[str] = set()
-
-    any_img_labels = False
-    for r in _iter_jsonl(FILE_BUCKET_NAME, image_labels_key, f"{TASK_NAME}.read_image_labels"):
-        any_img_labels = True
-        iid = r.get("image_id")
-        lt = r.get("label_type")
-        lid = r.get("label_id")
-        if not (isinstance(iid, str) and iid.strip() and isinstance(lt, str) and lt.strip() and isinstance(lid, str) and lid.strip()):
-            continue
-        key = (iid.strip(), lt.strip(), lid.strip())
-        if key in incoming_keys:
-            continue
-        incoming_keys.add(key)
-        incoming_image_labels.append({"image_id": key[0], "label_type": key[1], "label_id": key[2]})
-        incoming_image_ids.add(key[0])
-        incoming_label_types.add(key[1])
-
-    # If the file exists but is empty, any_img_labels will be False; that's OK.
-    existing_keys: Set[Tuple[str, str, str]] = set()
-    if incoming_image_ids and incoming_label_types:
-        existing_keys = fetch_existing_image_label_keys(list(incoming_image_ids), list(incoming_label_types))
-
-    # Compute which keys are truly "new" vs already present
-    new_keys = incoming_keys - existing_keys
-
-    # ---------------------------
-    # 1) Load upload_staging rows, compute external_dup status using new_keys
-    # ---------------------------
-    upload_rows: List[Dict] = []
-    enriched_count = 0
-    noop_count = 0
-    failed_count = 0
-
-    for row in _iter_jsonl(FILE_BUCKET_NAME, upload_staging_key, f"{TASK_NAME}.read_upload_staging"):
-        # We only adjust statuses for external_duplicate rows that are not failed
-        dstat = row.get("dedup_status")
-        rstat = row.get("registration_status")
-
-        if dstat == "external_duplicate" and rstat != "failed":
-            matched = row.get("matched_image_id")
-            if isinstance(matched, str) and matched.strip():
-                target_image_id = matched.strip()
-            else:
-                # If this happens, it’s a real worker bug; mark failed.
-                row["registration_status"] = "failed"
-                row["registration_error"] = "missing matched_image_id for external_duplicate"
-                failed_count += 1
-                upload_rows.append(row)
-                continue
-
-            # Determine the mapping keys this row would create
-            row_new = False
-            if label_type in ("single-label", "multi-label"):
-                labs = row.get("string_labels")
-                if isinstance(labs, list):
-                    for lab in labs:
-                        if isinstance(lab, str) and lab.strip():
-                            k = (target_image_id, "string-label", lab.strip().lower())
-                            if k in new_keys:
-                                row_new = True
-                                break
-            else:
-                fp = row.get("label_fingerprint")
-                if isinstance(fp, str) and fp.strip():
-                    k = (target_image_id, label_type, fp.strip())
-                    if k in new_keys:
-                        row_new = True
-                else:
-                    # structured type but missing fingerprint => worker should have failed it;
-                    # make it failed here to keep audit truthful.
-                    row["registration_status"] = "failed"
-                    row["registration_error"] = "missing label_fingerprint for structured external_duplicate"
-                    failed_count += 1
-                    upload_rows.append(row)
-                    continue
-
-            if row_new:
-                row["registration_status"] = "enriched"
-                row["registration_error"] = None
-                enriched_count += 1
-            else:
-                row["registration_status"] = "no_op"
-                row["registration_error"] = None
-                noop_count += 1
-
-        upload_rows.append(row)
-
-    # Ingest upload_staging (delete-then-insert by (job_id,image_id) batches)
-    if upload_rows:
-        ok, err = chunked_insert(
-            upload_rows,
-            f"{TASK_NAME}.upload_staging",
-            ICEBERG_DATABASE_NAME,
-            UPLOAD_STAGING_TABLE_NAME,
-            ATHENA_WORKGROUP,
-            ATHENA_OUTPUT_S3,
-            chunk_size=CHUNK_SIZE,
-        )
-        if not ok:
-            raise RuntimeError(f"{TASK_NAME} upload_staging chunked_insert failed: {err}")
-
-    # ---------------------------
-    # 2) canonical_imagery (delete-then-insert; may be empty if shard is all external dups)
-    # ---------------------------
-    canon_img_rows: List[Dict] = []
-    for row in _iter_jsonl(FILE_BUCKET_NAME, canonical_imagery_key, f"{TASK_NAME}.read_canonical_imagery"):
-        canon_img_rows.append(row)
-
-    if canon_img_rows:
-        ok, err = chunked_insert(
-            canon_img_rows,
-            f"{TASK_NAME}.canonical_imagery",
-            ICEBERG_DATABASE_NAME,
-            CANONICAL_IMAGERY_TABLE_NAME,
-            ATHENA_WORKGROUP,
-            ATHENA_OUTPUT_S3,
-            chunk_size=CHUNK_SIZE,
-        )
-        if not ok:
-            raise RuntimeError(f"{TASK_NAME} canonical_imagery chunked_insert failed: {err}")
-
-    # ---------------------------
-    # 3) image_labels (INSERT ONLY WHERE NOT EXISTS)
-    # ---------------------------
-    if incoming_image_labels:
-        ok, err = chunked_insert_where_not_exists(
-            incoming_image_labels,
-            f"{TASK_NAME}.image_labels",
-            ICEBERG_DATABASE_NAME,
-            IMAGE_LABELS_TABLE_NAME,
-            ATHENA_WORKGROUP,
-            ATHENA_OUTPUT_S3,
-            chunk_size=CHUNK_SIZE,
-        )
-        if not ok:
-            raise RuntimeError(f"{TASK_NAME} image_labels insert-only failed: {err}")
-
-    # ---------------------------
-    # 4) canonical label tables routed by __table (INSERT ONLY WHERE NOT EXISTS)
-    # ---------------------------
     per_table: Dict[str, List[Dict]] = {t: [] for t in LABEL_TABLES}
-    any_canon_labels = False
+    ingested = 0
 
-    for row in _iter_jsonl(FILE_BUCKET_NAME, canonical_labels_key, f"{TASK_NAME}.read_canonical_labels"):
-        any_canon_labels = True
+    for row in _iter_jsonl_keys(label_keys, f"{TASK_NAME}.read_owner_labels"):
         table = row.get("__table")
         if not isinstance(table, str) or not table.strip():
-            raise RuntimeError(f"{TASK_NAME} canonical label row missing __table: {row}")
+            raise RuntimeError(f"{TASK_NAME} owner label row missing __table: {row}")
         table = table.strip()
-
         if table not in LABEL_TABLES:
             raise RuntimeError(f"{TASK_NAME} unsupported canonical label table in __table: {table}")
 
@@ -323,6 +172,7 @@ def handler(event, context):
             )
             if not ok:
                 raise RuntimeError(f"{TASK_NAME} canonical label insert-only failed table={table}: {err}")
+            ingested += len(chunk)
             per_table[table] = []
 
     # flush remaining
@@ -340,6 +190,169 @@ def handler(event, context):
         )
         if not ok:
             raise RuntimeError(f"{TASK_NAME} canonical label insert-only failed table={table}: {err}")
+        ingested += len(chunk)
+
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Done kind=label_owner shard={shard} parts={len(label_keys)} label_rows_ingested={ingested}",
+    )
+
+    return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": len(label_keys), "label_rows_ingested": ingested}
+
+
+def _ingest_target_shard(
+    *,
+    job_id: str,
+    user: str,
+    event_type: str,
+    label_type: str,
+    shard: str,
+    upload_staging_key: str,
+    canonical_imagery_key: str,
+    image_labels_key: str,
+) -> Dict:
+    """
+    Target shard ingest:
+      - upload_staging: delete-then-insert
+      - canonical_imagery: delete-then-insert
+      - image_labels: insert-only (where-not-exists)
+      - sets registration_status enriched/no_op for external_duplicate rows based on whether any *new* image_labels keys exist
+    """
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Start kind=target shard={shard}")
+
+    # 0) Load image_labels rows and compute "existing" set for enriched/no_op
+    incoming_image_labels: List[Dict[str, str]] = []
+    incoming_keys: Set[Tuple[str, str, str]] = set()
+    incoming_image_ids: Set[str] = set()
+    incoming_label_types: Set[str] = set()
+
+    for r in _iter_jsonl_keys([image_labels_key], f"{TASK_NAME}.read_image_labels"):
+        iid = r.get("image_id")
+        lt = r.get("label_type")
+        lid = r.get("label_id")
+        if not (
+            isinstance(iid, str) and iid.strip()
+            and isinstance(lt, str) and lt.strip()
+            and isinstance(lid, str) and lid.strip()
+        ):
+            continue
+        key = (iid.strip(), lt.strip(), lid.strip())
+        if key in incoming_keys:
+            continue
+        incoming_keys.add(key)
+        incoming_image_labels.append({"image_id": key[0], "label_type": key[1], "label_id": key[2]})
+        incoming_image_ids.add(key[0])
+        incoming_label_types.add(key[1])
+
+    existing_keys: Set[Tuple[str, str, str]] = set()
+    if incoming_image_ids and incoming_label_types:
+        existing_keys = fetch_existing_image_label_keys(list(incoming_image_ids), list(incoming_label_types))
+
+    new_keys = incoming_keys - existing_keys
+
+    # 1) Load upload_staging rows, compute external_dup status using new_keys
+    upload_rows: List[Dict] = []
+    enriched_count = 0
+    noop_count = 0
+    failed_count = 0
+
+    for row in _iter_jsonl_keys([upload_staging_key], f"{TASK_NAME}.read_upload_staging"):
+        dstat = row.get("dedup_status")
+        rstat = row.get("registration_status")
+
+        if dstat == "external_duplicate" and rstat != "failed":
+            matched = row.get("matched_image_id")
+            if isinstance(matched, str) and matched.strip():
+                target_image_id = matched.strip()
+            else:
+                row["registration_status"] = "failed"
+                row["registration_error"] = "missing matched_image_id for external_duplicate"
+                failed_count += 1
+                upload_rows.append(row)
+                continue
+
+            row_new = False
+            if label_type in ("single-label", "multi-label"):
+                labs = row.get("string_labels")
+                if isinstance(labs, list):
+                    for lab in labs:
+                        if isinstance(lab, str) and lab.strip():
+                            k = (target_image_id, "string-label", lab.strip().lower())
+                            if k in new_keys:
+                                row_new = True
+                                break
+            else:
+                fp = row.get("label_fingerprint")
+                if isinstance(fp, str) and fp.strip():
+                    k = (target_image_id, label_type, fp.strip())
+                    if k in new_keys:
+                        row_new = True
+                else:
+                    row["registration_status"] = "failed"
+                    row["registration_error"] = "missing label_fingerprint for structured external_duplicate"
+                    failed_count += 1
+                    upload_rows.append(row)
+                    continue
+
+            if row_new:
+                row["registration_status"] = "enriched"
+                row["registration_error"] = None
+                enriched_count += 1
+            else:
+                row["registration_status"] = "no_op"
+                row["registration_error"] = None
+                noop_count += 1
+
+        upload_rows.append(row)
+
+    # upload_staging (delete-then-insert)
+    if upload_rows:
+        ok, err = chunked_insert(
+            upload_rows,
+            f"{TASK_NAME}.upload_staging",
+            ICEBERG_DATABASE_NAME,
+            UPLOAD_STAGING_TABLE_NAME,
+            ATHENA_WORKGROUP,
+            ATHENA_OUTPUT_S3,
+            chunk_size=CHUNK_SIZE,
+        )
+        if not ok:
+            raise RuntimeError(f"{TASK_NAME} upload_staging chunked_insert failed: {err}")
+
+    # 2) canonical_imagery (delete-then-insert; may be empty)
+    canon_img_rows: List[Dict] = []
+    for row in _iter_jsonl_keys([canonical_imagery_key], f"{TASK_NAME}.read_canonical_imagery"):
+        canon_img_rows.append(row)
+
+    if canon_img_rows:
+        ok, err = chunked_insert(
+            canon_img_rows,
+            f"{TASK_NAME}.canonical_imagery",
+            ICEBERG_DATABASE_NAME,
+            CANONICAL_IMAGERY_TABLE_NAME,
+            ATHENA_WORKGROUP,
+            ATHENA_OUTPUT_S3,
+            chunk_size=CHUNK_SIZE,
+        )
+        if not ok:
+            raise RuntimeError(f"{TASK_NAME} canonical_imagery chunked_insert failed: {err}")
+
+    # 3) image_labels (insert-only)
+    if incoming_image_labels:
+        ok, err = chunked_insert_where_not_exists(
+            incoming_image_labels,
+            f"{TASK_NAME}.image_labels",
+            ICEBERG_DATABASE_NAME,
+            IMAGE_LABELS_TABLE_NAME,
+            ATHENA_WORKGROUP,
+            ATHENA_OUTPUT_S3,
+            chunk_size=CHUNK_SIZE,
+        )
+        if not ok:
+            raise RuntimeError(f"{TASK_NAME} image_labels insert-only failed: {err}")
 
     log(
         job_id,
@@ -347,21 +360,21 @@ def handler(event, context):
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
         (
-            f"{TASK_NAME} Done shard={shard}: "
+            f"{TASK_NAME} Done kind=target shard={shard}: "
             f"upload_rows={len(upload_rows)} "
             f"canon_imagery_rows={len(canon_img_rows)} "
             f"image_labels_incoming={len(incoming_image_labels)} "
             f"image_labels_new={len(new_keys)} "
             f"external_dup_enriched={enriched_count} "
             f"external_dup_no_op={noop_count} "
-            f"external_dup_failed={failed_count} "
-            f"canon_labels_seen={any_canon_labels}"
+            f"external_dup_failed={failed_count}"
         ),
     )
 
     return {
         "job_id": job_id,
         "shard": shard,
+        "kind": "target",
         "upload_rows": len(upload_rows),
         "canonical_imagery_rows": len(canon_img_rows),
         "image_labels_incoming": len(incoming_image_labels),
@@ -370,3 +383,58 @@ def handler(event, context):
         "external_dup_no_op": noop_count,
         "external_dup_failed": failed_count,
     }
+
+
+def handler(event, context):
+    try:
+        job_id = event["job_id"]
+        user = event["user"]
+        event_type = event["event_type"]
+        label_type = event.get("label_type")  # present for target shards (and at top-level job input)
+        shard = event["shard"]
+        kind = event.get("kind", "target")
+        upload_staging_key = event.get("upload_staging_key")
+        canonical_imagery_key = event.get("canonical_imagery_key")
+        canonical_labels_key = event.get("canonical_labels_key")  # for owner shards this is a prefix
+        image_labels_key = event.get("image_labels_key")
+    except KeyError as e:
+        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
+
+    if not job_id or job_id == "unknown":
+        raise RuntimeError(f"{TASK_NAME} missing job_id")
+    if not shard:
+        raise RuntimeError(f"{TASK_NAME} missing shard")
+
+    # Dispatch by kind
+    if kind == "label_owner":
+        if not isinstance(canonical_labels_key, str) or not canonical_labels_key.strip():
+            raise RuntimeError(f"{TASK_NAME} kind=label_owner requires canonical_labels_key (owner prefix)")
+        return _ingest_label_owner_shard(
+            job_id=job_id,
+            user=user,
+            event_type=event_type,
+            shard=shard,
+            owner_prefix=canonical_labels_key,
+        )
+
+    # default: kind=target
+    if not isinstance(label_type, str) or not label_type.strip():
+        raise RuntimeError(f"{TASK_NAME} kind=target requires label_type")
+    if not upload_staging_key:
+        raise RuntimeError(f"{TASK_NAME} kind=target missing upload_staging_key")
+    if not canonical_imagery_key:
+        raise RuntimeError(f"{TASK_NAME} kind=target missing canonical_imagery_key")
+    if not image_labels_key:
+        raise RuntimeError(f"{TASK_NAME} kind=target missing image_labels_key")
+
+    # canonical_labels_key should be None for target shards now (don’t require it)
+    return _ingest_target_shard(
+        job_id=job_id,
+        user=user,
+        event_type=event_type,
+        label_type=label_type.strip(),
+        shard=shard,
+        upload_staging_key=upload_staging_key,
+        canonical_imagery_key=canonical_imagery_key,
+        image_labels_key=image_labels_key,
+    )

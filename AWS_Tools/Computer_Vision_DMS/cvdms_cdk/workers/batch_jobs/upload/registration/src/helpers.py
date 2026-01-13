@@ -1,14 +1,18 @@
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 import json
+import hashlib
 
 import s3fs
 
-from common.s3_utils import (make_s3_uri,
-                            parse_s3_uri,
-                            get_key_basename,
-                            s3_copy_with_retry)
+from common.s3_utils import (
+    make_s3_uri,
+    parse_s3_uri,
+    get_key_basename,
+    s3_copy_with_retry,
+)
 
 TASK_NAME = "[REG_JOB_DEF_HELPER]"
+
 
 def split_ext(filename: str) -> Tuple[str, str]:
     if "." not in filename:
@@ -16,12 +20,14 @@ def split_ext(filename: str) -> Tuple[str, str]:
     stem, ext = filename.rsplit(".", 1)
     return stem, ext.lower()
 
+
 def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
     """
     copy_plan: list of (src_bucket, src_key, dst_bucket, dst_key)
     """
     for src_bucket, src_key, dst_bucket, dst_key in copy_plan:
         s3_copy_with_retry(src_bucket, src_key, dst_bucket, dst_key, TASK_NAME)
+
 
 def build_canonical_image_dest(file_bucket: str, image_id: str, temp_image_uri: str) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri, TASK_NAME)
@@ -32,15 +38,18 @@ def build_canonical_image_dest(file_bucket: str, image_id: str, temp_image_uri: 
     dst_key = f"canonical/imagery/{image_id}.{ext}"
     return dst_key, make_s3_uri(file_bucket, dst_key)
 
-def build_canonical_label_dests_by_fingerprint( *,
-                                                file_bucket: str,
-                                                label_type: str,
-                                                fingerprint: str,
-                                                temp_bbox_meta_uri: Optional[str],
-                                                temp_semantic_png_uri: Optional[str],
-                                                temp_semantic_meta_uri: Optional[str],
-                                                temp_instance_png_uri: Optional[str],
-                                                temp_instance_meta_uri: Optional[str]) -> Tuple[List[str], List[str], List[Tuple[str, str, str, str]]]:
+
+def build_canonical_label_dests_by_fingerprint(
+    *,
+    file_bucket: str,
+    label_type: str,
+    fingerprint: str,
+    temp_bbox_meta_uri: Optional[str],
+    temp_semantic_png_uri: Optional[str],
+    temp_semantic_meta_uri: Optional[str],
+    temp_instance_png_uri: Optional[str],
+    temp_instance_meta_uri: Optional[str],
+) -> Tuple[List[str], List[str], List[Tuple[str, str, str, str]]]:
     """
     Returns:
       - dst_keys
@@ -97,6 +106,7 @@ def build_canonical_label_dests_by_fingerprint( *,
     # single-label / multi-label: no label files
     return [], [], []
 
+
 def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str, registration_time: str) -> Dict[str, Any]:
     image_id = row.get("image_id")
     if not image_id:
@@ -116,11 +126,14 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "sha256_hash": row.get("sha256_hash"),
     }
 
-def build_canonical_label_table_row(*,
-                                    label_type: str,
-                                    fingerprint: str,
-                                    canonical_label_uris: List[str],
-                                    classes_present: Optional[List[str]]) -> Optional[Dict[str, Any]]:
+
+def build_canonical_label_table_row(
+    *,
+    label_type: str,
+    fingerprint: str,
+    canonical_label_uris: List[str],
+    classes_present: Optional[List[str]],
+) -> Optional[Dict[str, Any]]:
     """
     Returns a dict with routing field __table plus the correct columns for that table.
     NOTE: model A => no image_id column in canonical label tables.
@@ -163,11 +176,14 @@ def build_canonical_label_table_row(*,
 
     return None
 
-def build_image_label_rows(*,
-                            job_label_type: str,
-                            target_image_id: str,
-                            string_labels: Optional[List[str]],
-                            fingerprint: Optional[str]) -> List[Dict[str, str]]:
+
+def build_image_label_rows(
+    *,
+    job_label_type: str,
+    target_image_id: str,
+    string_labels: Optional[List[str]],
+    fingerprint: Optional[str],
+) -> List[Dict[str, str]]:
     """
     image_labels schema: (image_id, label_id, label_type)
     - For single-label and multi-label jobs, label_type MUST be "string-label" and label_id is the lowercase string label.
@@ -177,11 +193,12 @@ def build_image_label_rows(*,
 
     if job_label_type in ("single-label", "multi-label"):
         if not isinstance(string_labels, list) or not string_labels:
-            # Shouldn't happen if validation enforced classes_present
             return []
         for lab in string_labels:
             if isinstance(lab, str) and lab.strip():
-                out.append({"image_id": target_image_id, "label_id": lab.strip().lower(), "label_type": "string-label"})
+                out.append(
+                    {"image_id": target_image_id, "label_id": lab.strip().lower(), "label_type": "string-label"}
+                )
         return out
 
     if job_label_type in ("object-detection", "semantic-segmentation", "instance-segmentation"):
@@ -190,8 +207,8 @@ def build_image_label_rows(*,
         out.append({"image_id": target_image_id, "label_id": fingerprint, "label_type": job_label_type})
         return out
 
-    # Unknown job label type
     return []
+
 
 def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
     """
@@ -202,3 +219,43 @@ def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) ->
     with fs.open(path, "wb") as f:
         for r in rows:
             f.write((json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def fingerprint_owner_shard_id(fingerprint: str, num_shards: int) -> str:
+    """
+    Deterministically map a fingerprint -> owner shard id.
+
+    - Prefers treating fingerprint as hex (sha256) and using the first 8 hex chars.
+    - Falls back to md5 for non-hex fingerprints.
+    Returns a zero-padded 6-char string like "000123".
+    """
+    if not isinstance(num_shards, int) or num_shards <= 0:
+        raise ValueError(f"{TASK_NAME} num_shards must be a positive int, got {num_shards}")
+
+    fp = (fingerprint or "").strip()
+    if not fp:
+        raise RuntimeError(f"{TASK_NAME} fingerprint is empty")
+
+    try:
+        # sha256 hex path
+        v = int(fp[:8], 16)
+    except Exception:
+        # fallback path
+        v = int(hashlib.md5(fp.encode("utf-8")).hexdigest()[:8], 16)
+
+    shard = v % num_shards
+    return str(shard).rjust(6, "0")
+
+
+def build_owner_label_output_key(*, processed_prefix: str, owner_shard_id: str, source_target_shard: str) -> str:
+    """
+    Where the worker writes canonical label table rows routed by fingerprint-owner shard.
+
+    Many workers can write files under the same owner shard prefix.
+    Pre-ingest should group by owner_shard_id and treat the union as one logical shard.
+    """
+    owner = (owner_shard_id or "").strip()
+    if not owner:
+        raise RuntimeError(f"{TASK_NAME} owner_shard_id is empty")
+    src = (source_target_shard or "shard").strip()
+    return f"{processed_prefix}/canonical_labels_by_fingerprint/owner-{owner}/part-{src}.jsonl"
