@@ -47,7 +47,7 @@ def manifest_shard_name(manifest_s3_uri: str) -> str:
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
 
     # derive deterministic image uuid from job + source-ref
-    temp_source_ref = line.get("source-ref")
+    temp_source_ref = line.get("source_ref")
 
     # Deterministic per-occurrence ID (unique even for duplicates)
     image_id = stable_uuid5(f"{JOB_ID}|{shard_name}|{line_idx}")

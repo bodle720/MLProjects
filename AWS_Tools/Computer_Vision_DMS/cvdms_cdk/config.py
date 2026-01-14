@@ -140,7 +140,7 @@ CONFIG = AppConfig(
         path="workers/lambdas/upload",
         handler="kickoff.handler",
         memory_size=1024,
-        timeout_sec=60
+        timeout_sec=500
     ),
     cleanup_lambda=LambdaConfig(
         path="workers/lambdas/upload",

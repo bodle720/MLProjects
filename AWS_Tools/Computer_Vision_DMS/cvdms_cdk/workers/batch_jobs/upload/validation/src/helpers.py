@@ -9,16 +9,38 @@ import boto3
 from PIL import Image
 import numpy as np
 from numpy.typing import NDArray
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from common.s3_utils import write_s3_obj, parse_s3_uri, read_obj_with_retry
 
 TASK_NAME = "[VAL_JOB_DEF_HELPER]"
-LOWERCASE_BG_NAMES_POSSIBLE = ['bg', 'background']
 
 s3 = boto3.client("s3")
 
 def stable_uuid5(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+def normalize_numeric_4(v) -> str:
+    try:
+        d = Decimal(str(v))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"bad numeric: {v}")
+
+    if not d.is_finite():
+        raise ValueError("non-finite number")
+
+    d = d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    if d == 0:
+        d = Decimal("0.0000")
+
+    # ensure fixed 4 decimals
+    s = format(d, "f")
+    if "." not in s:
+        s += ".0000"
+    else:
+        whole, frac = s.split(".", 1)
+        s = whole + "." + (frac + "0000")[:4]
+    return s
 
 # Image feature calculation helpers
 def infer_dtype(img) -> str:
@@ -39,8 +61,6 @@ def normalize_hex(h: str) -> str:
     h = h.strip().lower()
     if not h.startswith("#"):
         raise ValueError(f"Bad hex color: {h}")
-    if len(h) == 4:  # #rgb
-        return f"#{h[1]}{h[1]}{h[2]}{h[2]}{h[3]}{h[3]}"
     if len(h) == 7:
         return h
     raise ValueError(f"{TASK_NAME} Bad hex color: {h}")
@@ -50,42 +70,17 @@ def create_and_save_labels(line: dict,
                            job_id: str,
                            file_bucket_name: str) -> tuple[list[str], list[str], Optional[str], Optional[str]]:
     try:
-        if label_type == "single-label":
-            meta = line.get("single-label-metadata", {})
-            cn = meta.get("class-name", "").strip().lower()
-            if not cn:
-                return [], [], None, "empty class-name for single label type"
-            else:
-                return [], [cn], None, None
-        elif label_type == "multi-label":
-            ml = line.get("multi-label", None)
-            meta = line.get("multi-label-metadata", {})
-            class_map = meta.get("class-map", None)
-
-            if not ml or not isinstance(ml, list):
-                return [], [], None, "multi-label missing/empty"
-            if not class_map or not isinstance(class_map, dict):
-                return [], [], None, "multi-label class-map missing/empty"
-
-            out = []
-            for idx in ml:
-                key = str(idx)
-                name = class_map.get(key)
-                if isinstance(name, str) and name.strip():
-                    out.append(name.strip().lower())
-
-            # unique preserve order
-            seen = set()
-            classes_present = []
-            for x in out:
-                if x not in seen:
-                    seen.add(x)
-                    classes_present.append(x)
-
-            if not classes_present:
-                return [], [], None, "No classes are present for multi-label image"
-            else:
-                return [], classes_present, None, None
+        if label_type == "single-label" or label_type == "multi-label":
+            label_ls = line.get("labels", [])
+            if not label_ls:
+                return [], [], None, f"empty labels list for {label_type} type"
+            elif not isinstance(label_ls, list):
+                return [], [], None, f"no list labels list for {label_type} type"
+            elif label_type == "single-label" and len(label_ls) != 1:
+                return [], [], None, "labels list for single label type is not len 1"
+            elif not all(isinstance(cn, str) and cn.strip() for cn in label_ls):
+                return [], [], None, f"labels list values for label type {label_type} are not all non-empty strings"
+            return [], [cn.strip().lower() for cn in label_ls], None, None
         elif label_type == "object-detection":
             paths, classes_present, label_fingerprint = create_object_detection_label(line, job_id, file_bucket_name)
             return paths, classes_present, label_fingerprint, None
@@ -102,60 +97,46 @@ def create_and_save_labels(line: dict,
         return [], [], None, f"{TASK_NAME} Error creating and saving label for label type {label_type}: {e}"
 
 def create_object_detection_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
-    od = line.get("object-detection", {})
-    meta = line.get("object-detection-metadata", {})
-    anns = od.get("annotations", None)
-    class_map = meta.get("class-map", None)
+    bboxes = line.get("labels", {}).get('boxes', [])
 
-    if not isinstance(anns, list) or len(anns) == 0:
-        raise ValueError(f"{TASK_NAME} object-detection.annotations missing/empty")
-    if not isinstance(class_map, dict) or len(class_map) == 0:
-        raise ValueError(f"{TASK_NAME} object-detection-metadata.class-map missing/empty")
+    if not isinstance(bboxes, list) or len(bboxes) == 0:
+        raise ValueError(f"{TASK_NAME} object-detection annotations missing/empty: no bboxes list present")
 
-    tuples_anns = [] # out anns, but as a list of tuples
+    tuples_anns = []
     classes_present = []
-    for ann in anns:
+    for ann in bboxes:
         if not isinstance(ann, dict):
             continue
 
-        cid = ann.get("class_id")
+        cn = ann.get("class_name")
+        if not isinstance(cn, str) or not cn.strip():
+            raise ValueError(f"{TASK_NAME} object-detection invalid class: {cn}")
 
-        if type(cid) == str:
-            try:
-                cid = int(cid)
-            except:
-                raise ValueError(f"{TASK_NAME} class id in bbox annotation is not int or string version of int: {cid}")
-
-        if not isinstance(cid, int):
-            raise ValueError(f"{TASK_NAME} object-detection annotation missing int class_id")
-
-        class_name = class_map.get(str(cid))
-        if not isinstance(class_name, str) or not class_name.strip():
-            raise ValueError(f"{TASK_NAME} class-map missing class for class_id={cid}")
-
-        cn = class_name.strip().lower()
-        classes_present.append(cn)
+        class_name = cn.strip().lower()
+        classes_present.append(class_name)
 
         coords = {}
         for f in ("top", "left", "height", "width"):
             v = ann.get(f)
 
-            if type(v) == str:
-                try:
-                    v = int(v)
-                except:
-                    raise ValueError(f"{TASK_NAME} coord {f} in bbox annotation is not int or string version of int: {v}")
+            if not v or not isinstance(v, (int, float, str)):
+                raise ValueError(f"{TASK_NAME} object-detection annotation bbox field {f} must be present and numeric")
 
-            if not isinstance(v, int):
-                raise ValueError(f"{TASK_NAME} object-detection annotation.{f} must be number")
+            v = normalize_numeric_4(v) # type str
+
+            if f in ['height', 'width'] and float(v) <= 0:
+                raise ValueError(f"{TASK_NAME} object-detection annotation bbox field {f} must be non-zero and positive")
+
+            if f in ['top', 'left'] and float(v) < 0:
+                raise ValueError(f"{TASK_NAME} object-detection annotation bbox field {f} must be non-negative")
 
             coords[f] = v
 
-        tuples_anns.append((cn, coords['top'], coords['left'], coords['height'], coords['width']))
+        tuples_anns.append((class_name, coords['top'], coords['left'], coords['height'], coords['width']))
 
     # make label fingerprint
     if not tuples_anns:
-        raise ValueError(f"{TASK_NAME} object-detection.annotations contained no valid annotation objects")
+        raise ValueError(f"{TASK_NAME} object-detection annotations contained no valid annotation objects")
 
     tuples_anns.sort()
     payload = {"v": 1, "label_type": "object-detection", "boxes": [list(t) for t in tuples_anns]}
@@ -172,7 +153,7 @@ def create_object_detection_label(line: dict, job_id: str, file_bucket_name: str
     classes_present = uniq
 
     out_anns = [
-        {"class_name": cn, "coordinates": {"top": top, "left": left, "height": height, "width": width}}
+        {"class_name": cn, "top": top, "left": left, "height": height, "width": width}
         for (cn, top, left, height, width) in tuples_anns
     ]
 
@@ -193,61 +174,41 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     - Any pixel color not in internal-color-map is treated as background (0) by default
       (i.e., we do NOT raise on unknown colors).
     """
-    mask_ref = line.get("semantic-segmentation-ref")
-    meta = line.get("semantic-segmentation-ref-metadata", {})
-    icm = meta.get("internal-color-map", None)
+    mask_ref = line.get("mask_ref")
+    color_map = line.get("color_map")
 
     if not isinstance(mask_ref, str) or not mask_ref.startswith("s3://"):
-        raise ValueError(f"{TASK_NAME} semantic-segmentation-ref missing/invalid")
-    if not isinstance(icm, dict) or len(icm) == 0:
-        raise ValueError(f"{TASK_NAME} semantic internal-color-map missing/empty")
+        raise ValueError(f"{TASK_NAME} semantic segmentation mask_ref missing/invalid")
+    if not isinstance(color_map, dict) or len(color_map) == 0:
+        raise ValueError(f"{TASK_NAME} semantic color_map missing/empty")
 
     # Build class_name -> set(hex_colors), require a background class
-    class_to_hexes: dict[str, set[str]] = {}
-    bg_class: str | None = None
-
-    for _, v in icm.items():
-        if not isinstance(v, dict):
-            continue
-
-        cn = v.get("class-name")
-        hc = v.get("hex-color")
+    class_to_hex: dict[str, str] = {}
+    for cn, hc_ls in color_map.items():
         if not isinstance(cn, str) or not cn.strip():
             continue
-        if not isinstance(hc, str) or not hc.strip():
+        if not isinstance(hc_ls, list) or not hc_ls:
             continue
 
+        if len(hc_ls) != 1:
+            raise ValueError(f"{TASK_NAME} semantic color map has hex list of len greater than 1")
+
         cn = cn.strip().lower()
-        hc = normalize_hex(hc)
-
-        class_to_hexes.setdefault(cn, set()).add(hc)
-
-        if cn in LOWERCASE_BG_NAMES_POSSIBLE:
-            # You can allow both "bg" and "background" to exist; we just need *a* bg class.
-            if bg_class is None:
-                bg_class = cn
-
-    if bg_class is None:
-        raise ValueError(
-            f"{TASK_NAME} semantic error: internal-color-map must include class-name 'bg' or 'background' (case insensitive) for background"
-        )
+        hc = normalize_hex(hc_ls[0])
+        class_to_hex[cn] = hc
 
     hex_to_class: dict[str, str] = {}
-    for cls, hexes in class_to_hexes.items():
-        for hc in hexes:
-            prev = hex_to_class.get(hc)
-            if prev is not None and prev != cls:
-                raise ValueError(f"{TASK_NAME} semantic: hex color {hc} appears in multiple classes: {prev} and {cls}")
-            hex_to_class[hc] = cls
+    for cls, hexval in class_to_hex.items():
+        hex_to_class[hexval] = cls
 
     # Deterministic class IDs by CLASS NAME ONLY (color-independent)
-    non_bg_classes = sorted([c for c in class_to_hexes.keys() if c not in LOWERCASE_BG_NAMES_POSSIBLE])
+    all_classes = sorted([c for c in class_to_hex.keys()])
 
     id_to_class: dict[str, str] = {"0": "bg"}
-    class_to_id: dict[str, int] = {bg_class: 0}
+    class_to_id: dict[str, int] = {"bg": 0}
 
     next_id = 1
-    for c in non_bg_classes:
+    for c in all_classes:
         if next_id > 255:
             raise ValueError(f"{TASK_NAME} Too many classes for uint8 mask")
         class_to_id[c] = next_id
@@ -274,16 +235,16 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     )
 
     # Fill idx by class (union all colors that map to that class)
-    for cls, hexes in class_to_hexes.items():
+    for cls, hex_color in class_to_hex.items():
         pid = class_to_id.get(cls)
         if pid is None:
             continue  # shouldn't happen
-        for hex_color in hexes:
-            r = int(hex_color[1:3], 16)
-            g = int(hex_color[3:5], 16)
-            b = int(hex_color[5:7], 16)
-            tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
-            idx[packed == tgt] = np.uint8(pid)
+
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        tgt = (np.uint32(r) << 16) | (np.uint32(g) << 8) | np.uint32(b)
+        idx[packed == tgt] = np.uint8(pid)
 
     # Fingerprint: mapping (stable) + pixels (stable) => color-invariant across GT jobs
     pixel_bytes = idx.tobytes(order="C")
@@ -305,7 +266,7 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
         if int(pid) == 0:
             continue
         cn = id_to_class.get(str(int(pid)))
-        if cn and cn not in LOWERCASE_BG_NAMES_POSSIBLE:
+        if cn and cn != 'bg':
             classes_present.append(cn)
 
     # de-dupe preserve order (unique already, but keep your pattern)
@@ -329,14 +290,12 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     out_img.save(buf, format="PNG")
 
     png_uri = write_s3_obj(file_bucket_name, png_key, buf.getvalue(), "image/png", TASK_NAME)
-
     meta_uri = write_s3_obj(file_bucket_name, meta_key, json.dumps({"id_to_class": id_to_class}), "application/json", TASK_NAME)
 
     return [png_uri, meta_uri], classes_present, label_fingerprint
 
 def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
-    meta = line.get("instance-segmentation-metadata", {})
-    wrr = meta.get("worker-response-ref")
+    wrr = line.get("worker_response_ref")
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):
         raise ValueError(f"{TASK_NAME} instance: worker-response-ref missing/invalid")
 
@@ -450,7 +409,7 @@ def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name
         if int(pid) == 0:
             continue
         cn = id_to_class.get(str(int(pid)))
-        if cn and cn not in LOWERCASE_BG_NAMES_POSSIBLE:
+        if cn and cn != 'bg':
             classes_present.append(cn)
 
     # de-dupe preserve order

@@ -22,7 +22,7 @@ ALLOWED_LABEL_TYPES = {
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation",
+    "instance-segmentation"
 }
 
 TASK_NAME = "[UPLOAD_KICKOFF]"
@@ -153,7 +153,7 @@ def handler(event, context):
         registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from manifest", level='error')
+        log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json", level='error')
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
     if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
