@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List, Tuple, Iterable, Set, Optional
+from typing import Dict, List, Tuple, Iterable, Set
 import boto3
 
 from common.logging_utils import log

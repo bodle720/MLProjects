@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 
 from common.logging_utils import log
 from common.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
-from helpers import infer_dtype, create_and_save_labels, stable_uuid5
+from helpers import infer_dtype, create_and_save_labels, stable_uuid5, parse_json_object_line
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
 JOB_ID = os.environ["JOB_ID"]
@@ -268,10 +268,10 @@ def main():
             continue
 
         try:
-            line = json.loads(s)
-        except json.JSONDecodeError as e:
+            line = parse_json_object_line(s)
+        except Exception as e:
             # malformed JSON -> failed row
-            line = {"issue": f"invalid JSON: {e.msg} (pos={e.pos}), raw =  {s}"}
+            line = {"issue": f"invalid JSON: {e}, raw =  {s}"}
 
         if not isinstance(line, dict):
             # non-dict JSON -> failed row (still preserves line count)

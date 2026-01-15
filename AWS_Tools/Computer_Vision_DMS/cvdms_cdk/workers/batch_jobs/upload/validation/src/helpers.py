@@ -3,7 +3,7 @@ import json
 import base64
 import uuid
 import hashlib
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import boto3
 from PIL import Image
@@ -19,6 +19,15 @@ s3 = boto3.client("s3")
 
 def stable_uuid5(seed: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+def parse_json_object_line(line) -> Optional[Dict]:
+    def _bad_const(x: str):
+        raise ValueError(f"Invalid JSON constant: {x}")  # NaN/Infinity
+    try:
+        parsed = json.loads(line, parse_constant=_bad_const)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 def normalize_numeric_4(v) -> str:
     try:
@@ -59,11 +68,18 @@ def infer_dtype(img) -> str:
 
 def normalize_hex(h: str) -> str:
     h = h.strip().lower()
+
+    if len(h) != 7:
+        raise ValueError(f"{TASK_NAME} Bad hex color: {h}, length must be 7")
+
     if not h.startswith("#"):
-        raise ValueError(f"Bad hex color: {h}")
-    if len(h) == 7:
-        return h
-    raise ValueError(f"{TASK_NAME} Bad hex color: {h}")
+        raise ValueError(f"Bad hex color: {h}, no # sign as first character")
+
+    hexpart = h[1:]
+    if any(c not in "0123456789abcdef" for c in hexpart):
+        raise ValueError(f"Bad hex color: {h}, non hex digits")
+
+    return h
 
 def create_and_save_labels(line: dict,
                            label_type: str,
@@ -72,6 +88,7 @@ def create_and_save_labels(line: dict,
     try:
         if label_type == "single-label" or label_type == "multi-label":
             label_ls = line.get("labels", [])
+
             if not label_ls:
                 return [], [], None, f"empty labels list for {label_type} type"
             elif not isinstance(label_ls, list):
@@ -80,7 +97,10 @@ def create_and_save_labels(line: dict,
                 return [], [], None, "labels list for single label type is not len 1"
             elif not all(isinstance(cn, str) and cn.strip() for cn in label_ls):
                 return [], [], None, f"labels list values for label type {label_type} are not all non-empty strings"
-            return [], [cn.strip().lower() for cn in label_ls], None, None
+
+            normed_labels = [cn.strip().lower() for cn in label_ls]
+            labels = sorted(list(set(normed_labels)))
+            return [], labels, None, None
         elif label_type == "object-detection":
             paths, classes_present, label_fingerprint = create_object_detection_label(line, job_id, file_bucket_name)
             return paths, classes_present, label_fingerprint, None
@@ -113,13 +133,19 @@ def create_object_detection_label(line: dict, job_id: str, file_bucket_name: str
             raise ValueError(f"{TASK_NAME} object-detection invalid class: {cn}")
 
         class_name = cn.strip().lower()
+        if class_name in {"bg", "background"}:
+            raise ValueError(f"{TASK_NAME} object: reserved class name used: {class_name}")
+
         classes_present.append(class_name)
 
         coords = {}
         for f in ("top", "left", "height", "width"):
             v = ann.get(f)
 
-            if not v or not isinstance(v, (int, float, str)):
+            if v is None or not isinstance(v, (int, float, str)):
+                raise ValueError(f"{TASK_NAME} object-detection annotation bbox field {f} must be present and numeric")
+
+            if isinstance(v, str) and not v.strip():
                 raise ValueError(f"{TASK_NAME} object-detection annotation bbox field {f} must be present and numeric")
 
             v = normalize_numeric_4(v) # type str
@@ -182,7 +208,7 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     if not isinstance(color_map, dict) or len(color_map) == 0:
         raise ValueError(f"{TASK_NAME} semantic color_map missing/empty")
 
-    # Build class_name -> set(hex_colors), require a background class
+    # Build class_name -> set(hex_colors)
     class_to_hex: dict[str, str] = {}
     for cn, hc_ls in color_map.items():
         if not isinstance(cn, str) or not cn.strip():
@@ -194,15 +220,22 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
             raise ValueError(f"{TASK_NAME} semantic color map has hex list of len greater than 1")
 
         cn = cn.strip().lower()
+
+        if cn in {"bg", "background"}:
+            raise ValueError(f"{TASK_NAME} semantic: v1 color_map must not include '{cn}' (reserved)")
+
         hc = normalize_hex(hc_ls[0])
         class_to_hex[cn] = hc
 
     hex_to_class: dict[str, str] = {}
     for cls, hexval in class_to_hex.items():
+        if hexval in hex_to_class and hex_to_class[hexval] != cls:
+            raise ValueError("duplicate hex-color assigned to multiple classes")
         hex_to_class[hexval] = cls
 
+
     # Deterministic class IDs by CLASS NAME ONLY (color-independent)
-    all_classes = sorted([c for c in class_to_hex.keys()])
+    all_classes = sorted([c for c in class_to_hex.keys() if c not in {"bg", "background"}])
 
     id_to_class: dict[str, str] = {"0": "bg"}
     class_to_id: dict[str, int] = {"bg": 0}
@@ -219,7 +252,7 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     mb, mk = parse_s3_uri(mask_ref, TASK_NAME)
     resp = read_obj_with_retry(mb, mk, TASK_NAME)
     if resp is None:
-        raise ValueError(f"{TASK_NAME} semantic-segmentation-ref unable to be loaded with retry: {mask_ref}, parsed bucket = {mb}, parsed key = {mk}")
+        raise ValueError(f"{TASK_NAME} mask_ref unable to be loaded with retry: {mask_ref}, parsed bucket = {mb}, parsed key = {mk}")
 
     mask_bytes = resp["Body"].read()
     rgb = np.array(Image.open(io.BytesIO(mask_bytes)).convert("RGB"), dtype=np.uint8)
@@ -269,7 +302,7 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
         if cn and cn != 'bg':
             classes_present.append(cn)
 
-    # de-dupe preserve order (unique already, but keep your pattern)
+    # de-dupe preserve order (unique already, but keep pattern)
     seen = set()
     uniq = []
     for c in classes_present:
@@ -297,15 +330,18 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
 def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name: str) -> tuple[list[str], list[str], str]:
     wrr = line.get("worker_response_ref")
     if not isinstance(wrr, str) or not wrr.startswith("s3://"):
-        raise ValueError(f"{TASK_NAME} instance: worker-response-ref missing/invalid")
+        raise ValueError(f"{TASK_NAME} instance: worker_response_ref missing/invalid")
 
     wb, wk = parse_s3_uri(wrr, TASK_NAME)
     resp = read_obj_with_retry(wb, wk, TASK_NAME)
     if resp is None:
-        raise ValueError(f"{TASK_NAME} worker-response-ref unable to be loaded with retry: {wrr}, parsed bucket = {wb}, parsed key = {wk}")
+        raise ValueError(f"{TASK_NAME} worker_response_ref unable to be loaded with retry: {wrr}, parsed bucket = {wb}, parsed key = {wk}")
 
     wrr_bytes = resp["Body"].read()
-    wrr_json = json.loads(wrr_bytes.decode("utf-8"))
+    wrr_json = parse_json_object_line(wrr_bytes.decode("utf-8"))
+
+    if wrr_json is None:
+        raise ValueError(f"{TASK_NAME} instance: worker_response_ref is not valid strict JSON")
 
     answers = wrr_json.get("answers", [])
     if not isinstance(answers, list) or not answers:
@@ -334,7 +370,12 @@ def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name
         if hc in seen_colors:
             raise ValueError(f"{TASK_NAME} duplicate instance color in worker response: {hc}")
         seen_colors.add(hc)
-        parsed.append((hc, lab.strip().lower()))
+
+        lab = lab.strip().lower()
+        if lab in {"bg", "background"}:
+            raise ValueError(f"{TASK_NAME} instance: reserved class name used: {lab}")
+
+        parsed.append((hc, lab))
 
     if not parsed:
         raise ValueError(f"{TASK_NAME} instance: no valid instances parsed from worker response")
@@ -409,7 +450,7 @@ def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name
         if int(pid) == 0:
             continue
         cn = id_to_class.get(str(int(pid)))
-        if cn and cn != 'bg':
+        if cn and cn not in {"bg", "background"}:
             classes_present.append(cn)
 
     # de-dupe preserve order

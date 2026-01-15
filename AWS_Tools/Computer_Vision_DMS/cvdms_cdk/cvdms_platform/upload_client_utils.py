@@ -171,6 +171,12 @@ def _csv_to_gt_single_label(csv_file: Path, out_tmp: Path) -> None:
             src = (row.get("source-ref") or "").strip()
             cn = (row.get("class-name") or "").strip()
 
+            if not cn:
+                raise ValueError(f"CSV line {i}: class name cannot be empty")
+
+            if cn.lower() in _RESERVED_CLASS_NAMES_LC:
+                raise ValueError(f"CSV line {i}: Reserved class name used: {cn}")
+
             obj = {
                 "source-ref": src,
                 "single-label": 0 if cn else -1,  # value ignored later; keep GT-like
@@ -201,6 +207,13 @@ def _csv_to_gt_multi_label(csv_file: Path, out_tmp: Path) -> None:
                 continue
 
             labels = [x.strip() for x in labels_raw.split(",") if x.strip()]
+
+            for lab in labels:
+                if not lab:
+                    raise ValueError(f"CSV line {i}: class name cannot be empty")
+                if lab.lower() in _RESERVED_CLASS_NAMES_LC:
+                    raise ValueError(f"CSV line {i}: Reserved class name used: {lab}")
+
             # stable ids: sort labels for determinism
             labels = sorted(set(labels))
             class_map = {str(idx): name for idx, name in enumerate(labels)}
@@ -226,15 +239,30 @@ def _csv_to_gt_object_detection(csv_file: Path, out_tmp: Path) -> None:
         for i, row in enumerate(reader, start=2):
             src = (row.get("source-ref") or "").strip()
             cn = (row.get("class-name") or "").strip()
+
             if not cn:
                 raise ValueError(f"CSV line {i}: object-detection class-name cannot be empty")
 
+            if cn.lower() in _RESERVED_CLASS_NAMES_LC:
+                raise ValueError(f"Reserved class name used: {cn}, line = {i}")
+
+            top = _parse_number_json(row.get("top"), i, "top")
+            left = _parse_number_json(row.get("left"), i, "left")
+            height = _parse_number_json(row.get("height"), i, "height")
+            width = _parse_number_json(row.get("width"), i, "width")
+
+            if top < 0 or left < 0:
+                raise ValueError(f"CSV line {i}: top, left cannot be negative")
+
+            if height <= 0 or width <= 0:
+                raise ValueError(f"CSV line {i}: height, width cannot be negative or 0")
+
             ann = {
                 "class_name": cn,
-                "top": _parse_number_field(row.get("top"), i, "top"),
-                "left": _parse_number_field(row.get("left"), i, "left"),
-                "height": _parse_number_field(row.get("height"), i, "height"),
-                "width": _parse_number_field(row.get("width"), i, "width"),
+                "top": top,
+                "left": left,
+                "height": height,
+                "width": width,
             }
             groups[src].append(ann)
 
@@ -285,6 +313,19 @@ def _csv_to_gt_semantic_seg(csv_file: Path, out_tmp: Path) -> None:
             if not isinstance(cm, dict) or not cm:
                 raise ValueError(f"CSV line {i}: color_map must be a non-empty JSON object")
 
+            bg_keys = [
+                str(k).strip().lower()
+                for k in cm.keys()
+                if str(k).strip().lower() in _RESERVED_CLASS_NAMES_LC
+            ]
+
+            # must have exactly one bg-ish key
+            if len(bg_keys) == 0:
+                raise ValueError(f"CSV line {i}: semantic color_map must include exactly one of 'bg' or 'background'")
+            if len(bg_keys) > 1:
+                raise ValueError(
+                    f"CSV line {i}: semantic color_map must include only one background key, found: {bg_keys}")
+
             # build internal-color-map GT shape with numeric keys
             icm: Dict[str, Dict[str, Any]] = {}
             k = 0
@@ -302,7 +343,11 @@ def _csv_to_gt_semantic_seg(csv_file: Path, out_tmp: Path) -> None:
                 color = colors_list[0]
                 _require_hex_rrggbb(color, f"CSV line {i}: color_map[{class_name}]")
 
-                icm[str(k)] = {"class-name": str(class_name), "hex-color": color}
+                cn = str(class_name).strip()
+                if not cn:
+                    raise ValueError(f"CSV line {i}: empty class name")
+
+                icm[str(k)] = {"class-name": cn, "hex-color": color}
                 k += 1
 
             obj = {
@@ -347,12 +392,12 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
         cn = meta.get("class-name")
         if not isinstance(cn, str):
             return False, None, f"Line {lineno}: 'single-label-metadata.class-name' must be a string (can be empty)."
-        cn = cn.strip()
+        cn = cn.strip().lower()
         if cn == "":
             return True, None, ""  # skip empty
 
         if cn in _RESERVED_CLASS_NAMES_LC:
-            return True, None, ""  # skip empty
+            return False, None, f"Line {lineno}: 'single-label-metadata.class-name' is a reserved class name."
 
         v1 = dict(v1_base)
         v1["labels"] = [cn]
@@ -391,15 +436,18 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
         # Validate every id in ml exists in class_map (stringified)
         labels: List[str] = []
         for idx, class_id in enumerate(ml):
+            class_id = _parse_int_json(class_id, lineno, f"multi-label[{idx}]")
+
             if not isinstance(class_id, int):
                 return False, None, f"Line {lineno}: multi-label[{idx}] must be an integer class id."
+
             key = str(class_id)
             if key not in class_map:
                 return False, None, f"Line {lineno}: class id {class_id} missing from multi-label-metadata.class-map."
             labels.append(class_map[key].strip().lower())
 
         # Normalize: dedup + sort for determinism
-        labels = sorted(set(labels))
+        labels = sorted(list(set(labels)))
         if len(labels) == 0:
             # should not happen given consistency checks, but keep strict
             return True, None, ""
@@ -425,8 +473,8 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
         if not isinstance(class_map, dict):
             return False, None, f"Line {lineno}: 'object-detection-metadata.class-map' must be an object/dict."
         for _, v in class_map.items():
-            if not isinstance(v, str) or v.strip() == "":
-                return False, None, f"Line {lineno}: object-detection class-map values must be non-empty strings."
+            if not isinstance(v, str) or not v.strip() or v.strip().lower() in _RESERVED_CLASS_NAMES_LC:
+                return False, None, f"Line {lineno}: object-detection class-map values must be non-empty strings and not one of {_RESERVED_CLASS_NAMES_LC}."
 
         boxes = []
         for i, ann in enumerate(annotations):
@@ -436,31 +484,32 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
             for field in ("top", "left", "height", "width"):
                 if field not in ann:
                     return False, None, f"Line {lineno}: annotation[{i}] missing required field '{field}'."
-                if not isinstance(ann[field], (int, float)):
-                    return False, None, f"Line {lineno}: annotation[{i}].{field} must be a number."
 
-                if field in ["top", "left"] and ann[field] < 0:
+                try:
+                    v = _parse_number_json(ann[field], lineno, f"annotation[{i}].{field}")
+                except ValueError as e:
+                    return False, None, str(e)
+
+                if field in ["top", "left"] and v < 0:
                     return False, None, f"Line {lineno}: annotation[{i}].{field} must be non-negative."
 
-                if field in ["height", "width"] and ann[field] <= 0:
+                if field in ["height", "width"] and v <= 0:
                     return False, None, f"Line {lineno}: annotation[{i}].{field} must be a positive number."
 
-
-            if not _is_finite_number(ann[field]):
-                return False, None, f"Line {lineno}: annotation[{i}].{field} must be a finite number (not NaN/Infinity)."
+                ann[field] = v
 
             if "class_id" not in ann:
                 return False, None, f"Line {lineno}: annotation[{i}] missing required field 'class_id'."
             if not isinstance(ann["class_id"], int):
                 return False, None, f"Line {lineno}: annotation[{i}].class_id must be an integer."
 
-            cid = ann["class_id"]
+            cid = _parse_int_json(ann["class_id"], lineno, f"annotation[{i}].class_id")
             cid_key = str(cid)
             if cid_key not in class_map:
                 return False, None, f"Line {lineno}: annotation[{i}] class_id {cid} missing from object-detection-metadata.class-map."
 
             boxes.append({
-                "class_name": class_map[cid_key].strip(),
+                "class_name": class_map[cid_key].strip().lower(),
                 "top": ann["top"],
                 "left": ann["left"],
                 "height": ann["height"],
@@ -488,22 +537,43 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
 
         # Build v1 color_map: class_name -> [hex] (max 1 for semantic seg)
         color_map: Dict[str, List[str]] = {}
+        saw_bg = False
+        bg_count = 0
+        seen_cn = set()
         for k, v in icm.items():
             if not isinstance(v, dict):
                 return False, None, f"Line {lineno}: internal-color-map['{k}'] must be an object."
+
             cn = v.get("class-name")
             hc = v.get("hex-color")
+
             if not isinstance(cn, str) or cn.strip() == "":
                 return False, None, f"Line {lineno}: internal-color-map['{k}'].class-name must be a non-empty string."
             if not isinstance(hc, str):
                 return False, None, f"Line {lineno}: internal-color-map['{k}'].hex-color must be a string."
+
             _require_hex_rrggbb(hc, f"Line {lineno}: internal-color-map['{k}'].hex-color")
 
-            cn = cn.strip()
-            if cn in color_map:
-                # semantic seg should not repeat classes with multiple colors
-                return False, None, f"Line {lineno}: semantic internal-color-map repeats class-name '{cn}'."
+            cn = cn.strip().lower()
+            if cn in seen_cn:
+                return False, None, f"Line {lineno}: semantic internal-color-map repeats class-name {cn}"
+
+            seen_cn.add(cn)
+
+            if cn in _RESERVED_CLASS_NAMES_LC:
+                bg_count += 1
+                if bg_count > 1:
+                    return False, None, f"Line {lineno}: semantic internal-color-map must include exactly one of 'bg' or 'background'."
+                saw_bg = True
+                continue
+
             color_map[cn] = [hc]
+
+        if not saw_bg:
+            return False, None, f"Line {lineno}: semantic internal-color-map must include 'bg' or 'background'."
+
+        if not color_map:
+            return False, None, f"Line {lineno}: semantic color_map has no non-background classes."
 
         v1 = dict(v1_base)
         v1["mask_ref"] = mask_ref
@@ -553,13 +623,13 @@ def _unique_sibling_path(original: Path, *, suffix: str) -> Path:
     raise RuntimeError("Unable to choose a unique converted output path.")
 
 def _parse_json_object_line(*, line: str) -> Optional[Dict[str, Any]]:
+    def _bad_const(x: str):
+        raise ValueError(f"Invalid JSON constant: {x}")  # NaN/Infinity
     try:
-        parsed = json.loads(line)
-    except json.JSONDecodeError:
+        parsed = json.loads(line, parse_constant=_bad_const)
+    except Exception:
         return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
+    return parsed if isinstance(parsed, dict) else None
 
 def _safe_unlink(p: Path) -> None:
     try:
@@ -617,16 +687,35 @@ def _require_columns(reader: csv.DictReader, required: set) -> None:
     if missing:
         raise ValueError(f"CSV missing required columns: {sorted(missing)}. Found: {sorted(headers)}")
 
-def _parse_number_field(val: Any, line_no: int, field: str) -> float:
-    if val is None:
-        raise ValueError(f"CSV line {line_no}: missing '{field}'")
-    s = str(val).strip()
-    if s == "":
-        raise ValueError(f"CSV line {line_no}: empty '{field}'")
-    try:
-        return float(s)
-    except ValueError:
-        raise ValueError(f"CSV line {line_no}: '{field}' must be a number (got '{s}')")
+def _parse_number_json(val: Any, lineno: int, context: str) -> float:
+    # Accept int/float or numeric strings; reject NaN/Infinity
+    if isinstance(val, (int, float)):
+        x = float(val)
+    elif isinstance(val, str):
+        s = val.strip()
+        if s == "":
+            raise ValueError(f"Line {lineno}: {context} is empty string.")
+        try:
+            x = float(s)
+        except ValueError:
+            raise ValueError(f"Line {lineno}: {context} must be numeric (got '{val}').")
+    else:
+        raise ValueError(f"Line {lineno}: {context} must be a number or numeric string (got {type(val).__name__}).")
 
-def _is_finite_number(x) -> bool:
-    return isinstance(x, (int, float)) and math.isfinite(float(x))
+    if not math.isfinite(x):
+        raise ValueError(f"Line {lineno}: {context} must be finite (not NaN/Infinity).")
+    return x
+
+def _parse_int_json(val: Any, lineno: int, context: str) -> int:
+    if isinstance(val, int) and not isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        if s == "":
+            raise ValueError(f"Line {lineno}: {context} is empty string.")
+        try:
+            i = int(s)
+        except ValueError:
+            raise ValueError(f"Line {lineno}: {context} must be an integer (got '{val}').")
+        return i
+    raise ValueError(f"Line {lineno}: {context} must be an integer or integer-string (got {type(val).__name__}).")
