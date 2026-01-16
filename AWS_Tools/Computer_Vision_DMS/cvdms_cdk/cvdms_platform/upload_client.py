@@ -1,3 +1,79 @@
+'''
+Ground Truth JSONL input semantics expected by validate_manifest() / _gt_row_to_v1()
+
+General (all label types)
+- Input is JSON Lines (one JSON object per non-empty line).
+- Strict JSON parsing: NaN/Infinity are rejected.
+- Each line MUST include "source-ref" as a strict s3://bucket/key URI (no surrounding whitespace).
+- "source-ref" MUST end with one of: .jpg, .jpeg, .png (case-insensitive).
+
+Skip rules (ONLY for: single-label, multi-label, object-detection)
+- single-label: skip if class-name is empty after strip()
+- multi-label:  skip if class-map is an empty dict {}
+- object-detection: skip if annotations is an empty list []
+- semantic-segmentation / instance-segmentation: no skip permitted; missing/invalid => error
+
+Label-type specifics:
+
+1) single-label
+  Required keys:
+    - "single-label-metadata": { "class-name": <string> }
+  Rules:
+    - class-name is normalized: strip().lower()
+    - class-name MUST be non-empty to keep the row
+    - class-name MUST NOT be in _RESERVED_CLASS_NAMES_LC (currently {"bg","background"})
+
+2) multi-label
+  Required keys:
+    - "multi-label-metadata": { "class-map": { <id_str>: <class_name_str>, ... } }
+  IMPORTANT ASSUMPTION:
+    - class-map is scoped to the IMAGE (not dataset-wide): every present value is a label.
+    - The GT "multi-label": [...] field is treated as redundant/ignored.
+  Rules:
+    - class-map values MUST be non-empty strings
+    - values normalized: strip().lower()
+    - values MUST NOT be in _RESERVED_CLASS_NAMES_LC
+    - v1 labels = sorted(set(values)) for determinism
+    - skip if class-map is {}
+
+3) object-detection
+  Required keys:
+    - "object-detection": { "annotations": [ {class_id, top, left, height, width}, ... ] }
+    - "object-detection-metadata": { "class-map": { <class_id_str>: <class_name_str>, ... } }
+  Rules:
+    - annotations must be a list; skip if []
+    - each annotation requires fields: class_id, top, left, height, width
+    - top/left/height/width accept int/float/numeric-string; must be finite (no NaN/Infinity)
+    - top,left >= 0; height,width > 0
+    - class_id must be integer-like and must exist in class-map
+    - class-map values normalized: strip().lower(); must be non-empty and not reserved
+
+4) semantic-segmentation
+  Required keys:
+    - "semantic-segmentation-ref": <s3://... .png>
+    - "semantic-segmentation-ref-metadata": {
+          "internal-color-map": {
+              <id>: {"class-name": <string>, "hex-color": "#RRGGBB", ...}, ...
+          }
+      }
+  Background policy:
+    - internal-color-map MUST include exactly one class-name equal to "bg" or "background"
+      (case-insensitive). v1 output EXCLUDES that background entry.
+  Rules:
+    - mask ref must end with .png (case-insensitive)
+    - each class-name must be non-empty after strip().lower()
+    - class-name must be unique (case-insensitive) across entries
+    - hex-color must be valid "#RRGGBB"
+    - no skip permitted
+
+5) instance-segmentation
+  Required keys:
+    - "instance-segmentation-metadata": { "worker-response-ref": <s3://... .json> }
+  Rules:
+    - worker-response-ref must be a valid S3 URI ending in .json
+    - no skip permitted
+'''
+
 import json
 import uuid
 import logging
@@ -11,7 +87,7 @@ from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 from cvdms_platform.upload_client_utils import validate_manifest
 
-ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
+_ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
 
 class UploadClient:
     """
@@ -234,13 +310,13 @@ class UploadClient:
         High-level operation a caller will use. Steps:
           1) try to acquire lock
           2) create job row with status=PENDING
-          3) read manifest and return job_id for caller to continue
+          3) read, validate, and uploaded standardized manifest and return job_id for caller to continue
         Returns {"job_id": ...} on success; {"error": ...} on failure.
 
         This method keeps errors explicit so callers can decide to retry or inspect.
         """
-        if label_type not in ALLOWED_LABEL_TYPES:
-            return {"error": f"Invalid label type: {label_type}, must be one of {ALLOWED_LABEL_TYPES}"}
+        if label_type not in _ALLOWED_LABEL_TYPES:
+            return {"error": f"Invalid label type: {label_type}, must be one of {_ALLOWED_LABEL_TYPES}"}
 
         # try to acquire lock
         ok, holder_or_err = self._acquire_lock()
