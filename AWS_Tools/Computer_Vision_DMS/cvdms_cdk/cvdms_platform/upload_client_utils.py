@@ -28,11 +28,14 @@ semantic-segmentation:
     "color_map": {<string class name>: <single-element list of hex color in the mask>, ...}
 
 instance-segmentation:
-    "worker_response_ref": <valis S3 URI pointing to a .json file containing the PNG mask data>
+    "worker_response_ref": <valid S3 URI pointing to a .json file containing the PNG mask data>
 
 CSV expected structures:
 ------------------------
 For object-detection CSV input, rows must be grouped by source-ref (all boxes for an image contiguous).
+
+For semantic-segmentation CSV input, the color_map field is expected to be identical across images (essentially a dataset-wide mapping, regardless of classes
+present in that particular image itself)
 
 single-label: "source-ref", "class-name"
 multi-label: "source-ref", "labels"

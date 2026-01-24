@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+'''
+Memory is O(batch size), not O(1), because process_image accumulates the whole shard in memory. We can change to a more strategic
+processing and writing strategy, but as long as shard size and memory size are reasonable, we will keep it this way. Note for future change.
+'''
+
 import os
 import io
 import re
