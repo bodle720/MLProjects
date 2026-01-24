@@ -5,6 +5,11 @@
 logs/
 api_logs/
 sample/
+*.log
+
+# Run artifacts
+*.parquet
+ec2_results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
