@@ -7,12 +7,7 @@ from common.logging_utils import log
 from common.athena_utils import athena_count_job_rows, drop_table_if_exists
 
 from common.table_schemas import (
-    UPLOAD_STAGING_TABLE_NAME,
-    CANONICAL_IMAGERY_TABLE_NAME,
-    IMAGE_LABELS_TABLE_NAME,
-    CANONICAL_BBOX_TABLE_NAME,
-    CANONICAL_SEMANTIC_TABLE_NAME,
-    CANONICAL_INSTANCE_TABLE_NAME,
+    UPLOAD_STAGING_TABLE_NAME
 )
 
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]

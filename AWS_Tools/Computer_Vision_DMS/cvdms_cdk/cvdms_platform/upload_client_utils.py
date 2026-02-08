@@ -1,5 +1,5 @@
 '''
-Enforces 'v1' formatted manifest uploads for the upload workflow, that the validation batch job expects.
+Enforces 'v1' formatted manifest uploads for the upload workflow that the validation batch job expects.
 Class names are always lowercases with no trailing or leading spaces.
 
 Shared fields:
@@ -51,8 +51,7 @@ import json
 
 import math
 from pathlib import Path
-from collections import defaultdict
-from typing import Any, Dict, Optional, Tuple, List, DefaultDict
+from typing import Any, Dict, Optional, Tuple, List
 
 _V1_SCHEMA = "cvdms.manifest.v1"
 _ALLOWED_EXTS_LC = {".jsonl", ".ndjson", ".manifest", ".csv"}

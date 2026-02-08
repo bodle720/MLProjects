@@ -315,7 +315,7 @@ class StorageStack(Stack):
         dlq = sqs.Queue(
             self, "GlobalDeadLetterQueue",
             retention_period=Duration.days(14),
-            visibility_timeout=Duration.minutes(5),
+            visibility_timeout=Duration.minutes(15),
             removal_policy=RemovalPolicy.DESTROY
         )
 
@@ -393,7 +393,7 @@ class StorageStack(Stack):
                        )
 
         upload_events_queue = sqs.Queue(self, "UploadEventsQueue",
-                                        visibility_timeout=Duration.minutes(5),
+                                        visibility_timeout=Duration.minutes(15),
                                         retention_period=Duration.days(4))
 
         file_bucket.add_event_notification(

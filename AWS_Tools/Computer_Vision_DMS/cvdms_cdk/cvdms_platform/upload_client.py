@@ -339,6 +339,7 @@ class UploadClient:
 
         # Validate the manifest. Ensure it has the expected structure and s3 uri's are valid (formatted correctly).
         validation_dict = validate_manifest(manifest_path, label_type)
+
         if not validation_dict.get('success'):
             err = validation_dict.get('error')
             # mark job failed and release lock
@@ -355,6 +356,7 @@ class UploadClient:
         total_nonempty = validation_dict["total_nonempty"]
 
         logging.info(f'Manifest validated, skipped row count = {skipped_count}, kept row count = {kept_count}, total nonempty row count = {total_nonempty}')
+
         if skipped_count > 0:
             logging.info(f"Skipped rows, so needed to save filtered manifest to: {manifest_path}")
 

@@ -1,15 +1,10 @@
 import json
 import time
 import logging
-import math
-from decimal import Decimal
-from datetime import datetime, date
-from typing import List, Iterator, Union, Any, Iterable, Mapping, Optional, Sequence, Dict
+from typing import List, Iterator, Union, Any, Mapping, Optional, Sequence
 
 import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionClosedError
-import pyarrow.dataset as ds
-import s3fs
 
 logger = logging.getLogger(__name__)
 
@@ -311,47 +306,6 @@ def s3_copy_with_retry(src_bucket: str,
             time.sleep(min(base_delay * (2 ** attempt), 5.0))
     raise RuntimeError(f"{task_name} S3 copy failed after retries: s3://{src_bucket}/{src_key} -> s3://{dst_bucket}/{dst_key}: {last_err}")
 
-def to_jsonable(v: Any) -> Any:
-    if v is None:
-        return None
-
-    if hasattr(v, "to_pydatetime"):
-        v = v.to_pydatetime()
-
-    if hasattr(v, "as_py"):
-        v = v.as_py()
-
-    if isinstance(v, datetime):
-        return v.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-
-    if isinstance(v, date):
-        return v.isoformat()
-
-    if isinstance(v, Decimal):
-        f = float(v)
-        return None if not math.isfinite(f) else f
-
-    if isinstance(v, float):
-        return None if not math.isfinite(v) else v
-
-    if isinstance(v, (bytes, bytearray)):
-        return v.decode("utf-8", errors="replace")
-
-    return v
-
-def normalize_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: to_jsonable(v) for k, v in row.items()}
-
-def read_parquet_rows_from_s3_uris(s3_uris: Iterable[str]) -> Iterator[dict[str, Any]]:
-    fs = s3fs.S3FileSystem()
-    for uri in s3_uris:
-        path = uri.replace("s3://", "", 1)
-        dataset = ds.dataset(path, filesystem=fs, format="parquet")
-        scanner = dataset.scanner(batch_size=10_000, use_threads=True)
-        for batch in scanner.to_batches():
-            for row in batch.to_pylist():
-                yield normalize_row(row)
-
 def get_key_basename(key: str) -> str:
     return key.rsplit("/", 1)[-1]
 
@@ -364,10 +318,3 @@ def s3_delete_best_effort(bucket: str, key: str) -> None:
     except Exception:
         # best effort: swallow
         pass
-
-def jsonl_stream_to_s3(bucket: str, key: str, rows: Iterable[Dict[str, Any]]) -> None:
-    fs = s3fs.S3FileSystem()
-    path = f"s3://{bucket}/{key}"
-    with fs.open(path, "wb", block_size=8 * 1024 * 1024) as f:  # 8MB parts
-        for r in rows:
-            f.write((json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"))

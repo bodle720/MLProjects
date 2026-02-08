@@ -181,18 +181,18 @@ class ImageUploadStack(Stack):
             .next(validation_stage.map_state) \
             .next(validation_ingest_stage.pre_ingest_task) \
             .next(validation_ingest_stage.map_state) \
-            .next(validation_ingest_stage.post_ingest_task) \
-            .next(deduplication_stage.batching_task) \
-            .next(deduplication_stage.map_state) \
-            .next(deduplication_ingest_stage.pre_ingest_task) \
-            .next(deduplication_ingest_stage.map_state) \
-            .next(deduplication_ingest_stage.post_ingest_task) \
-            .next(registration_stage.batching_task) \
-            .next(registration_stage.map_state) \
-            .next(registration_ingest_stage.pre_ingest_task) \
-            .next(registration_ingest_stage.map_state) \
-            .next(registration_ingest_stage.post_ingest_task) \
-            .next(cleanup_task)
+            .next(validation_ingest_stage.post_ingest_task)
+            # .next(deduplication_stage.batching_task) \
+            # .next(deduplication_stage.map_state) \
+            # .next(deduplication_ingest_stage.pre_ingest_task) \
+            # .next(deduplication_ingest_stage.map_state) \
+            # .next(deduplication_ingest_stage.post_ingest_task) \
+            # .next(registration_stage.batching_task) \
+            # .next(registration_stage.map_state) \
+            # .next(registration_ingest_stage.pre_ingest_task) \
+            # .next(registration_ingest_stage.map_state) \
+            # .next(registration_ingest_stage.post_ingest_task) \
+            # .next(cleanup_task)
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),

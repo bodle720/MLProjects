@@ -472,8 +472,7 @@ def delete_job_rows_from_table(job_id: str,
                                 athena_output_s3: str,
                                 athena_workgroup: str,
                                 poll_interval: Union[int,float] = 5,
-                                timeout_seconds: Union[int,float] = 1800,
-                                run_compaction: bool = True) -> dict:
+                                timeout_seconds: Union[int,float] = 1800) -> dict:
     """
     Delete all rows for a given job_id from an Iceberg table and optionally compact.
     Returns a dict with query ids and final states for DELETE and OPTIMIZE.
@@ -499,22 +498,6 @@ def delete_job_rows_from_table(job_id: str,
         "delete_state": delete_result["state"],
         "delete_resp": delete_result["response"]
     }
-
-    # 2) Optional: compact / rewrite data for that partition to remove position deletes
-    #    Use OPTIMIZE ... REWRITE DATA USING BIN_PACK WHERE job_id = '...'
-    #    (WHERE may only reference partition columns; job_id is partitioned in your table)
-    if run_compaction and delete_result["state"] == "SUCCEEDED":
-        optimize_sql = f"OPTIMIZE {full_table} REWRITE DATA USING BIN_PACK WHERE job_id = '{safe_job_id}'"
-        opt_qid, opt_result = run_athena(optimize_sql,
-                                              f"{task_name} OPTIMIZE",
-                                               athena_output_s3,
-                                               athena_workgroup,
-                                               poll_interval,
-                                               timeout_seconds)
-        result.update({
-            "optimize_query_id": opt_qid,
-            "optimize_result": opt_result
-        })
 
     return result
 

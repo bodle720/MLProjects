@@ -3,7 +3,7 @@ import json
 import base64
 import uuid
 import hashlib
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 import boto3
 from PIL import Image

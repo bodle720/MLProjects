@@ -1,18 +1,14 @@
-from typing import Any, Dict, List, Optional, Tuple, Iterable
-import json
+from typing import Any, Dict, List, Optional, Tuple
 import hashlib
-
-import s3fs
 
 from common.s3_utils import (
     make_s3_uri,
     parse_s3_uri,
     get_key_basename,
-    s3_copy_with_retry,
+    s3_copy_with_retry
 )
 
 TASK_NAME = "[REG_JOB_DEF_HELPER]"
-
 
 def split_ext(filename: str) -> Tuple[str, str]:
     if "." not in filename:
@@ -124,6 +120,20 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "uploaded_at": registration_time,
         "data_source": row.get("data_source"),
         "sha256_hash": row.get("sha256_hash"),
+        "luma_mean": row.get("luma_mean"),
+        "luma_p10": row.get("luma_p10"),
+        "luma_p90": row.get("luma_p90"),
+        "dark_frac": row.get("dark_frac"),
+        "bright_frac": row.get("bright_frac"),
+        "contrast_luma_std": row.get("contrast_luma_std"),
+        "contrast_luma_p90_p10": row.get("contrast_luma_p90_p10"),
+        "blur_laplacian_var": row.get("blur_laplacian_var"),
+        "sat_mean": row.get("sat_mean"),
+        "colorfulness": row.get("colorfulness"),
+        "lighting_bucket": row.get("lighting_bucket"),
+        "blur_bucket": row.get("blur_bucket"),
+        "contrast_bucket": row.get("contrast_bucket"),
+        "color_bucket": row.get("color_bucket")
     }
 
 

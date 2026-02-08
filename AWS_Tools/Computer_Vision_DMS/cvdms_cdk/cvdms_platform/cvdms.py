@@ -14,7 +14,7 @@ REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/f
                  "logging/log_bucket_name", "logging/glue_db_name", "logging/glue_table_name"]
 
 def _session_for_profile(profile_name: Optional[str]) -> boto3.Session:
-    # prefer explicit profile; boto3 will use default if profile_name is None
+    # Prefer explicit profile; boto3 will use default if profile_name is None
     return boto3.Session(profile_name=profile_name) if profile_name else boto3.Session()
 
 def _load_ssm_params(session: boto3.Session, app_name: str, region_name: str) -> Dict[str, str]:
@@ -49,7 +49,7 @@ class CvdmsApp:
     Minimal constructor: require only profile_name.
     Example:
       app = CvdmsApp(app_name="cvdmsv1", profile_name="abc")
-      ok, out = app.upload_imagery("/tmp/files.csv")
+      out = app.upload_imagery("/tmp/files.csv")
     """
 
     def __init__(self, app_name: str, profile_name: Optional[str]):
@@ -106,7 +106,7 @@ class CvdmsApp:
 
         # load and validate SSM params in resolved region
         cfg = _load_ssm_params(session=session, app_name=app_name, region_name=region)
-        logging.info(f"Using AWS profile: {profile_name}, user = {user}, region: {region}, passed config loading step.")
+        # logging.info(f"Using AWS profile: {profile_name}, user = {user}, region: {region}, passed config loading step.")
 
         # map SSM keys to UploadClient args and validate presence
         file_bucket_name = cfg.get("storage/file_bucket_name")
@@ -129,6 +129,7 @@ class CvdmsApp:
         logging_glue_db_name = cfg.get("logging/glue_db_name")
         logging_glue_table_name = cfg.get("logging/glue_table_name")
         log_bucket_name = cfg.get("logging/log_bucket_name")
+
         self._log_client = LogClient(glue_db_name=logging_glue_db_name,
                                      glue_table_name=logging_glue_table_name,
                                      log_bucket_name=log_bucket_name,

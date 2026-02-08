@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from common.logging_utils import log
 from common.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
@@ -10,7 +10,6 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[REG_INGEST_PRE]"
-
 
 def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """

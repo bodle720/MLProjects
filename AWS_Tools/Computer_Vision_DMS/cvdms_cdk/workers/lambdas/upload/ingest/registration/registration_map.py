@@ -384,7 +384,6 @@ def _ingest_target_shard(
         "external_dup_failed": failed_count,
     }
 
-
 def handler(event, context):
     try:
         job_id = event["job_id"]

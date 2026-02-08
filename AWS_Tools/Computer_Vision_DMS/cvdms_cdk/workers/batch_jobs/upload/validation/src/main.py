@@ -19,6 +19,7 @@ from botocore.exceptions import ClientError
 from common.logging_utils import log
 from common.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
 from helpers import infer_dtype, create_and_save_labels, stable_uuid5, parse_json_object_line
+from quality_helpers import compute_image_quality_features
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
 JOB_ID = os.environ["JOB_ID"]
@@ -74,6 +75,20 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
             "uploaded_at": REGISTRATION_TIME,
             "data_source": DATA_SOURCE,
             "sha256_hash": None,
+            "luma_mean": None,
+            "luma_p10": None,
+            "luma_p90": None,
+            "dark_frac": None,
+            "bright_frac": None,
+            "contrast_luma_std": None,
+            "contrast_luma_p90_p10": None,
+            "blur_laplacian_var": None,
+            "sat_mean": None,
+            "colorfulness": None,
+            "lighting_bucket": None,
+            "blur_bucket": None,
+            "contrast_bucket": None,
+            "color_bucket": None,
             "string_labels": None,
             "temp_source_ref_bbox_meta": None,
             "temp_source_ref_semantic_png": None,
@@ -105,6 +120,20 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         "uploaded_at": REGISTRATION_TIME,
         "data_source": DATA_SOURCE,
         "sha256_hash": None,
+        "luma_mean": None,
+        "luma_p10": None,
+        "luma_p90": None,
+        "dark_frac": None,
+        "bright_frac": None,
+        "contrast_luma_std": None,
+        "contrast_luma_p90_p10": None,
+        "blur_laplacian_var": None,
+        "sat_mean": None,
+        "colorfulness": None,
+        "lighting_bucket": None,
+        "blur_bucket": None,
+        "contrast_bucket": None,
+        "color_bucket": None,
         "string_labels": None,
         "temp_source_ref_bbox_meta": None,
         "temp_source_ref_semantic_png": None,
@@ -131,19 +160,22 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
 
     # Fetch image bytes from source-ref
     try:
-        obj = s3.get_object(Bucket=bucket, Key=key)
+        obj = read_obj_with_retry(bucket, key, TASK_NAME)
     except ClientError as e:
         row["validation_status"] = "failed"
         row["validation_error"] = str(e)
         return row
 
+    if not obj:
+        row["validation_status"] = "failed"
+        row["validation_error"] = "Unable to read object from S3 with retry"
+        return row
+
     data = obj["Body"].read()
     row["file_size_mb"] = float(round(len(data) / (1024 * 1024), 4))
+    row["sha256_hash"] = hashlib.sha256(data).hexdigest()
 
     buf = io.BytesIO(data)
-    buf.seek(0)
-    sha = hashlib.sha256(buf.read()).hexdigest()
-    row["sha256_hash"] = sha
     buf.seek(0)
 
     # Open image
@@ -171,6 +203,9 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     width, height = img.size
     row["img_width"] = int(width)
     row["img_height"] = int(height)
+
+    quality_feats = compute_image_quality_features(img)
+    row.update(quality_feats)
 
     label_cols = {
         "single-label": [],
@@ -220,6 +255,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         row["label_fingerprint"] = label_fingerprint
 
     row["validation_status"] = "passed"
+
     return row
 
 def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary: dict) -> None:

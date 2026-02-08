@@ -8,7 +8,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[VAL_FILE_BATCHING]"
 
-# We can tune this constant
+# We can tune these constants
 MAX_MEMORY_MB = 2048 # from the job definition for validation step
 IMAGE_SIZE_MB = 3  # worst-case per image
 SAFETY_FACTOR = 0.5  # 0.5 means use only use ~50% of memory for image data
