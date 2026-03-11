@@ -98,7 +98,7 @@ are normalized to either grayscale (1 channel) or RGB (3 channels).
 Images with other band counts are rejected during validation. Images
 are internally converted to 8-bit luminance for metric computation. For
 computational efficiency and consistency, quality metrics are computed
-on a downsampled copy of the image with maximum side length 512 pixels.
+on a downsampled copy of the image with maximum side length of 512 pixels.
 
 Note: For grayscale images, color metrics are not meaningful. The system sets:
 

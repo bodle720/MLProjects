@@ -1,6 +1,6 @@
 # CVDMS Introduction
 
-**CVDMS** (Computer Vision Data Management System) provides a **durable, canonical
+CVDMS (Computer Vision Data Management System) provides a **durable, canonical
 data management layer for imagery and labels** used in machine learning
 workflows. While platforms such as Amazon SageMaker excel at **labeling
 orchestration and model training**, they typically do not provide a long-lived
