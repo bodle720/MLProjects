@@ -26,3 +26,12 @@ In short, CVDMS complements tools like SageMaker by providing the **data managem
 foundation beneath model training systems**—ensuring image assets are canonical,
 datasets are reproducible, and the structure and characteristics of training data
 remain understandable and auditable over time.
+
+## Documentation
+
+- **Infrastructure Stacks** – architecture and AWS resources  
+  - [README_stacks.md](README_stacks.md)
+- **Upload Workflow** – manifest formats and ingestion pipeline  
+  - [README_upload.md](README_upload.md)
+- **Upload Walkthrough** – sample notebook to show the upload steps 
+  - [sample_walkthrough.ipynb](sample_walkthrough.ipynb)

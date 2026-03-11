@@ -140,17 +140,15 @@ class CvdmsApp:
     def start_upload_job(self,
                          manifest_path: str,
                          label_type: str,
+                         data_source: str,
                          path_prefix: str,
-                         is_video: bool,
-                         job_summary: str,
-                         data_source: str) -> Dict:
+                         job_summary: str) -> Dict:
 
         return self._upload_client.start_upload_job(manifest_path,
                                                     label_type,
+                                                    data_source,
                                                     path_prefix,
-                                                    is_video,
-                                                    job_summary,
-                                                    data_source)
+                                                    job_summary)
 
     def get_logs_by_job_id(self, job_id: str) -> Dict:
         return self._log_client.get_logs_by_job_id(job_id)

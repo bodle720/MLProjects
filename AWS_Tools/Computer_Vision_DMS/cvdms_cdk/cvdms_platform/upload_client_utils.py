@@ -61,9 +61,8 @@ _RESERVED_CLASS_NAMES_LC = {"bg", "background"}
 _INT_STR_RE = re.compile(r"^[+-]?\d+$")
 _INT_DOT_ZERO_STR_RE = re.compile(r"^[+-]?\d+\.0+$")
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")  # <=128 chars, starts w/ alnum
-_FRAME_BASENAME_RE = re.compile(r"^frame_(\d{8})\.(jpg|jpeg|png)$", re.IGNORECASE)
 
-def validate_manifest(manifest_path: str, label_type: str, is_video: bool) -> Dict[str, Any]:
+def validate_manifest(manifest_path: str, label_type: str) -> Dict[str, Any]:
     """
     Validates and filters manifest in O(1) memory and writes a normalized v1 JSONL.
 
@@ -115,7 +114,6 @@ def validate_manifest(manifest_path: str, label_type: str, is_video: bool) -> Di
         skipped_count = 0
         kept_count = 0
         total_nonempty = 0
-        expected_frame_idx: Optional[int] = 1 if is_video else None
         with p.open("r", encoding="utf-8-sig") as fin, tmp_out.open("w", encoding="utf-8") as fout:
             for lineno, raw in enumerate(fin, start=1):
                 line = raw.strip()
@@ -137,27 +135,6 @@ def validate_manifest(manifest_path: str, label_type: str, is_video: bool) -> Di
                 if not ok:
                     _safe_unlink(tmp_out)
                     return {"success": False, "error": err, "local_path": ""}
-
-                if is_video:
-                    src = obj["source-ref"]  # validated by _validate_source_ref
-                    frame_idx = _frame_idx_from_source_ref(src, lineno)
-
-                    # Enforce starting at 00000001 and consecutive increments
-                    if expected_frame_idx is None:
-                        expected_frame_idx = 1
-
-                    if frame_idx != expected_frame_idx:
-                        _safe_unlink(tmp_out)
-                        return {
-                            "success": False,
-                            "error": (
-                                f"Line {lineno}: video frames must be consecutive starting at 00000001. "
-                                f"Expected frame_{expected_frame_idx:08d}.*, got frame_{frame_idx:08d}.*"
-                            ),
-                            "local_path": "",
-                        }
-
-                    expected_frame_idx += 1
 
                 skip, v1_obj, err = _gt_row_to_v1(obj=obj, label_type=label_type, lineno=lineno)
                 if err:
@@ -769,20 +746,6 @@ def _s3_key_ext(uri: str) -> str:
 def _s3_key_basename(uri: str) -> str:
     key = uri[5:].split("/", 1)[1]
     return key.rsplit("/", 1)[-1]
-
-def _frame_idx_from_source_ref(src_uri: str, lineno: int) -> int:
-    base = _s3_key_basename(src_uri)
-    m = _FRAME_BASENAME_RE.fullmatch(base)
-    if not m:
-        raise ValueError(
-            f"Line {lineno}: is_video=True requires source-ref basename like "
-            f"'frame_00000001.<ext>' (8 digits). Got '{base}'."
-        )
-    idx = int(m.group(1))  # e.g. '00000001' -> 1
-    if idx < 1:
-        # technically impossible given 8 digits, but keep explicit
-        raise ValueError(f"Line {lineno}: frame index must start at 00000001 (got {m.group(1)}).")
-    return idx
 
 def _validate_source_ref(*, obj: Dict[str, Any], lineno: int) -> Tuple[bool, str]:
     if "source-ref" not in obj:

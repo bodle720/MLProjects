@@ -242,7 +242,6 @@ class UploadClient:
                            job_id: str,
                            label_type: str,
                            path_prefix: str,
-                           is_video: bool,
                            manifest_path: str,
                            data_source: str = "") -> Tuple[bool, str]:
 
@@ -277,7 +276,6 @@ class UploadClient:
                 "label_type": label_type,
                 "data_source":data_source,
                 "path_prefix": path_prefix,
-                "is_video": is_video,
                 "registration_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "original_manifest_s3_uri": f"s3://{self.file_bucket_name}/{manifest_key}"
             }
@@ -308,10 +306,9 @@ class UploadClient:
     def start_upload_job(self,
                           manifest_path: str,
                           label_type: str,
+                          data_source: str,
                           path_prefix: str,
-                          is_video: bool,
-                          job_summary: str,
-                          data_source: str) -> Dict:
+                          job_summary: str) -> Dict:
         """
         High-level operation a caller will use. Steps:
           1) try to acquire lock
@@ -323,9 +320,6 @@ class UploadClient:
         """
         if label_type not in _ALLOWED_LABEL_TYPES:
             return {"error": f"Invalid label type: {label_type}, must be one of {_ALLOWED_LABEL_TYPES}"}
-
-        if is_video not in [True, False]:
-            return {"error": f"Invalid is_video: {is_video}, must be one of True or False"}
 
         # validate the prefix fo s3 storage
         try:
@@ -353,7 +347,7 @@ class UploadClient:
         logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
 
         # Validate the manifest. Ensure it has the expected structure and s3 uri's are valid (formatted correctly).
-        validation_dict = validate_manifest(manifest_path, label_type, is_video)
+        validation_dict = validate_manifest(manifest_path, label_type)
 
         if not validation_dict.get('success'):
             err = validation_dict.get('error')
@@ -379,7 +373,6 @@ class UploadClient:
         ok, msg = self._upload_files_to_s3(job_id,
                                           label_type,
                                           path_prefix,
-                                          is_video,
                                           manifest_path,
                                           data_source=data_source)
         if not ok:
