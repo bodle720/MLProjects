@@ -1,7 +1,12 @@
-the code for a custom task in ground truth for instance segmentation
-in this case, for 3 classes: person, animal, and inanimate
+## AWS Ground Truth for Instance Segmentation
 
-```
+The following template defines a custom labeling task for AWS Ground Truth that can be used for
+the CVDMS instance segmentation workflow. It enables annotators to easily label imagery containing
+multiple instances across one or more classes.
+
+In the example below, three classes are used: *person*, *animal*, and *inanimate*.
+
+```html
 <script src="https://assets.crowd.aws/crowd-html-elements.js"></script>
 
 <crowd-form>

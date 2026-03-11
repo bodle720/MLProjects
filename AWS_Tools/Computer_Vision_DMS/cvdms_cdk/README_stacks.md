@@ -7,6 +7,7 @@ transformation Lambda to normalize and validate the log schema, converts the rec
 Parquet using AWS Glue schema definitions, and writes the resulting files to partitioned storage
 in Amazon S3. The Glue catalog table allows the logs to be queried efficiently with Amazon Athena
 for debugging, monitoring, and operational analysis.
+
 ---
 
 ## <u>Storage Stack</u>
