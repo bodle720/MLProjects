@@ -89,6 +89,15 @@ class StorageStack(Stack):
             auto_delete_objects=True
         )
 
+        # Datasets bucket
+        datasets_bucket = s3.Bucket(
+            self, "DatasetsBucket",
+            versioned=True,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True
+        )
+
         # DynamoDB tables
         # Lock table
         lock_table = dynamodb.Table(
@@ -129,12 +138,18 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
-        # Dataset versions table (one row per dataset_id + dataset_version snapshot)
+        datasets_table.add_global_secondary_index(
+            index_name="createdAt-index",
+            partition_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL
+        )
+
+        # Dataset versions table (one row per dataset_id + version snapshot)
         dataset_versions_table = dynamodb.Table(
             self,
             "DatasetVersionsTable",
             partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="dataset_version", type=dynamodb.AttributeType.NUMBER),
+            sort_key=dynamodb.Attribute(name="version", type=dynamodb.AttributeType.NUMBER),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
         )
@@ -144,7 +159,8 @@ class StorageStack(Stack):
             self, "JobsTable",
             partition_key=dynamodb.Attribute(name="job_id", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY
+            removal_policy=RemovalPolicy.DESTROY,
+            # time_to_live_attribute="ttl" # Unix epoch timestamp (seconds)
         )
 
         # GSIs for job_table
@@ -392,9 +408,20 @@ class StorageStack(Stack):
                        removal_policy=RemovalPolicy.DESTROY
                        )
 
-        upload_events_queue = sqs.Queue(self, "UploadEventsQueue",
-                                        visibility_timeout=Duration.minutes(15),
-                                        retention_period=Duration.days(4))
+        upload_events_dlq = sqs.Queue(
+            self, "UploadEventsDLQ",
+            retention_period=Duration.days(14)
+        )
+
+        upload_events_queue = sqs.Queue(
+            self, "UploadEventsQueue",
+            visibility_timeout=Duration.minutes(15),
+            retention_period=Duration.days(4),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                queue=upload_events_dlq,
+                max_receive_count=1
+            )
+        )
 
         file_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
@@ -513,12 +540,18 @@ class StorageStack(Stack):
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
+        self.datasets_bucket = datasets_bucket
         self.job_table = job_table
         self.sha256_table = sha256_table
         self.lock_table = lock_table
         self.global_dlq = dlq
         self.iceberg_database_name = iceberg_database_name
         self.upload_events_queue = upload_events_queue
+
+        # Expose the datasets table as well
+        self.datasets_table = datasets_table
+        self.dataset_versions_table = dataset_versions_table
+
 
         # SSM params
         # Buckets
@@ -532,6 +565,10 @@ class StorageStack(Stack):
                             string_value=iceberg_bucket.bucket_name
                             )
 
+        ssm.StringParameter(self, "DatasetsBucketNameParam",
+                            parameter_name=f"/cvdms/{app_name}/storage/datasets_bucket_name",
+                            string_value=datasets_bucket.bucket_name
+                            )
         # Glue / Athena
         ssm.StringParameter(self, "AthenaDatabaseNameParam",
                             parameter_name=f"/cvdms/{app_name}/storage/iceberg_database_name",

@@ -85,7 +85,7 @@ from botocore.exceptions import ClientError
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
-from cvdms_platform.upload_client_utils import validate_manifest
+from cvdms_platform.upload_client_utils import validate_manifest, validate_s3_key_prefix
 
 _ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
 
@@ -241,6 +241,8 @@ class UploadClient:
     def _upload_files_to_s3(self,
                            job_id: str,
                            label_type: str,
+                           path_prefix: str,
+                           is_video: bool,
                            manifest_path: str,
                            data_source: str = "") -> Tuple[bool, str]:
 
@@ -274,9 +276,12 @@ class UploadClient:
                 "event_type": self.event_type,
                 "label_type": label_type,
                 "data_source":data_source,
+                "path_prefix": path_prefix,
+                "is_video": is_video,
                 "registration_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "original_manifest_s3_uri": f"s3://{self.file_bucket_name}/{manifest_key}"
             }
+
             job_json_key = f"{prefix}/job.json"
             self.s3.put_object(
                 Bucket=self.file_bucket_name,
@@ -303,9 +308,10 @@ class UploadClient:
     def start_upload_job(self,
                           manifest_path: str,
                           label_type: str,
-                          *,
-                          job_summary: str = "",
-                          data_source: str = "") -> Dict:
+                          path_prefix: str,
+                          is_video: bool,
+                          job_summary: str,
+                          data_source: str) -> Dict:
         """
         High-level operation a caller will use. Steps:
           1) try to acquire lock
@@ -317,6 +323,15 @@ class UploadClient:
         """
         if label_type not in _ALLOWED_LABEL_TYPES:
             return {"error": f"Invalid label type: {label_type}, must be one of {_ALLOWED_LABEL_TYPES}"}
+
+        if is_video not in [True, False]:
+            return {"error": f"Invalid is_video: {is_video}, must be one of True or False"}
+
+        # validate the prefix fo s3 storage
+        try:
+            path_prefix = validate_s3_key_prefix(path_prefix)
+        except Exception as e:
+            return {"error": f"Invalid path_prefix: {e}"}
 
         # try to acquire lock
         ok, holder_or_err = self._acquire_lock()
@@ -338,7 +353,7 @@ class UploadClient:
         logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
 
         # Validate the manifest. Ensure it has the expected structure and s3 uri's are valid (formatted correctly).
-        validation_dict = validate_manifest(manifest_path, label_type)
+        validation_dict = validate_manifest(manifest_path, label_type, is_video)
 
         if not validation_dict.get('success'):
             err = validation_dict.get('error')
@@ -363,6 +378,8 @@ class UploadClient:
         logging.info('Uploading files to S3.')
         ok, msg = self._upload_files_to_s3(job_id,
                                           label_type,
+                                          path_prefix,
+                                          is_video,
                                           manifest_path,
                                           data_source=data_source)
         if not ok:

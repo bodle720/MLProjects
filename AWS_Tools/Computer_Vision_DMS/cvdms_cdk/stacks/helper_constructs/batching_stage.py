@@ -298,6 +298,8 @@ class BatchingStage(Construct):
             "USER": sfn.JsonPath.string_at("$.user"),
             "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
             "DATA_SOURCE": sfn.JsonPath.string_at("$.data_source"),
+            "PATH_PREFIX": sfn.JsonPath.string_at("$.path_prefix"),
+            "IS_VIDEO": sfn.JsonPath.string_at("States.Format('{}', $.is_video)"),
             "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
             "SHA256_TABLE_NAME": sha256_table.table_name,
@@ -330,6 +332,8 @@ class BatchingStage(Construct):
                 "user.$": "$.user",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
+                "path_prefix.$": "$.path_prefix",
+                "is_video.$": "$.is_video",
                 "event_type.$": "$.event_type",
                 "registration_time.$": "$.registration_time"
         }

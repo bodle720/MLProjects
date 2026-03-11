@@ -34,6 +34,8 @@ JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
+PATH_PREFIX = os.environ["PATH_PREFIX"]
+IS_VIDEO = os.environ["IS_VIDEO"].strip().lower() == "true"
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]

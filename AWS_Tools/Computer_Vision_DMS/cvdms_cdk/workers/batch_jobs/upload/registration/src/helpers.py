@@ -25,13 +25,19 @@ def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
         s3_copy_with_retry(src_bucket, src_key, dst_bucket, dst_key, TASK_NAME)
 
 
-def build_canonical_image_dest(file_bucket: str, image_id: str, temp_image_uri: str) -> Tuple[str, str]:
+def build_canonical_image_dest(file_bucket: str,
+                               image_id: str,
+                               temp_image_uri: str,
+                               data_source: str,
+                               path_prefix: str,
+                               is_video: bool) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri, TASK_NAME)
     fname = get_key_basename(temp_key)
     _, ext = split_ext(fname)
     if ext not in ("png", "jpg", "jpeg"):
         raise RuntimeError(f"{TASK_NAME} Unsupported or missing image extension for temp_source_ref={temp_image_uri}")
-    dst_key = f"canonical/imagery/{image_id}.{ext}"
+    category = 'videos' if is_video else 'non-videos'
+    dst_key = f"canonical/{category}/{data_source}/{path_prefix}/{image_id}.{ext}"
     return dst_key, make_s3_uri(file_bucket, dst_key)
 
 

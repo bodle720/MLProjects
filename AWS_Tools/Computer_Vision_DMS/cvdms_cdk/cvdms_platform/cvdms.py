@@ -137,8 +137,20 @@ class CvdmsApp:
 
         logging.info('Instantiation complete.')
 
-    def start_upload_job(self, manifest_path: str, label_type: str, *, job_summary: str = "", data_source: str = "") -> Dict:
-        return self._upload_client.start_upload_job(manifest_path, label_type, job_summary=job_summary, data_source=data_source)
+    def start_upload_job(self,
+                         manifest_path: str,
+                         label_type: str,
+                         path_prefix: str,
+                         is_video: bool,
+                         job_summary: str,
+                         data_source: str) -> Dict:
+
+        return self._upload_client.start_upload_job(manifest_path,
+                                                    label_type,
+                                                    path_prefix,
+                                                    is_video,
+                                                    job_summary,
+                                                    data_source)
 
     def get_logs_by_job_id(self, job_id: str) -> Dict:
         return self._log_client.get_logs_by_job_id(job_id)

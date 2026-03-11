@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     contrast_bucket string COMMENT 'One of low, medium, or high',
     color_bucket string COMMENT 'One of low, medium, or high'
 )
-PARTITIONED BY (day(uploaded_at))
+PARTITIONED BY (days(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/imagery/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -34,7 +34,7 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.image_labels (
     image_id string COMMENT 'UUID foreign key for the image from canonical_imagery.image_id',
-    label_id string COMMENT 'Can be a string label lowercase, or a label id from a label table: bbox_annotation_id or semantic_mask_id or instance_annotation_id',
+    label_id string COMMENT 'Either a lowercase string label (for classification tasks) or the ID of a structured label artifact (bbox_annotation_id, semantic_mask_id, or instance_annotation_id)',
     label_type string COMMENT 'one of string-label, object-detection, semantic-segmentation, or instance-segmentation'
 )
 PARTITIONED BY (label_type)
@@ -45,7 +45,7 @@ TBLPROPERTIES (
 );
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_bounding_boxes (
-    bbox_annotation_id string,
+    bbox_annotation_id string COMMENT 'The _id in the label tables here and below double as the deterministic label fingerprint',
     source_ref_meta string,
     classes_present array<string>
 )
@@ -56,7 +56,7 @@ TBLPROPERTIES (
 );
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_semantic_masks (
-    semantic_mask_id string,
+    semantic_mask_id string COMMENT 'Also deterministic  label fingerprint',
     source_ref_png string,
     source_ref_meta string,
     classes_present array<string>
@@ -68,7 +68,7 @@ TBLPROPERTIES (
 );
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_instance_annotations (
-    instance_annotation_id string,
+    instance_annotation_id string COMMENT 'Also deterministic label fingerprint',
     source_ref_png string,
     source_ref_meta string,
     classes_present array<string>
@@ -131,11 +131,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
     dataset_id string,
-    dataset_version int,
+    version int,
     image_id string,
     label string
 )
-PARTITIONED BY (dataset_id, dataset_version)
+PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/single_label/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -144,11 +144,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
     dataset_id string,
-    dataset_version int,
+    version int,
     image_id string,
-    labels array<string>
+    label string COMMENT 'One row per label'
 )
-PARTITIONED BY (dataset_id, dataset_version)
+PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/multi_label/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -157,11 +157,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     dataset_id string,
-    dataset_version int,
+    version int,
     image_id string,
     bbox_annotation_id string
 )
-PARTITIONED BY (dataset_id, dataset_version)
+PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/object_detection/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -170,11 +170,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     dataset_id string,
-    dataset_version int,
+    version int,
     image_id string,
     semantic_mask_id string
 )
-PARTITIONED BY (dataset_id, dataset_version)
+PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/semantic_segmentation/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
@@ -183,11 +183,11 @@ TBLPROPERTIES (
 
 CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     dataset_id string,
-    dataset_version int,
+    version int,
     image_id string,
     instance_annotation_id string
 )
-PARTITIONED BY (dataset_id, dataset_version)
+PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/instance_segmentation/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
