@@ -78,7 +78,7 @@ s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_
 ```
 ### JSONL Input Format for Object Detection
 
-JSONL inputs must follow the **AWS Ground Truth object detection
+JSONL inputs must follow the **AWS Ground Truth Object Detection
 export format**.
 
 Corresponding JSONL entry representing the above CSV annotations:
