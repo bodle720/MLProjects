@@ -275,8 +275,6 @@ Validation Stage
 Deduplication Stage
        ↓
 Registration Stage
-       ↓
-Ingest Stage
 ```
 
 These stages:
@@ -286,7 +284,7 @@ These stages:
 - detect duplicate imagery
 - register canonical images
 - enrich labels when applicable
-- write records to Iceberg tables
+- ingest steps after each stage write records to Iceberg tables
 
 ### Deterministic Manifest Guarantees
 

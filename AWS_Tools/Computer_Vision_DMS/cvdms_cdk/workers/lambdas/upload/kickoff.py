@@ -151,15 +151,11 @@ def handler(event, context):
         label_type = job_data["label_type"]
         data_source = job_data["data_source"]
         path_prefix = job_data["path_prefix"]
-        is_video = job_data["is_video"]
         registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
         log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json", level='error')
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
-
-    if is_video not in [True, False]:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid is_video: {is_video}")
 
     if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid label_type: {label_type}")
@@ -208,7 +204,6 @@ def handler(event, context):
                 "label_type": label_type,
                 "data_source": data_source,
                 "path_prefix": path_prefix,
-                "is_video": is_video,
                 "original_manifest_s3_uri": original_manifest_s3_uri,
                 "registration_time": registration_time
             })
@@ -227,6 +222,5 @@ def handler(event, context):
         "event_type": event_type,
         "data_source": data_source,
         "path_prefix": path_prefix,
-        "is_video": is_video,
         "original_manifest_s3_uri": original_manifest_s3_uri
     }
