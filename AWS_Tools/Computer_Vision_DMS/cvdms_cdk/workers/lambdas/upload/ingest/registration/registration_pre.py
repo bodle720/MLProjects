@@ -11,6 +11,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[REG_INGEST_PRE]"
 
+
 def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     Try to extract shard names from batching manifests.
@@ -18,23 +19,27 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     expected: List[str] = []
     for m in manifests:
-        _, key = parse_s3_uri(m, TASK_NAME)
+        try:
+            _, key = parse_s3_uri(m, TASK_NAME)
+        except Exception:
+            raise
+
         fname = key.split("/")[-1]
         if fname.startswith("manifest-shard-") and fname.endswith(".json"):
-            shard_name = fname[len("manifest-shard-") : -len(".json")]
+            shard_name = fname[len("manifest-shard-"): -len(".json")]
         else:
             shard_name = fname.rsplit(".", 1)[0]
+
         expected.append(shard_name)
 
     # stable unique
     seen = set()
-    out: List[str] = []
+    out = []
     for s in expected:
         if s not in seen:
             seen.add(s)
             out.append(s)
     return out
-
 
 def _extract_owner_shard_id_from_key(k: str) -> str:
     # expects .../canonical_labels_by_fingerprint/owner-XXXXXX/part-....jsonl
@@ -43,7 +48,6 @@ def _extract_owner_shard_id_from_key(k: str) -> str:
         if p.startswith("owner-"):
             return p[len("owner-") :]
     return ""
-
 
 def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
@@ -209,7 +213,6 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "owner_shards": owner_shards,
         "total_owner_label_files": total_owner_label_files,
     }
-
 
 def handler(event, context):
     """

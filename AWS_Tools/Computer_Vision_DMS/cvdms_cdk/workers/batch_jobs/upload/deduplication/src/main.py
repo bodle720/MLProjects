@@ -65,7 +65,6 @@ def ts_sortable(v: Any) -> str:
     s = str(v).strip()
     return s if s else "9999-12-31 23:59:59"
 
-
 def pick_representative(group):
     if len(group) == 1:
         return group[0]
@@ -222,7 +221,6 @@ def write_processed_outputs(shard_name, processed_rows, summary):
     jsonl_key = f"{PROCESSED_PREFIX}/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
-
 
     jsonl_stream_to_s3(bucket, jsonl_key, processed_rows)
 

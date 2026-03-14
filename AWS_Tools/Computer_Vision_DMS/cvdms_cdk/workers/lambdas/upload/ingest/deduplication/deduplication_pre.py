@@ -34,6 +34,7 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             shard_name = fname[len("manifest-shard-") : -len(".json")]
         else:
             shard_name = fname.rsplit(".", 1)[0]
+
         expected.append(shard_name)
 
     # stable unique

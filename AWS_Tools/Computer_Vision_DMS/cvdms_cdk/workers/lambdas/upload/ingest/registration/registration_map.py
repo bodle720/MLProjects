@@ -34,15 +34,12 @@ LABEL_TABLES = {
 
 athena = boto3.client("athena")
 
-
 def _escape_sql_string(s: str) -> str:
     return s.replace("'", "''")
-
 
 def _chunks(lst: List[str], n: int) -> Iterable[List[str]]:
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
-
 
 def _athena_fetch_rows_3col(qid: str) -> List[Tuple[str, str, str]]:
     """
@@ -69,11 +66,7 @@ def _athena_fetch_rows_3col(qid: str) -> List[Tuple[str, str, str]]:
                 out.append((a, b, c))
     return out
 
-
-def fetch_existing_image_label_keys(
-    image_ids: List[str],
-    label_types: List[str],
-) -> Set[Tuple[str, str, str]]:
+def fetch_existing_image_label_keys(image_ids: List[str], label_types: List[str]) -> Set[Tuple[str, str, str]]:
     """
     Returns a set of (image_id, label_type, label_id) that already exist in Iceberg.
     Chunked to avoid mega-IN queries.
@@ -108,11 +101,9 @@ def fetch_existing_image_label_keys(
 
     return existing
 
-
 def _iter_jsonl_keys(keys: List[str], task: str) -> Iterable[Dict]:
     # keys are S3 keys (NOT URIs)
     return s3_read_jsonl_list(FILE_BUCKET_NAME, keys, task)
-
 
 def _list_owner_label_jsonl_keys(owner_prefix: str) -> List[str]:
     """
@@ -125,7 +116,6 @@ def _list_owner_label_jsonl_keys(owner_prefix: str) -> List[str]:
     out = [k for k in keys if k.endswith(".jsonl")]
     out.sort()
     return out
-
 
 def _ingest_label_owner_shard(
     *,
@@ -201,7 +191,6 @@ def _ingest_label_owner_shard(
     )
 
     return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": len(label_keys), "label_rows_ingested": ingested}
-
 
 def _ingest_target_shard(
     *,
