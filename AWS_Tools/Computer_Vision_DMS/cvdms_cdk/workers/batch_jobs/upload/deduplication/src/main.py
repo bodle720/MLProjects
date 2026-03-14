@@ -160,7 +160,8 @@ def process_manifest(manifest):
         if "__MISSING_LABEL_SIG__" in sigs or len(sigs) > 1:
             for r in group:
                 r["dedup_status"] = "failed"
-                r["dedup_error"] = "duplicate images with different labels not allowed"
+                error_msg = "string_labels or classes_present value must be a non-empty list" if "__MISSING_LABEL_SIG__" in sigs else "duplicate images with different labels not allowed"
+                r["dedup_error"] = error_msg
                 r["matched_image_id"] = None
             processed_rows.extend(group)
             continue
