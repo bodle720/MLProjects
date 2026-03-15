@@ -2,12 +2,12 @@
 
 CVDMS (Computer Vision Data Management System) provides a **durable, canonical
 data management layer for imagery and labels** used in machine learning
-workflows. While platforms such as Amazon SageMaker excel at **labeling
-orchestration and model training**, they typically do not provide a long-lived
-system for managing image assets, labels, and datasets consistently across
-projects, teams, and time.
+workflows. While platforms such as Amazon SageMaker excel at labeling orchestration
+and model training, they generally do not provide a durable system for
+managing image assets, labels, and datasets consistently across projects,
+teams, and time.
 
-CVDMS fills that gap by treating imagery and labels as **first-class, versioned
+CVDMS fills that gap by treating imagery and labels as **first-class, canonical
 data assets**. It enforces global deduplication, stable canonical identities
 for images, and reproducible dataset definitions so that teams can reliably
 track which data exists, how it has been labeled, and where it has been used.
@@ -16,8 +16,8 @@ can be unified under a consistent schema, and training pipelines remain portable
 across environments.
 
 Beyond storage and lineage, CVDMS also emphasizes **dataset understanding and
-transparency**. By computing dataset-level statistics, derived metadata, and visualization-friendly summaries, the system enables
-practitioners to better explore and understand their training data. This improves
+transparency**. By computing dataset-level statistics, derived metadata, and visualization-friendly summaries, CVDMS
+enables practitioners to explore and understand their training data more effectively. This improves
 **data quality awareness, debugging, and model performance explainability**,
 allowing teams to identify imbalance, distribution issues, or labeling
 inconsistencies before they impact training results.
@@ -31,26 +31,26 @@ remain understandable and auditable over time.
 
 The Upload flow combines:
 
-```
-Step Functions orchestration
-AWS Batch workers
-Lambda ingestion stages
-Iceberg-backed tables
-shared infrastructure constructs
-```
+- Step Functions orchestration
+- AWS Batch workers
+- Lambda ingestion stages
+- Iceberg-backed tables
+- shared infrastructure constructs
+
 
 to create a pipeline that is:
 
-```
-deterministic
-idempotent
-race-safe
-scalable
-```
+- deterministic and idempotent
+- atomic
+- race-safe
+- scalable
+
 
 This architecture allows CVDMS to perform **large-scale
 dataset ingestion while maintaining strict guarantees about
 data integrity, duplicate detection, and label enrichment.**
+See the documentation section below for a notebook demonstrating
+how to upload images and labels using the CVDMS upload client.
 
 ## Documentation
 
