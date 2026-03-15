@@ -345,6 +345,16 @@ def handler(event, context):
         job_id = body.get("job_id")
         user = body.get("user")
         event_type = body.get("event_type")
+        error_msg = body.get("error")
+
+        try:
+            error_obj = json.loads(error_msg)
+            cause = error_obj.get("Cause")
+            if cause:
+                cause_obj = json.loads(cause)
+                error_msg = cause_obj.get("errorMessage", error_msg)
+        except Exception:
+            pass
 
         if source not in ("stepfunctions", "kickoff", "lambda"):
             print(f"{TASK_NAME} Skipping unknown source={source}")
@@ -354,7 +364,7 @@ def handler(event, context):
             print(f"{TASK_NAME} Ignoring non-job DLQ message: {body}")
             continue
 
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} DLQ received message: {body}", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} DLQ received message: {body}")
 
         # ---- NEW ORDER: collect rollback targets BEFORE deleting temp prefix ----
         processed_keys = _list_registration_processed_keys(job_id)
@@ -452,7 +462,7 @@ def handler(event, context):
                 LOG_FIREHOSE_STREAM_NAME,
                 user=user,
                 event_type=event_type,
-                error_msg=None,
+                error_msg=error_msg[:100],
             )
             if update_success:
                 log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job status to FAILED.")

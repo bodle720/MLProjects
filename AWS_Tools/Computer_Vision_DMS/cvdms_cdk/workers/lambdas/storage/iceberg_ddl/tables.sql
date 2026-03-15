@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     contrast_bucket string COMMENT 'One of low, medium, or high',
     color_bucket string COMMENT 'One of low, medium, or high'
 )
-PARTITIONED BY (days(uploaded_at))
+PARTITIONED BY (day(uploaded_at))
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/canonical/imagery/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
