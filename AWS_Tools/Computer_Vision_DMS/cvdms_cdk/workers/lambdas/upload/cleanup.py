@@ -19,37 +19,57 @@ def handler(event, context):
     except KeyError as e:
         raise RuntimeError(f"{TASK_NAME} Missing key in the cleanup lambda: {e}, event = {event}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting cleanup lambda for job {job_id}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Starting cleanup lambda for job {job_id}")
 
-    # 1. Delete S3 temp files
-    prefix = f"temp/image-upload/{job_id}/"
-    delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Done deleting s3 temp files in cleanup lambda")
+    # ---------------------------------------------------------
+    # 1. Release infrastructure lock first
+    # ---------------------------------------------------------
+    release_success, release_msg = release_lock(
+        job_id,
+        LOCK_TABLE_NAME,
+        LOG_FIREHOSE_STREAM_NAME,
+        user=user,
+        event_type=event_type
+    )
 
-    # 2. make sure job status table is marked COMPLETED
-    update_success, update_msg = update_job_status(job_id,
-                                                  "COMPLETED",
-                                                  JOB_TABLE_NAME,
-                                                  LOG_FIREHOSE_STREAM_NAME,
-                                                  user=user,
-                                                  event_type=event_type,
-                                                  error_msg=None)
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Done updating job status to COMPLETED. Success = {update_success}, msg = {update_msg}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Lock release attempt complete. Success={release_success}, msg={release_msg}")
+
+    if not release_success:
+        raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
+
+    # ---------------------------------------------------------
+    # 2. Mark job as COMPLETED
+    # ---------------------------------------------------------
+    update_success, update_msg = update_job_status(
+        job_id,
+        "COMPLETED",
+        JOB_TABLE_NAME,
+        LOG_FIREHOSE_STREAM_NAME,
+        user=user,
+        event_type=event_type,
+        error_msg=None
+    )
+
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Job status update to COMPLETED finished. Success={update_success}, msg={update_msg}")
 
     if not update_success:
         raise RuntimeError(f"{TASK_NAME} Failed to update job status: {update_msg}")
 
-    # 3. Unlock the infrastructure
-    release_success, release_msg = release_lock(job_id,
-                                                 LOCK_TABLE_NAME,
-                                                 LOG_FIREHOSE_STREAM_NAME,
-                                                 user=user,
-                                                 event_type=event_type)
+    # ---------------------------------------------------------
+    # 3. Delete S3 temp files (safe final cleanup)
+    # ---------------------------------------------------------
+    prefix = f"temp/image-upload/{job_id}/"
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Done release lock attempt. Success = {release_success}, msg = {release_msg}")
+    delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
 
-    if not release_success:
-        raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Deleted S3 temp files under prefix {prefix}")
+
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Cleanup completed successfully for job {job_id}")
 
     return {
         "job_id": job_id,

@@ -247,3 +247,389 @@ Apache Iceberg is used for the image catalog and dataset membership tables becau
 
 This allows the system to support analytical queries on millions of images and dataset versions
 while maintaining strong consistency guarantees.
+
+---
+
+## <u>Upload Stack</u>
+
+### Upload Stack Architecture
+
+The following explains how the **Upload Stack infrastructure and code
+are wired together** to implement the CVDMS upload workflow.
+
+It complements **README_upload.md**, which focuses on:
+
+* supported input formats
+* manifest normalization
+* user-facing upload behavior
+
+This document instead focuses on:
+
+* Step Functions orchestration
+* reusable CDK constructs
+* Lambda and Batch responsibilities
+* ingestion stages
+* concurrency safety
+* idempotent writes
+* overall pipeline architecture
+
+The goal is to describe **how the upload workflow is engineered internally**.
+
+### High-Level Upload Pipeline
+
+Once the upload client writes `job.json` and the normalized manifest to S3, the following infrastructure activates:
+
+```
+S3 Upload
+   ↓
+UploadEventsQueue (SQS)
+   ↓
+Kickoff Lambda
+   ↓
+Upload Step Functions State Machine
+```
+
+The Step Functions state machine executes the upload pipeline:
+
+```
+Validation Stage
+       ↓
+Validation Ingest
+       ↓
+Deduplication Stage
+       ↓
+Deduplication Ingest
+       ↓
+Registration Stage
+       ↓
+Registration Ingest
+       ↓
+Cleanup
+```
+
+Each stage performs a specific responsibility in the dataset ingestion process.
+The `upload_staging` table acts as an immutable audit log for every
+image processed during the upload workflow. Each stage updates
+records within this table, allowing the pipeline to verify ingestion
+completeness and maintain traceability of every uploaded image and
+any errors that arise.
+
+### Step Functions Workflow Definition
+
+The upload workflow is defined in the CDK stack as a sequential Step Functions chain.
+
+```
+Kickoff Lambda
+      ↓
+Validation batching
+      ↓
+Validation workers (Batch)
+      ↓
+Validation ingest (pre → map → post)
+      ↓
+Dedup batching
+      ↓
+Dedup workers (Batch)
+      ↓
+Dedup ingest (pre → map → post)
+      ↓
+Registration batching
+      ↓
+Registration workers (Batch)
+      ↓
+Registration ingest (pre → map → post)
+      ↓
+Cleanup Lambda
+```
+
+The state machine definition in CDK:
+
+```
+workflow_definition = sfn.Chain.start(validation_stage.batching_task)
+    .next(validation_stage.map_state)
+    .next(validation_ingest_stage.pre_ingest_task)
+    .next(validation_ingest_stage.map_state)
+    .next(validation_ingest_stage.post_ingest_task)
+    .next(deduplication_stage.batching_task)
+    .next(deduplication_stage.map_state)
+    .next(deduplication_ingest_stage.pre_ingest_task)
+    .next(deduplication_ingest_stage.map_state)
+    .next(deduplication_ingest_stage.post_ingest_task)
+    .next(registration_stage.batching_task)
+    .next(registration_stage.map_state)
+    .next(registration_ingest_stage.pre_ingest_task)
+    .next(registration_ingest_stage.map_state)
+    .next(registration_ingest_stage.post_ingest_task)
+    .next(cleanup_task)
+```
+
+Each stage uses reusable infrastructure constructs that encapsulate common workflow patterns.
+
+### Reusable CDK Constructs
+
+The upload pipeline is implemented using two reusable CDK constructs.
+
+```
+BatchingStage
+IngestStage
+```
+
+These constructs encapsulate common processing patterns and make the workflow modular and reusable.
+
+### BatchingStage
+
+The `BatchingStage` construct implements the pattern used for:
+
+* validation
+* deduplication
+* registration
+
+The pattern consists of two steps:
+
+```
+Batching Lambda that partitions the data in chunks
+        ↓
+Step Functions Map launching AWS Batch jobs
+```
+
+Responsibilities of the batching lambda:
+
+* read the dataset input (manifest or Iceberg table)
+* partition the workload into deterministic shards
+* write shard manifests to S3
+* return shard descriptors to the Step Functions Map state
+
+Each AWS Batch worker processes **one shard**.
+
+This pattern allows:
+
+* massive parallelism
+* deterministic work partitioning
+* retry-safe processing
+
+### IngestStage
+
+After worker jobs finish, the `IngestStage` construct performs deterministic ingestion of the worker outputs.
+
+Each ingest stage has three steps:
+
+```
+Pre Lambda
+     ↓
+Step Functions Map running the Shard Ingest Lambda
+     ↓
+Post Lambda
+```
+
+### Pre Lambda
+
+The pre-ingest lambda performs validation and shard discovery.
+
+Responsibilities include:
+
+* discovering worker outputs
+* validating expected shard counts
+* verifying worker success markers
+* ensuring shard completeness
+* returning ingestion map items
+
+This stage guarantees that ingestion begins **only if worker outputs are complete and consistent**.
+
+### Map Lambda
+
+The ingest map lambda processes **one shard of worker output**.
+
+Responsibilities include:
+
+* reading worker JSONL outputs
+* writing rows into Iceberg tables
+* applying idempotent write strategies
+* updating upload_staging audit rows
+
+Different tables use different insertion strategies to guarantee safe retries.
+
+### Post Lambda
+
+The post-ingest lambda performs final verification.
+
+Responsibilities:
+
+* verify upload_staging row counts
+* confirm ingestion parity with batching outputs
+* drop temporary Athena CTAS tables
+* emit final ingestion metrics
+
+This stage acts as the **final integrity checkpoint** before workflow cleanup.
+
+### First step: <u>Validation Stage</u>
+
+The validation stage processes the standardized `cvdms.manifest.v1` manifest.
+
+Responsibilities include:
+
+* verifying image existence
+* opening images and extracting metadata
+* computing SHA256 image hashes
+* validating labels and annotations
+* validating segmentation masks
+* computing label fingerprints
+* generating upload_staging rows
+
+Worker outputs are written under:
+
+```
+temp/image-upload/<job_id>/batches/validation-step/
+```
+
+These outputs are later consumed by the validation ingest stage.
+
+### Second step: <u>Deduplication Stage</u>
+
+Deduplication identifies duplicate images using SHA256 hashes and
+uses DynamoDB and Athena to produce worker shards.
+
+Two duplicate types exist:
+
+- **internal_duplicate**: Multiple identical images appear in the same
+upload. Resolution: one representative is retained and all others are ignored.
+
+- **external_duplicate**: The image already exists in the canonical
+dataset. Resolution: the image is not re-registered and labels may 
+be enriched
+
+  
+### Third step: <u>Registration Stage</u>
+
+Registration performs canonical dataset updates. If the image
+is new (`passed`), a canonical image record is created and inserted into the canonical dataset.
+
+For external duplicates (the image already exists in the system), either:
+
+• no operation is performed if the image–label pair already exists  
+• the image is enriched with newly introduced labels
+
+
+### Label Enrichment Process
+
+Label enrichment uses **deterministic fingerprints** for labels.
+
+Fingerprints are computed for each label artifact, such as:
+
+* bounding boxes
+* semantic segmentation masks
+* instance segmentation masks
+
+If a fingerprint is not present in the canonical tables, then
+a new canonical label row is inserted. If the fingerprint already
+exists, then no new label is inserted. This guarantees deterministic
+label enrichment behavior.
+
+### Sharding Strategy
+
+Registration workers shard records by `target_image_id`, which is the 
+`image_id` assigned to the new image, or the `matched_image_id` in the
+case of an external duplicate. This guarantees that all operations
+affecting the same canonical image are handled by the same shard and
+eliminates race conditions during registration.
+
+### Canonical Label Owner Shards
+
+Canonical label rows are stored using **fingerprint owner shards**.
+
+Structure:
+
+```
+canonical_labels_by_fingerprint/
+    owner-000001/
+    owner-000002/
+```
+
+This design prevents multiple workers from attempting to insert the same canonical label simultaneously.
+
+### Idempotent Writes
+
+Different table types use different insertion strategies:
+
+#### Delete-then-insert tables:
+
+Used for shard-owned tables, such as the `upload_staging` and
+`canonical_imagery` tables, which can safely be replaced
+because the shard owns the rows.
+
+#### Insert-only tables:
+
+Used for globally shared tables, such as the `image_labels` and the
+canonical label tables. These tables use conditional insertion
+to avoid duplicate rows, ensuring ingestion remains safe under retries.
+
+### Concurrency and Race Prevention
+
+Several architectural decisions ensure safe parallel execution.
+
+### Image ownership sharding
+
+```
+target_image_id → single shard
+```
+
+This guarantees no concurrent writes to the same canonical image.
+
+### Label ownership sharding
+
+Canonical label rows are inserted by fingerprint owner shards, preventing
+cross-shard label insertion races.
+
+### Pre-ingest shard verification
+
+The pre-ingest stage verifies that:
+
+- all worker shards completed
+- all expected outputs exist
+- owner shards are complete
+
+
+This prevents ingestion from running on partial worker outputs.
+
+### Atomicity Guarantees
+
+The pipeline achieves atomic behavior through:
+
+- deterministic worker outputs
+- idempotent database writes
+- upload_staging audit table
+- post-ingest verification
+
+### Cleanup Step
+
+The final step of the workflow is the cleanup lambda.
+
+Responsibilities include:
+
+- release workflow lock
+- mark job as `COMPLETED`
+- delete temporary upload artifacts
+
+
+Temporary files under:
+
+```
+temp/image-upload/<job_id>/
+```
+
+are removed once the workflow finishes successfully.
+
+### Shared Helper Modules
+
+Both Lambda functions and AWS Batch workers use shared
+Python helper modules located under `common/`.
+
+These modules provide utilities for interacting with:
+
+* Athena
+* DynamoDB
+* S3
+* Iceberg tables
+* structured logging
+
+Centralizing this logic keeps ingestion code consistent
+across workers and Lambdas.

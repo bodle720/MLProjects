@@ -27,6 +27,31 @@ foundation beneath model training systems**—ensuring image assets are canonica
 datasets are reproducible, and the structure and characteristics of training data
 remain understandable and auditable over time.
 
+## Uploading Images and Adding Labels
+
+The Upload flow combines:
+
+```
+Step Functions orchestration
+AWS Batch workers
+Lambda ingestion stages
+Iceberg-backed tables
+shared infrastructure constructs
+```
+
+to create a pipeline that is:
+
+```
+deterministic
+idempotent
+race-safe
+scalable
+```
+
+This architecture allows CVDMS to perform **large-scale
+dataset ingestion while maintaining strict guarantees about
+data integrity, duplicate detection, and label enrichment.**
+
 ## Documentation
 
 - **Infrastructure Stacks** – architecture and AWS resources  

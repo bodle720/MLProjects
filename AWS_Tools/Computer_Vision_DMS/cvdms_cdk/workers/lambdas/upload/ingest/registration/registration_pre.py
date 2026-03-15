@@ -11,7 +11,6 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[REG_INGEST_PRE]"
 
-
 def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     Try to extract shard names from batching manifests.
@@ -49,7 +48,7 @@ def _extract_owner_shard_id_from_key(k: str) -> str:
             return p[len("owner-") :]
     return ""
 
-def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
+def collect_processed_shards(job_id: str, manifests: List[str], user: str, event_type: str) -> Dict:
     """
     Locate per-shard registration processed outputs.
 
@@ -134,6 +133,8 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     # canonical label totals now come from summary["canonical_label_rows_total"]
     total_canon_label_rows = 0
 
+    expected_owner_shards_from_summaries = set()
+
     # ---- build target-image shard items (Map kind=target) ----
     for shard in expected_target_shards:
         up_k = shard_upload.get(shard)
@@ -152,6 +153,12 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         canon_im_rows = int(summary.get("canonical_imagery_rows", 0))
         img_lbl_rows = int(summary.get("image_labels_rows", 0))
         canon_lbl_rows = int(summary.get("canonical_label_rows_total", 0))  # <-- changed
+
+        owner_shards_touched = summary.get("canonical_label_owner_shards_touched", [])
+        if isinstance(owner_shards_touched, list):
+            for o in owner_shards_touched:
+                if o:
+                    expected_owner_shards_from_summaries.add(str(o).rjust(6, "0"))
 
         total_rows_read += rows_read
         total_canon_imagery_rows += canon_im_rows
@@ -176,8 +183,26 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     # ---- build fingerprint-owner shard items (Map kind=label_owner) ----
     # Each item points at the owner prefix; shard ingest can list all jsonl under it.
     owner_shards: List[str] = sorted(owner_parts.keys())
-    total_owner_label_files = 0
 
+    actual_owner_shards = set(owner_shards)
+    missing_owner_shards = expected_owner_shards_from_summaries - actual_owner_shards
+
+    if missing_owner_shards:
+        raise RuntimeError(
+            f"{TASK_NAME} Missing canonical label owner shard outputs: {sorted(missing_owner_shards)}. "
+            f"Expected from worker summaries but not found in processed prefix."
+        )
+
+    unexpected_owner_shards = actual_owner_shards - expected_owner_shards_from_summaries
+    if unexpected_owner_shards:
+        log(job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Warning: unexpected owner shard outputs discovered: {sorted(unexpected_owner_shards)}",
+            level="warning")
+
+    total_owner_label_files = 0
     for owner_id in owner_shards:
         parts = owner_parts.get(owner_id, [])
         if not parts:
@@ -239,7 +264,7 @@ def handler(event, context):
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting registration pre-ingest for job {job_id}")
 
-    collected = collect_processed_shards(job_id, manifests)
+    collected = collect_processed_shards(job_id, manifests, user, event_type)
 
     missing = collected["missing_target_shards"]
     if missing:
@@ -250,8 +275,7 @@ def handler(event, context):
     shards = collected["shards"]
     total_rows_read = int(collected["total_rows_read"])
 
-    log(
-        job_id,
+    log(job_id,
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
@@ -261,8 +285,7 @@ def handler(event, context):
         f"canon_imagery_rows={collected['total_canon_imagery_rows']} "
         f"canon_label_rows_total={collected['total_canon_label_rows']} "
         f"image_labels_rows={collected['total_image_labels_rows']} "
-        f"owner_label_files={collected['total_owner_label_files']}"
-    )
+        f"owner_label_files={collected['total_owner_label_files']}")
 
     # Validate against expected eligible row count (best check for registration)
     if total_rows_read != expected_count:

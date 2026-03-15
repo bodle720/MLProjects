@@ -35,7 +35,6 @@ USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
 PATH_PREFIX = os.environ["PATH_PREFIX"]
-IS_VIDEO = os.environ["IS_VIDEO"].strip().lower() == "true"
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
@@ -65,7 +64,6 @@ MAX_ROWS_IN_MEMORY = 200000
 OWNER_SHARDS = 512  # keep aligned with your MAX_SHARDS in batching
 
 ddb = boto3.client("dynamodb")
-
 
 def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
     """
@@ -105,15 +103,12 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
 
         raise RuntimeError(f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}")
 
-
-def process_manifest(
-    manifest: Dict[str, Any]
-) -> Tuple[
+def process_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
     Dict[str, List[Dict[str, Any]]],   # canonical label rows by owner shard
     List[Dict[str, Any]],
-    Dict[str, Any],
+    Dict[str, Any]
 ]:
     """
     Returns:
@@ -186,7 +181,7 @@ def process_manifest(
 
                 # Copy image to canonical location
                 canonical_image_key, canonical_image_uri = build_canonical_image_dest(
-                    FILE_BUCKET_NAME, image_id, temp_image_uri
+                    FILE_BUCKET_NAME, image_id, temp_image_uri, DATA_SOURCE, PATH_PREFIX
                 )
 
                 copy_plan: List[Tuple[str, str, str, str]] = []
@@ -342,7 +337,6 @@ def process_manifest(
 
     return updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary
 
-
 def write_outputs(
     shard_name: str,
     updated_upload_rows: List[Dict[str, Any]],
@@ -386,7 +380,6 @@ def write_outputs(
     )
     write_s3_obj(bucket, success_key, b"", "text/plain", TASK_NAME)
 
-
 def main():
     start = time.time()
 
@@ -395,21 +388,19 @@ def main():
 
     shard_name = manifest.get("shard_prefix", "shard")
 
-    log(
-        JOB_ID,
+    log(JOB_ID,
         USER,
         EVENT_TYPE,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
-    )
+        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
 
     try:
         updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary = process_manifest(manifest)
+
         write_outputs(shard_name, updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary)
 
         elapsed = time.time() - start
-        log(
-            JOB_ID,
+        log(JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
@@ -418,20 +409,16 @@ def main():
             f"canon_imagery={summary['canonical_imagery_rows']} image_labels={summary['image_labels_rows']} "
             f"canon_label_rows={summary['canonical_label_rows_total']} "
             f"owner_shards={len(summary['canonical_label_owner_shards_touched'])} "
-            f"time_s={elapsed:.1f}",
-        )
+            f"time_s={elapsed:.1f}")
 
     except Exception as e:
-        log(
-            JOB_ID,
+        log(JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
             f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
-            level="error",
-        )
+            level="error")
         raise
-
 
 if __name__ == "__main__":
     main()

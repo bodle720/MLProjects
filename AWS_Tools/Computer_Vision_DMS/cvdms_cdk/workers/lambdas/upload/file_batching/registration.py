@@ -126,7 +126,7 @@ def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shard
                 substr(
                   replace(
                     CASE
-                      WHEN dedup_status = 'external_duplicate' THEN coalesce(matched_image_id, '')
+                      WHEN dedup_status = 'external_duplicate' THEN coalesce(matched_image_id, image_id)
                       ELSE coalesce(image_id, '')
                     END,
                     '-',''

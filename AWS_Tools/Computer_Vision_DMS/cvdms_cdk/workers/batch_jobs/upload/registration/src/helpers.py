@@ -16,7 +16,6 @@ def split_ext(filename: str) -> Tuple[str, str]:
     stem, ext = filename.rsplit(".", 1)
     return stem, ext.lower()
 
-
 def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
     """
     copy_plan: list of (src_bucket, src_key, dst_bucket, dst_key)
@@ -24,22 +23,18 @@ def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
     for src_bucket, src_key, dst_bucket, dst_key in copy_plan:
         s3_copy_with_retry(src_bucket, src_key, dst_bucket, dst_key, TASK_NAME)
 
-
 def build_canonical_image_dest(file_bucket: str,
                                image_id: str,
                                temp_image_uri: str,
                                data_source: str,
-                               path_prefix: str,
-                               is_video: bool) -> Tuple[str, str]:
+                               path_prefix: str) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri, TASK_NAME)
     fname = get_key_basename(temp_key)
     _, ext = split_ext(fname)
     if ext not in ("png", "jpg", "jpeg"):
         raise RuntimeError(f"{TASK_NAME} Unsupported or missing image extension for temp_source_ref={temp_image_uri}")
-    category = 'videos' if is_video else 'non-videos'
-    dst_key = f"canonical/{category}/{data_source}/{path_prefix}/{image_id}.{ext}"
+    dst_key = f"canonical/images/{data_source}/{path_prefix}/{image_id}.{ext}"
     return dst_key, make_s3_uri(file_bucket, dst_key)
-
 
 def build_canonical_label_dests_by_fingerprint(
     *,
@@ -65,9 +60,9 @@ def build_canonical_label_dests_by_fingerprint(
     if label_type == "object-detection":
         if not temp_bbox_meta_uri:
             raise RuntimeError(f"{TASK_NAME} Missing temp_source_ref_bbox_meta for object-detection")
-        src_b, src_k = parse_s3_uri(temp_bbox_meta_uri, TASK_NAME)
 
-        dst_key = f"canonical/bounding-boxes/{fingerprint}.json"
+        src_b, src_k = parse_s3_uri(temp_bbox_meta_uri, TASK_NAME)
+        dst_key = f"canonical/labels/bounding-boxes/{fingerprint}.json"
         dst_keys.append(dst_key)
         dst_uris.append(make_s3_uri(file_bucket, dst_key))
         copy_plan.append((src_b, src_k, file_bucket, dst_key))
@@ -80,8 +75,8 @@ def build_canonical_label_dests_by_fingerprint(
         src_b1, src_k1 = parse_s3_uri(temp_semantic_png_uri, TASK_NAME)
         src_b2, src_k2 = parse_s3_uri(temp_semantic_meta_uri, TASK_NAME)
 
-        dst_png = f"canonical/semantic-masks/{fingerprint}.png"
-        dst_meta = f"canonical/semantic-masks/{fingerprint}.json"
+        dst_png = f"canonical/labels/semantic-masks/{fingerprint}.png"
+        dst_meta = f"canonical/labels/semantic-masks/{fingerprint}.json"
         dst_keys.extend([dst_png, dst_meta])
         dst_uris.extend([make_s3_uri(file_bucket, dst_png), make_s3_uri(file_bucket, dst_meta)])
 
@@ -96,8 +91,8 @@ def build_canonical_label_dests_by_fingerprint(
         src_b1, src_k1 = parse_s3_uri(temp_instance_png_uri, TASK_NAME)
         src_b2, src_k2 = parse_s3_uri(temp_instance_meta_uri, TASK_NAME)
 
-        dst_png = f"canonical/instance-annotations/{fingerprint}.png"
-        dst_meta = f"canonical/instance-annotations/{fingerprint}.json"
+        dst_png = f"canonical/labels/instance-annotations/{fingerprint}.png"
+        dst_meta = f"canonical/labels/instance-annotations/{fingerprint}.json"
         dst_keys.extend([dst_png, dst_meta])
         dst_uris.extend([make_s3_uri(file_bucket, dst_png), make_s3_uri(file_bucket, dst_meta)])
 
@@ -107,7 +102,6 @@ def build_canonical_label_dests_by_fingerprint(
 
     # single-label / multi-label: no label files
     return [], [], []
-
 
 def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str, registration_time: str) -> Dict[str, Any]:
     image_id = row.get("image_id")
@@ -142,7 +136,6 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "color_bucket": row.get("color_bucket")
     }
 
-
 def build_canonical_label_table_row(
     *,
     label_type: str,
@@ -167,6 +160,7 @@ def build_canonical_label_table_row(
     if label_type == "semantic-segmentation":
         if len(canonical_label_uris) != 2:
             raise RuntimeError(f"{TASK_NAME} semantic-segmentation expected exactly 2 canonical label uris")
+
         png_uri = next(u for u in canonical_label_uris if u.endswith(".png"))
         meta_uri = next(u for u in canonical_label_uris if u.endswith(".json"))
         return {
@@ -180,6 +174,7 @@ def build_canonical_label_table_row(
     if label_type == "instance-segmentation":
         if len(canonical_label_uris) != 2:
             raise RuntimeError(f"{TASK_NAME} instance-segmentation expected exactly 2 canonical label uris")
+
         png_uri = next(u for u in canonical_label_uris if u.endswith(".png"))
         meta_uri = next(u for u in canonical_label_uris if u.endswith(".json"))
         return {
@@ -191,7 +186,6 @@ def build_canonical_label_table_row(
         }
 
     return None
-
 
 def build_image_label_rows(
     *,
@@ -225,7 +219,6 @@ def build_image_label_rows(
 
     return []
 
-
 def fingerprint_owner_shard_id(fingerprint: str, num_shards: int) -> str:
     """
     Deterministically map a fingerprint -> owner shard id.
@@ -251,7 +244,6 @@ def fingerprint_owner_shard_id(fingerprint: str, num_shards: int) -> str:
     shard = v % num_shards
     return str(shard).rjust(6, "0")
 
-
 def build_owner_label_output_key(*, processed_prefix: str, owner_shard_id: str, source_target_shard: str) -> str:
     """
     Where the worker writes canonical label table rows routed by fingerprint-owner shard.
@@ -262,5 +254,6 @@ def build_owner_label_output_key(*, processed_prefix: str, owner_shard_id: str, 
     owner = (owner_shard_id or "").strip()
     if not owner:
         raise RuntimeError(f"{TASK_NAME} owner_shard_id is empty")
+
     src = (source_target_shard or "shard").strip()
     return f"{processed_prefix}/canonical_labels_by_fingerprint/owner-{owner}/part-{src}.jsonl"

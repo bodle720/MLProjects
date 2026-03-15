@@ -182,13 +182,11 @@ def _ingest_label_owner_shard(
             raise RuntimeError(f"{TASK_NAME} canonical label insert-only failed table={table}: {err}")
         ingested += len(chunk)
 
-    log(
-        job_id,
+    log(job_id,
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Done kind=label_owner shard={shard} parts={len(label_keys)} label_rows_ingested={ingested}",
-    )
+        f"{TASK_NAME} Done kind=label_owner shard={shard} parts={len(label_keys)} label_rows_ingested={ingested}")
 
     return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": len(label_keys), "label_rows_ingested": ingested}
 
@@ -343,8 +341,7 @@ def _ingest_target_shard(
         if not ok:
             raise RuntimeError(f"{TASK_NAME} image_labels insert-only failed: {err}")
 
-    log(
-        job_id,
+    log(job_id,
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
@@ -357,8 +354,7 @@ def _ingest_target_shard(
             f"external_dup_enriched={enriched_count} "
             f"external_dup_no_op={noop_count} "
             f"external_dup_failed={failed_count}"
-        ),
-    )
+        ))
 
     return {
         "job_id": job_id,
