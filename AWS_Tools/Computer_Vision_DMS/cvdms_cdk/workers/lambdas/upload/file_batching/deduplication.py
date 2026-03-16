@@ -126,11 +126,12 @@ def list_export_files(export_prefix):
     export_prefix = export_prefix.rstrip("/") + "/"
     kwargs = {"Bucket": FILE_BUCKET_NAME, "Prefix": export_prefix}
     sample_keys = []
+
     for page in paginator.paginate(**kwargs):
         for obj in page.get("Contents", []):
             key = obj["Key"]
 
-            if len(sample_keys) < 3:
+            if len(sample_keys) < 10:
                 sample_keys.append(key)
 
             name = key.split("/")[-1]
@@ -141,18 +142,17 @@ def list_export_files(export_prefix):
             if name.startswith("_") or name.startswith("."):
                 continue
 
-            if not name.endswith(".parquet"):
-                continue
-
-            # Try to extract sha_prefix from key path like ".../sha_prefix=aa/part-000.parquet"
+            # Accept extensionless Athena CTAS parquet data files.
+            # We only require the object to live under a sha_prefix partition and not be a hidden/system file.
             sha_prefix = None
             parts = key.split("/")
             for p in parts:
                 if p.startswith("sha_prefix="):
                     sha_prefix = p.split("=", 1)[1]
                     break
+
             if not sha_prefix:
-                raise RuntimeError(f"{TASK_NAME} Unable to extract sha_prefix from export key: {key}")
+                continue
 
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
@@ -336,6 +336,10 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
+    log(
+        job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Found {sum(len(v) for v in files_by_prefix.values())} export data files across {len(files_by_prefix)} shard prefixes"
+    )
     # 4) Create manifests.
     manifest_uris = []
     try:
