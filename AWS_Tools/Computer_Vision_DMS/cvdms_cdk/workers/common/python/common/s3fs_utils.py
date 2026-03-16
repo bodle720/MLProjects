@@ -56,8 +56,11 @@ def read_parquet_rows_from_s3_uris(s3_uris: Iterable[str]) -> Iterator[dict[str,
     fs = s3fs.S3FileSystem()
     for uri in s3_uris:
         path = uri.replace("s3://", "", 1)
-        dataset = ds.dataset(path, filesystem=fs, format="parquet")
-        scanner = dataset.scanner(batch_size=10_000, use_threads=True)
-        for batch in scanner.to_batches():
-            for row in batch.to_pylist():
-                yield normalize_row(row)
+        try:
+            dataset = ds.dataset(path, filesystem=fs, format="parquet")
+            scanner = dataset.scanner(batch_size=10_000, use_threads=True)
+            for batch in scanner.to_batches():
+                for row in batch.to_pylist():
+                    yield normalize_row(row)
+        except Exception as e:
+            raise RuntimeError(f"Failed reading parquet uri={uri} path={path}: {e}") from e

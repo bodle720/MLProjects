@@ -145,7 +145,7 @@ def drop_table_if_exists(db_name: str,
     if '"' in db_name or '"' in table_name:
         raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
 
-    sql = f'DROP TABLE IF EXISTS "{db_name}"."{table_name}"'
+    sql = f"DROP TABLE IF EXISTS {db_name}.{table_name}" # # sql = f'DROP TABLE IF EXISTS "{db_name}"."{table_name}"'
 
     qid, _ = run_athena(sql,
                        task_name,

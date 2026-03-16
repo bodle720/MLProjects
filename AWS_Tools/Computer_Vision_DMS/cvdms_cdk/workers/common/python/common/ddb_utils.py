@@ -5,7 +5,7 @@ from botocore.exceptions import ClientError
 
 from common.logging_utils import log
 
-dynamodb = boto3.resource("dynamodb")
+dynamodb = boto3.client("dynamodb")
 
 DdbAttr = Dict[str, Any]
 DdbItem = Dict[str, DdbAttr]
@@ -13,12 +13,12 @@ DdbItem = Dict[str, DdbAttr]
 JobStatus = Literal["PENDING", "IN_PROGRESS", "FAILED", "COMPLETED"]
 
 def update_job_status(job_id: str,
-                        status: JobStatus,
-                        job_table_name: str,
-                        stream_name: str,
-                        user: str = "unknown",
-                        event_type: str = "unknown",
-                        error_msg: Optional[str] = None) -> tuple[bool, str]:
+                      status: JobStatus,
+                      job_table_name: str,
+                      stream_name: str,
+                      user: str = "unknown",
+                      event_type: str = "unknown",
+                      error_msg: Optional[str] = None) -> tuple[bool, str]:
 
     if not job_id:
         return False, "missing_job_id"
@@ -27,7 +27,9 @@ def update_job_status(job_id: str,
     if not stream_name:
         return False, "missing_stream_name"
 
-    # If you want to be defensive even with Literal:
+    if error_msg is not None:
+        error_msg = str(error_msg)[:512]
+
     valid_statuses = {"PENDING", "IN_PROGRESS", "FAILED", "COMPLETED"}
     if status not in valid_statuses:
         log(job_id, user, event_type, stream_name,
@@ -36,27 +38,26 @@ def update_job_status(job_id: str,
         return False, f"invalid_status:{status}"
 
     expr_names = {"#s": "status"}
-    expr_vals = {":s": status}
-    update_parts = ["SET #s = :s"]
+    expr_vals = {":s": {"S": status}}
+    update_parts = ["#s = :s"]
     remove_parts = []
 
     if error_msg is not None:
         expr_names["#e"] = "error"
-        expr_vals[":e"] = error_msg
+        expr_vals[":e"] = {"S": error_msg}
         update_parts.append("#e = :e")
     else:
-        # Optional: clear error on non-FAILED transitions
         if status != "FAILED":
             remove_parts.append("error")
 
-    update_expr = " ".join(update_parts)
+    update_expr = "SET " + ", ".join(update_parts)
     if remove_parts:
         update_expr += " REMOVE " + ", ".join(remove_parts)
 
     try:
-        job_table = dynamodb.Table(job_table_name)
-        job_table.update_item(
-            Key={"job_id": job_id},
+        dynamodb.update_item(
+            TableName=job_table_name,
+            Key={"job_id": {"S": job_id}},
             UpdateExpression=update_expr,
             ExpressionAttributeNames=expr_names,
             ExpressionAttributeValues=expr_vals,
@@ -77,12 +78,8 @@ def update_job_status(job_id: str,
 def release_lock(job_id: str,
                  lock_table_name: str,
                  stream_name: str,
-                 user: str ='unknown',
-                 event_type: str ='unknown') -> tuple[bool, str]:
-    """
-    Release lock only if current locked_by matches job_id (the job id holding the lock).
-    Returns (True, "") on success.
-    """
+                 user: str = 'unknown',
+                 event_type: str = 'unknown') -> tuple[bool, str]:
 
     if not job_id:
         return False, "missing_job_id"
@@ -93,12 +90,15 @@ def release_lock(job_id: str,
 
     lock_id = "global"
     try:
-        lock_table = dynamodb.Table(lock_table_name)
-        lock_table.update_item(
-            Key={"lock_id": lock_id},
+        dynamodb.update_item(
+            TableName=lock_table_name,
+            Key={"lock_id": {"S": lock_id}},
             UpdateExpression="SET locked = :false REMOVE locked_by",
             ConditionExpression="locked_by = :holder",
-            ExpressionAttributeValues={":false": False, ":holder": job_id},
+            ExpressionAttributeValues={
+                ":false": {"BOOL": False},
+                ":holder": {"S": job_id},
+            },
             ReturnValues="ALL_NEW",
         )
         return True, ""
@@ -120,6 +120,8 @@ def batch_get_dynamodb_items(table_name: str,
     if not isinstance(keys, list):
         raise TypeError(f"{task_name} keys must be a list[str], got {type(keys).__name__}")
 
+    keys = list(set(keys))
+
     if not (1 <= ddb_batch_get_max <= 100):
         raise ValueError(f"{task_name} ddb_batch_get_max must be between 1 and 100 inclusive, got {ddb_batch_get_max}")
 
@@ -128,10 +130,11 @@ def batch_get_dynamodb_items(table_name: str,
     for i in range(0, len(keys), ddb_batch_get_max):
         chunk = keys[i:i + ddb_batch_get_max]
         request_keys = [{"sha256": {"S": k}} for k in chunk]
+        print(f"{task_name} requesting {len(request_keys)} keys from DynamoDB")
         request_items = {table_name: {"Keys": request_keys}}
 
         backoff = 1.0
-        for attempt in range(15):
+        for attempt in range(30):
             try:
                 resp = dynamodb.batch_get_item(RequestItems=request_items)
 
@@ -141,19 +144,38 @@ def batch_get_dynamodb_items(table_name: str,
                         results[sha] = item
 
                 unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
+                print(f"{task_name} response count={len(resp.get('Responses', {}).get(table_name, []))}")
+                print(f"{task_name} unprocessed count={len(unprocessed)}")
+
                 if not unprocessed:
+                    print(f"{task_name} breaking on attempt {attempt}")
                     break
 
+                print(f"{task_name} retrying unprocessed keys: {len(unprocessed)} (attempt {attempt})")
                 request_items = {table_name: {"Keys": unprocessed}}
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 8.0)
+                backoff = min(backoff * 2, 15.0)
 
             except ClientError as e:
-                code = e.response.get("Error", {}).get("Code")
-                if code in ("AccessDeniedException", "UnrecognizedClientException"):
-                    raise
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 8.0)
+                code = e.response.get("Error", {}).get("Code", "")
+                msg = e.response.get("Error", {}).get("Message", str(e))
+                print(f"{task_name} batch_get_item ClientError code={code} message={msg}")
+
+                retryable_codes = {
+                    "ProvisionedThroughputExceededException",
+                    "ThrottlingException",
+                    "RequestLimitExceeded",
+                    "InternalServerError",
+                    "InternalServerException",
+                }
+
+                if code in retryable_codes:
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 15.0)
+                    continue
+
+                raise
+
         else:
             raise RuntimeError(f"{task_name} DynamoDB batch_get_item exceeded retries for table {table_name}")
 

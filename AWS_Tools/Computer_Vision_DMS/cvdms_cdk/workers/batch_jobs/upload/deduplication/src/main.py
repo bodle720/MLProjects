@@ -39,7 +39,7 @@ if not SHA256_TABLE_NAME:
     raise RuntimeError(f"{TASK_NAME} SHA256_TABLE_NAME not set")
 
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/deduplication-step/processed"
-DDB_BATCH_GET_MAX = 100
+DDB_BATCH_GET_MAX = 25
 MAX_ROWS_IN_MEMORY = 200000
 MAX_GROUP_SIZE = 10000
 
@@ -181,7 +181,9 @@ def process_manifest(manifest):
             processed_rows.append(r)
             internal_dup_count += 1
 
-    sha_list = [s for s, _ in representatives]
+    sha_list = list({s for s, _ in representatives})
+
+    print(f"{TASK_NAME} unique SHA count = {len(sha_list)}")
     ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, TASK_NAME) if sha_list else {}
 
     external_dup_count = 0

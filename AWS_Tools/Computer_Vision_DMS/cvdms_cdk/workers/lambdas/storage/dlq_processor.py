@@ -113,7 +113,6 @@ def _load_new_sha_mappings_from_processed_upload_staging(processed_keys: List[st
 
     return out
 
-
 def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int, int, int]:
     """
     Delete sha256 entries only if they still point at the image_id created by THIS job.
@@ -141,7 +140,6 @@ def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int,
             errors += 1
 
     return deleted, skipped, errors
-
 
 def _list_registration_processed_keys(job_id: str) -> List[str]:
     prefix = f"temp/image-upload/{job_id}/batches/registration-step/processed/"
@@ -312,7 +310,6 @@ def _delete_canonical_label_rows_if_orphaned(table: str, label_type: str, rows: 
 
     return to_delete, skipped
 
-
 def _drop_ctas_tables_best_effort(job_id: str) -> None:
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     candidates = [
@@ -446,12 +443,14 @@ def handler(event, context):
             pass
 
         # 1) Delete temp folder for this job (always, after we used it for rollback)
-        prefix = f"temp/image-upload/{job_id}/"
-        try:
-            delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted temp s3 prefix")
-        except Exception:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Temp S3 cleanup failed", level="error")
+        # this can cause race conditions with in-flight batch jobs after 1 or more jobs fail, implement later
+        # in a manner that won't race with a failed map state of batch jobs
+        # prefix = f"temp/image-upload/{job_id}/"
+        # try:
+        #     delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
+        #     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted temp s3 prefix")
+        # except Exception:
+        #     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Temp S3 cleanup failed", level="error")
 
         # 3) Mark job FAILED
         try:
@@ -462,7 +461,7 @@ def handler(event, context):
                 LOG_FIREHOSE_STREAM_NAME,
                 user=user,
                 event_type=event_type,
-                error_msg=error_msg[:100],
+                error_msg=(error_msg or "")[:512]
             )
             if update_success:
                 log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job status to FAILED.")

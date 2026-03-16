@@ -288,7 +288,7 @@ class BatchingStage(Construct):
                     }
                 },
             },
-            retry_strategy={"attempts": 5},
+            retry_strategy={"attempts": 1},
             timeout={"attemptDurationSeconds": int(Duration.hours(2).to_seconds())}
         )
 
@@ -345,7 +345,8 @@ class BatchingStage(Construct):
             item_selector=params,
             result_path=sfn.JsonPath.DISCARD,
             output_path="$",
-            max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus)))),
+            # max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus))))
+            max_concurrency=7
         )
 
         map_state.add_catch(

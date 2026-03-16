@@ -133,10 +133,15 @@ def list_export_files(export_prefix):
             if len(sample_keys) < 3:
                 sample_keys.append(key)
 
+            name = key.split("/")[-1]
+
             if key.endswith("/"):
                 continue
 
-            if key.split("/")[-1].startswith("_") or key.split("/")[-1].startswith("."):
+            if name.startswith("_") or name.startswith("."):
+                continue
+
+            if not name.endswith(".parquet"):
                 continue
 
             # Try to extract sha_prefix from key path like ".../sha_prefix=aa/part-000.parquet"
@@ -148,6 +153,7 @@ def list_export_files(export_prefix):
                     break
             if not sha_prefix:
                 raise RuntimeError(f"{TASK_NAME} Unable to extract sha_prefix from export key: {key}")
+
             files_by_prefix.setdefault(sha_prefix, []).append(f"s3://{FILE_BUCKET_NAME}/{key}")
 
     return files_by_prefix, sample_keys
