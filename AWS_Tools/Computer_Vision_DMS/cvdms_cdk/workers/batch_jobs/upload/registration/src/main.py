@@ -122,10 +122,10 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
     shard_name = manifest.get("shard_prefix", "shard")
 
     total_rows = 0
-    eligible_rows = 0
+    registration_candidate_rows = 0
     skipped_rows = 0
 
-    reg_passed = 0
+    new_canonical_images_registered = 0
     reg_failed = 0
 
     updated_upload_rows: List[Dict[str, Any]] = []
@@ -150,21 +150,49 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
         vstat = row.get("validation_status")
         dstat = row.get("dedup_status")
 
-        # Registration stage should only be handed eligible rows by CTAS,
-        # but we keep this guard in case of manual/testing mistakes.
-        if vstat != "passed" or dstat not in ("passed", "external_duplicate", "internal_duplicate"):
+        if vstat != "passed":
             skipped_rows += 1
+            row["registration_status"] = "failed"
+            row["registration_error"] = f"skipped registration because validation_status={vstat}"
+            reg_failed += 1
             updated_upload_rows.append(row)
             continue
 
         if dstat == "internal_duplicate":
-            # Intentionally ignore; keep row unchanged so audit shows it wasn't registered.
             skipped_rows += 1
+            row["registration_status"] = "failed"
+            row["registration_error"] = "skipped registration because dedup_status=internal_duplicate"
+            reg_failed += 1
             updated_upload_rows.append(row)
             continue
 
-        eligible_rows += 1
+        if dstat not in ("passed", "external_duplicate"):
+            skipped_rows += 1
+
+            # Preserve more specific dedup failure context when present
+            dedup_err = row.get("dedup_error")
+            if isinstance(dedup_err, str) and dedup_err.strip():
+                row["registration_error"] = f"skipped registration because dedup failed: {dedup_err.strip()}"
+            else:
+                row["registration_error"] = f"skipped registration because dedup_status={dstat}"
+
+            row["registration_status"] = "failed"
+            reg_failed += 1
+            updated_upload_rows.append(row)
+            continue
+
+        registration_candidate_rows += 1
         try:
+            if dstat in ("passed", "external_duplicate"):
+                usable_labels = [
+                    lab.strip().lower()
+                    for lab in (row.get("string_labels") or [])
+                    if isinstance(lab, str) and lab.strip()
+                ]
+
+                if LABEL_TYPE in ("single-label", "multi-label") and not usable_labels:
+                    raise RuntimeError(f"{TASK_NAME} Missing usable string_labels for {LABEL_TYPE}")
+
             if dstat == "passed":
                 # New canonical image
                 image_id = row.get("image_id")
@@ -252,7 +280,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
 
                 row["registration_status"] = "passed"
                 row["registration_error"] = None
-                reg_passed += 1
+                new_canonical_images_registered += 1
 
             elif dstat == "external_duplicate":
                 # Label enrichment against matched_image_id
@@ -307,7 +335,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             seen_fingerprints.add(fingerprint)
 
                 # NOTE: We intentionally do NOT set registration_status here; ingest will decide enriched/no_op based on DB.
-
             else:
                 skipped_rows += 1
 
@@ -325,9 +352,9 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
         "shard_name": shard_name,
         "label_type": LABEL_TYPE,
         "rows_read": total_rows,
-        "eligible_rows": eligible_rows,
+        "registration_candidate_rows": registration_candidate_rows, # rows that entered active registration/enrichment logic
         "skipped_rows": skipped_rows,
-        "registration_passed": reg_passed,
+        "new_canonical_images_registered": new_canonical_images_registered, # not counting enrichments or no-ops
         "registration_failed": reg_failed,
         "canonical_imagery_rows": len(canonical_imagery_rows),
         "image_labels_rows": len(image_labels_rows),
@@ -404,9 +431,12 @@ def main():
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Finish shard={shard_name} rows={summary['rows_read']} eligible={summary['eligible_rows']} "
-            f"passed={summary['registration_passed']} failed={summary['registration_failed']} "
-            f"canon_imagery={summary['canonical_imagery_rows']} image_labels={summary['image_labels_rows']} "
+            f"{TASK_NAME} Finish shard={shard_name} rows={summary['rows_read']} "
+            f"registration_candidate_rows={summary['registration_candidate_rows']} "
+            f"new_canonical_images_registered={summary['new_canonical_images_registered']} "
+            f"registration_failed={summary['registration_failed']} "
+            f"canon_imagery={summary['canonical_imagery_rows']} "
+            f"image_labels={summary['image_labels_rows']} "
             f"canon_label_rows={summary['canonical_label_rows_total']} "
             f"owner_shards={len(summary['canonical_label_owner_shards_touched'])} "
             f"time_s={elapsed:.1f}")

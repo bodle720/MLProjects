@@ -140,6 +140,7 @@ class IngestStage(Construct):
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
                 "shard.$": "$$.Map.Item.Value.shard",
+                "kind.$": "$$.Map.Item.Value.kind",
                 "rows_read.$": "$$.Map.Item.Value.rows_read",
                 "upload_staging_key.$": "$$.Map.Item.Value.upload_staging_key",
                 "canonical_imagery_key.$": "$$.Map.Item.Value.canonical_imagery_key",

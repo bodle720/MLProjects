@@ -171,7 +171,7 @@ class ImageUploadStack(Stack):
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
             manifest_path="$.registrationStage.manifests",
-            expected_count_path="$.registrationStage.eligible_rows"
+            expected_count_path="$.registrationStage.total_rows"
         )
 
         # Make cleanup lambda to run once entire upload job is done.
@@ -399,15 +399,16 @@ class ImageUploadStack(Stack):
                        ]
         ))
 
-        # 8) S3: read and delete Iceberg files for upload_staging prefix
+        # 8) S3: read and delete Iceberg files for upload_staging and canonical prefix
         cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
-            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*"]
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*",
+                       f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/canonical/*"]
         ))
         cleanup_lambda.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}},
         ))
 
         cleanup_task = tasks.LambdaInvoke(

@@ -23,24 +23,7 @@ def handler(event, context):
         f"{TASK_NAME} Starting cleanup lambda for job {job_id}")
 
     # ---------------------------------------------------------
-    # 1. Release infrastructure lock first
-    # ---------------------------------------------------------
-    release_success, release_msg = release_lock(
-        job_id,
-        LOCK_TABLE_NAME,
-        LOG_FIREHOSE_STREAM_NAME,
-        user=user,
-        event_type=event_type
-    )
-
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Lock release attempt complete. Success={release_success}, msg={release_msg}")
-
-    if not release_success:
-        raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
-
-    # ---------------------------------------------------------
-    # 2. Mark job as COMPLETED
+    # 1. Mark job as COMPLETED
     # ---------------------------------------------------------
     update_success, update_msg = update_job_status(
         job_id,
@@ -57,6 +40,23 @@ def handler(event, context):
 
     if not update_success:
         raise RuntimeError(f"{TASK_NAME} Failed to update job status: {update_msg}")
+
+    # ---------------------------------------------------------
+    # 2. Release infrastructure lock
+    # ---------------------------------------------------------
+    release_success, release_msg = release_lock(
+        job_id,
+        LOCK_TABLE_NAME,
+        LOG_FIREHOSE_STREAM_NAME,
+        user=user,
+        event_type=event_type
+    )
+
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Lock release attempt complete. Success={release_success}, msg={release_msg}")
+
+    if not release_success and not str(release_msg).startswith("lock_not_held_by_job_id:"):
+        raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
 
     # ---------------------------------------------------------
     # 3. Delete S3 temp files (safe final cleanup)

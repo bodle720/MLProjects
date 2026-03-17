@@ -28,7 +28,7 @@ def handler(event, context):
     except KeyError as e:
         raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
 
-    expected_count = _safe_int(pre.get("expected_count"))
+    total_rows = _safe_int(pre.get("total_rows"))
     total_rows_read = _safe_int(pre.get("total_rows_read"))
     total_canon_imagery_rows = _safe_int(pre.get("total_canon_imagery_rows"))
     total_canon_label_rows = _safe_int(pre.get("total_canon_label_rows"))
@@ -41,7 +41,7 @@ def handler(event, context):
         LOG_FIREHOSE_STREAM_NAME,
         (
             f"{TASK_NAME} Starting post-ingest cleanup for job={job_id}. "
-            f"expected_count={expected_count} total_rows_read={total_rows_read} "
+            f"total_rows={total_rows} total_rows_read={total_rows_read} "
             f"canon_imagery_rows_expected={total_canon_imagery_rows} "
             f"canon_label_rows_total_expected={total_canon_label_rows} "
             f"image_labels_rows_expected={total_image_labels_rows}"
@@ -73,17 +73,27 @@ def handler(event, context):
             level="error",
         )
 
-    log(
-        job_id,
-        user,
-        event_type,
-        LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Completed registration post-ingest cleanup for job {job_id}"
-    )
+    if ctas_drop_ok:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Completed registration post-ingest cleanup for job {job_id}"
+        )
+    else:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Completed registration post-ingest with CTAS cleanup warning for job {job_id}",
+            level="warning"
+        )
 
     return {
         "job_id": job_id,
-        "expected_count": expected_count,
+        "total_rows": total_rows,
         "total_rows_read": total_rows_read,
         "total_canon_imagery_rows_expected": total_canon_imagery_rows,
         "total_canon_label_rows_total_expected": total_canon_label_rows,

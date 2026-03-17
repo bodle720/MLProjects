@@ -162,7 +162,7 @@ class BatchingStage(Construct):
 
         # DynamoDB tables
         job_table.grant_read_write_data(job_role)
-        sha256_table.grant_read_data(job_role)
+        sha256_table.grant_read_write_data(job_role)
 
         # Athena: start queries and poll results (scoped to workgroup)
         job_role.add_to_policy(iam.PolicyStatement(

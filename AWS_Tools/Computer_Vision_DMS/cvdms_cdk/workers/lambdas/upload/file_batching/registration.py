@@ -27,7 +27,7 @@ MAX_SHARDS = 512
 
 s3 = boto3.client("s3")
 
-def choose_target_rows_per_shard(total_rows: int) -> int:
+def choose_target_rows_per_shard() -> int:
     usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
     usable_kb = usable_mb * 1024.0
     avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
@@ -50,8 +50,6 @@ def generate_count_sql(job_id: str) -> str:
     SELECT CAST(count(*) AS bigint) AS c
     FROM {table}
     WHERE job_id = '{safe_job_id}'
-      AND validation_status = 'passed'
-      AND dedup_status IN ('passed', 'external_duplicate')
     """
 
 def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shards: int) -> str:
@@ -114,37 +112,38 @@ def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shard
         registration_error,
         matched_image_id,
 
-        CASE
-          WHEN dedup_status = 'external_duplicate' THEN matched_image_id
-          ELSE image_id
-        END AS target_image_id,
-
-        lpad(
-          CAST(
-            mod(
-              from_base(
-                substr(
-                  replace(
-                    CASE
-                      WHEN dedup_status = 'external_duplicate' THEN coalesce(matched_image_id, image_id)
-                      ELSE coalesce(image_id, '')
-                    END,
-                    '-',''
-                  ),
-                  1, 8
+    CASE
+      WHEN dedup_status = 'external_duplicate' AND matched_image_id IS NOT NULL THEN matched_image_id
+      ELSE image_id
+    END AS target_image_id,
+    
+    lpad(
+      CAST(
+        mod(
+          from_base(
+            substr(
+              replace(
+                coalesce(
+                  CASE
+                    WHEN dedup_status = 'external_duplicate' AND matched_image_id IS NOT NULL THEN matched_image_id
+                    ELSE image_id
+                  END,
+                  '00000000'
                 ),
-                16
+                '-',''
               ),
-              {num_shards}
-            ) AS varchar
+              1, 8
+            ),
+            16
           ),
-          6,
-          '0'
-        ) AS shard_id
+          {num_shards}
+        ) AS varchar
+      ),
+      6,
+      '0'
+    ) AS shard_id
     FROM {table}
     WHERE job_id = '{safe_job_id}'
-      AND validation_status = 'passed'
-      AND dedup_status IN ('passed', 'external_duplicate')
     """
 
 def list_export_files_by_shard(export_prefix: str):
@@ -208,7 +207,7 @@ def handler(event, context):
 
     delete_s3_prefix(FILE_BUCKET_NAME, main_prefix, TASK_NAME)
 
-    # 0) COUNT eligible rows only
+    # 0) COUNT all rows
     try:
         count_sql = generate_count_sql(job_id)
         qid, _ = run_athena(count_sql,
@@ -217,23 +216,20 @@ def handler(event, context):
                             ATHENA_WORKGROUP,
                             poll=2.0,
                             timeout=300)
-        eligible_rows = athena_get_int_scalar(qid, TASK_NAME)
+        total_rows = athena_get_int_scalar(qid, TASK_NAME)
     except Exception as e:
-        err = f"{TASK_NAME} Failed to count eligible rows for job {job_id}: {e}"
+        err = f"{TASK_NAME} Failed to count rows for job {job_id}: {e}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
-    if eligible_rows <= 0:
-        raise RuntimeError(
-            f"{TASK_NAME} No eligible rows for registration for job_id={job_id} "
-            f"(need validation_status='passed' and dedup_status in ('passed','external_duplicate'))"
-        )
+    if total_rows <= 0:
+        raise RuntimeError(f"{TASK_NAME} No upload_staging rows found for registration for job_id={job_id}")
 
-    target_rows = choose_target_rows_per_shard(eligible_rows)
-    num_shards = compute_num_shards(eligible_rows, target_rows)
+    target_rows = choose_target_rows_per_shard()
+    num_shards = compute_num_shards(total_rows, target_rows)
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} eligible_rows={eligible_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}")
+        f"{TASK_NAME} total_rows={total_rows}, target_rows_per_shard={target_rows}, num_shards={num_shards}")
 
     # 1) CTAS export partitioned by shard_id
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
@@ -291,7 +287,7 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
-        "eligible_rows": eligible_rows,
+        "total_rows": total_rows,
         "num_shards": num_shards,
         "manifests": manifest_uris
     }

@@ -48,7 +48,8 @@ def update_job_status(job_id: str,
         update_parts.append("#e = :e")
     else:
         if status != "FAILED":
-            remove_parts.append("error")
+            expr_names["#e"] = "error"
+            remove_parts.append("#e")
 
     update_expr = "SET " + ", ".join(update_parts)
     if remove_parts:

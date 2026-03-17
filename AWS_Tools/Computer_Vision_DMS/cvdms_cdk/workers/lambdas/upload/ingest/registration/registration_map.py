@@ -135,7 +135,7 @@ def _ingest_label_owner_shard(
         return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": 0, "label_rows_ingested": 0}
 
     per_table: Dict[str, List[Dict]] = {t: [] for t in LABEL_TABLES}
-    ingested = 0
+    attempted_to_ingest = 0
 
     for row in _iter_jsonl_keys(label_keys, f"{TASK_NAME}.read_owner_labels"):
         table = row.get("__table")
@@ -162,7 +162,7 @@ def _ingest_label_owner_shard(
             )
             if not ok:
                 raise RuntimeError(f"{TASK_NAME} canonical label insert-only failed table={table}: {err}")
-            ingested += len(chunk)
+            attempted_to_ingest += len(chunk)
             per_table[table] = []
 
     # flush remaining
@@ -180,15 +180,15 @@ def _ingest_label_owner_shard(
         )
         if not ok:
             raise RuntimeError(f"{TASK_NAME} canonical label insert-only failed table={table}: {err}")
-        ingested += len(chunk)
+        attempted_to_ingest += len(chunk)
 
     log(job_id,
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Done kind=label_owner shard={shard} parts={len(label_keys)} label_rows_ingested={ingested}")
+        f"{TASK_NAME} Done kind=label_owner shard={shard} parts={len(label_keys)} attempted_to_ingest={attempted_to_ingest}")
 
-    return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": len(label_keys), "label_rows_ingested": ingested}
+    return {"job_id": job_id, "shard": shard, "kind": "label_owner", "label_parts": len(label_keys), "attempted_to_ingest": attempted_to_ingest}
 
 def _ingest_target_shard(
     *,
@@ -206,7 +206,7 @@ def _ingest_target_shard(
       - upload_staging: delete-then-insert
       - canonical_imagery: delete-then-insert
       - image_labels: insert-only (where-not-exists)
-      - sets registration_status enriched/no_op for external_duplicate rows based on whether any *new* image_labels keys exist
+      - sets registration_status enriched/no_op for external_duplicate rows based on whether any candidate-new image_labels keys are detected before insert
     """
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Start kind=target shard={shard}")
 
@@ -250,7 +250,7 @@ def _ingest_target_shard(
         dstat = row.get("dedup_status")
         rstat = row.get("registration_status")
 
-        if dstat == "external_duplicate" and rstat != "failed":
+        if dstat == "external_duplicate" and rstat not in ("failed", "enriched", "no_op"):
             matched = row.get("matched_image_id")
             if isinstance(matched, str) and matched.strip():
                 target_image_id = matched.strip()
@@ -263,14 +263,24 @@ def _ingest_target_shard(
 
             row_new = False
             if label_type in ("single-label", "multi-label"):
-                labs = row.get("string_labels")
-                if isinstance(labs, list):
-                    for lab in labs:
-                        if isinstance(lab, str) and lab.strip():
-                            k = (target_image_id, "string-label", lab.strip().lower())
-                            if k in new_keys:
-                                row_new = True
-                                break
+                usable_labels = [
+                    lab.strip().lower()
+                    for lab in (row.get("string_labels") or [])
+                    if isinstance(lab, str) and lab.strip()
+                ]
+
+                if not usable_labels:
+                    row["registration_status"] = "failed"
+                    row["registration_error"] = "missing usable string_labels for external_duplicate"
+                    failed_count += 1
+                    upload_rows.append(row)
+                    continue
+
+                for lab in usable_labels:
+                    k = (target_image_id, "string-label", lab)
+                    if k in new_keys:
+                        row_new = True
+                        break
             else:
                 fp = row.get("label_fingerprint")
                 if isinstance(fp, str) and fp.strip():
@@ -349,8 +359,8 @@ def _ingest_target_shard(
             f"{TASK_NAME} Done kind=target shard={shard}: "
             f"upload_rows={len(upload_rows)} "
             f"canon_imagery_rows={len(canon_img_rows)} "
-            f"image_labels_incoming={len(incoming_image_labels)} "
-            f"image_labels_new={len(new_keys)} "
+            f"image_labels_attempted={len(incoming_image_labels)} "
+            f"image_labels_candidate_new={len(new_keys)} "
             f"external_dup_enriched={enriched_count} "
             f"external_dup_no_op={noop_count} "
             f"external_dup_failed={failed_count}"
@@ -362,8 +372,8 @@ def _ingest_target_shard(
         "kind": "target",
         "upload_rows": len(upload_rows),
         "canonical_imagery_rows": len(canon_img_rows),
-        "image_labels_incoming": len(incoming_image_labels),
-        "image_labels_new": len(new_keys),
+        "image_labels_attempted": len(incoming_image_labels),
+        "image_labels_candidate_new": len(new_keys),
         "external_dup_enriched": enriched_count,
         "external_dup_no_op": noop_count,
         "external_dup_failed": failed_count,
@@ -376,7 +386,7 @@ def handler(event, context):
         event_type = event["event_type"]
         label_type = event.get("label_type")  # present for target shards (and at top-level job input)
         shard = event["shard"]
-        kind = event.get("kind", "target")
+        kind = event["kind"]
         upload_staging_key = event.get("upload_staging_key")
         canonical_imagery_key = event.get("canonical_imagery_key")
         canonical_labels_key = event.get("canonical_labels_key")  # for owner shards this is a prefix
@@ -400,6 +410,8 @@ def handler(event, context):
             shard=shard,
             owner_prefix=canonical_labels_key,
         )
+    elif kind != "target":
+        raise RuntimeError(f"{TASK_NAME} unsupported kind={kind}")
 
     # default: kind=target
     if not isinstance(label_type, str) or not label_type.strip():
@@ -420,5 +432,5 @@ def handler(event, context):
         shard=shard,
         upload_staging_key=upload_staging_key,
         canonical_imagery_key=canonical_imagery_key,
-        image_labels_key=image_labels_key,
+        image_labels_key=image_labels_key
     )

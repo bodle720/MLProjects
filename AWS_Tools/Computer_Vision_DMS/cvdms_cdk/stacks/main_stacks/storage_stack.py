@@ -519,12 +519,13 @@ class StorageStack(Stack):
         # 8) S3: read and delete Iceberg files for upload_staging prefix
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
-            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"]
+            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*",
+                       f"arn:aws:s3:::{iceberg_bucket.bucket_name}/canonical/*"]
         ))
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*"]}}
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}}
         ))
 
         dlq_processor.add_to_role_policy(iam.PolicyStatement(

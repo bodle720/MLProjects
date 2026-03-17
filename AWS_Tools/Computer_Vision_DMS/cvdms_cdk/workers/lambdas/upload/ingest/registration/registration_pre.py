@@ -171,7 +171,6 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
                 "shard": shard,
                 "rows_read": rows_read,
                 "canonical_imagery_rows": canon_im_rows,
-                "canonical_label_rows": 0,  # labels handled by owner shards now
                 "image_labels_rows": img_lbl_rows,
                 "upload_staging_key": up_k,
                 "canonical_imagery_key": img_k,
@@ -245,7 +244,8 @@ def handler(event, context):
       {
         job_id, user, event_type, manifests,
         label_type?, data_source?,
-        expected_count  (eligible_rows from reg batching)
+        total_rows  (total_rows from reg batching)
+        Note: Ingest stage injects expected_count.$ from $.registrationStage.total_rows, hence the naming mismatch. Wiring is correct.
       }
     """
     try:
@@ -253,7 +253,7 @@ def handler(event, context):
         user = event["user"]
         event_type = event["event_type"]
         manifests = event["manifests"]
-        expected_count = int(event["expected_count"])
+        total_rows = int(event["expected_count"])
     except KeyError as e:
         raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
 
@@ -287,10 +287,10 @@ def handler(event, context):
         f"image_labels_rows={collected['total_image_labels_rows']} "
         f"owner_label_files={collected['total_owner_label_files']}")
 
-    # Validate against expected eligible row count (best check for registration)
-    if total_rows_read != expected_count:
+    # Validate against total row count (best check for registration)
+    if total_rows_read != total_rows:
         raise RuntimeError(
-            f"{TASK_NAME} Eligible row count mismatch: expected_count={expected_count}, "
+            f"{TASK_NAME} Total row count mismatch: total_rows={total_rows}, "
             f"workers total_rows_read={total_rows_read}"
         )
 
@@ -300,7 +300,7 @@ def handler(event, context):
 
     return {
         "shards": shards,  # mixed kinds: target + label_owner
-        "expected_count": expected_count,
+        "total_rows": total_rows,
         "total_rows_read": total_rows_read,
         "total_canon_imagery_rows": int(collected["total_canon_imagery_rows"]),
         "total_canon_label_rows": int(collected["total_canon_label_rows"]),
