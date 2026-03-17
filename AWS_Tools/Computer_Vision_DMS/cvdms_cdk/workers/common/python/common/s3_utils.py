@@ -25,11 +25,14 @@ def delete_s3_prefix(bucket: str, prefix: str, task_name: str, batch_size: int =
       - S3 DeleteObjects supports up to 1000 keys per request; we default to 100.
       - list_objects_v2 can return pages without "Contents".
     """
+
+    prefix = prefix.strip()
+
+    if not prefix:
+        raise ValueError(f"{task_name} refusing to delete empty prefix for bucket {bucket}")
+
     if batch_size < 1 or batch_size > 1000:
         raise ValueError(f"{task_name} batch_size must be between 1 and 1000, got {batch_size}")
-
-    if prefix.strip() == "":
-        raise ValueError(f"{task_name} refusing to delete empty prefix for bucket {bucket}")
 
     paginator = s3.get_paginator("list_objects_v2")
     to_delete: list[dict[str, str]] = []

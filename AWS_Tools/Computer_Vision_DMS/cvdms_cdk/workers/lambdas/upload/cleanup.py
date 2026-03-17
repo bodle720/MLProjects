@@ -55,8 +55,13 @@ def handler(event, context):
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
         f"{TASK_NAME} Lock release attempt complete. Success={release_success}, msg={release_msg}")
 
-    if not release_success and not str(release_msg).startswith("lock_not_held_by_job_id:"):
-        raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
+    if not release_success:
+        if str(release_msg).startswith("lock_not_held_by_job_id:"):
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Proceeding with cleanup because lock is already not held by this job: {release_msg}",
+                level="warning")
+        else:
+            raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
 
     # ---------------------------------------------------------
     # 3. Delete S3 temp files (safe final cleanup)
