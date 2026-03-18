@@ -280,7 +280,7 @@ def read_obj_with_retry(bucket: str,
             if code == "NoSuchKey" and attempt < retries - 1:
                 time.sleep(delay_s)
                 continue
-            raise RuntimeError(f"{task_name} error loading s3://{bucket}/{key}: {e}") from e
+            raise RuntimeError(f"{task_name} error loading s3://{bucket}/{key} (source image could not be read from s3://bucket/key (missing object or access denied)): {e}") from e
 
     return None
 

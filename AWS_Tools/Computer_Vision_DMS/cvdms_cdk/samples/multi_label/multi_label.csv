@@ -25,7 +25,6 @@ s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_la
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000165336.jpg,animal
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000203294.jpg,"inanimate,person"
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000203864.jpg,"inanimate,person"
-s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000205333.jpg,
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000242946.jpg,"animal,inanimate,person"
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000243204.jpg,"inanimate,person"
-s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000293474.jpg,inanimate
+s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_multi_label_30/000000293474.jpg,"inanimate,animal"

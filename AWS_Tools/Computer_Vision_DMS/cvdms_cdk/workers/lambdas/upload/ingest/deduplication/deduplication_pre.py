@@ -113,6 +113,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         shards.append(
             {
                 "shard": shard,
+                "kind": None,
                 "rows_read": rows_read,
                 "processed_rows": processed_rows,
                 "canonical_imagery_rows": None,

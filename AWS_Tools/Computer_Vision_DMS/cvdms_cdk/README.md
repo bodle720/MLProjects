@@ -51,6 +51,9 @@ dataset ingestion while maintaining strict guarantees about
 data integrity, duplicate detection, and label enrichment.**
 See the documentation section below for a notebook demonstrating
 how to upload images and labels using the CVDMS upload client.
+The sample CSV and JSONL files in the `samples/` folder may contain
+image label pairs with no labels or duplicate entries, simply for testing 
+the capability of the code to detect such cases.
 
 ## Documentation
 
