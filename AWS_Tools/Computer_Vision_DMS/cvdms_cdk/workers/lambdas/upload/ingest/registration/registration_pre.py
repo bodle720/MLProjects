@@ -213,6 +213,7 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         shards.append(
             {
                 "kind": "label_owner",
+                "rows_read": None,
                 "shard": f"owner-{owner_id}",
                 "owner_shard_id": owner_id,
                 "owner_prefix": owner_prefix,

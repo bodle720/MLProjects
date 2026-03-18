@@ -89,3 +89,5 @@ s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_30/000000197004.jpg,inanimate,8,152,85,186
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_30/000000197004.jpg,inanimate,22,522,118,103
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_30/000000263403.jpg,person,42,309,158,138
+s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_obj_det_30/000000263403.jpg,inanimate,32,209,138,133
+
