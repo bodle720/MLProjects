@@ -85,7 +85,7 @@ from botocore.exceptions import ClientError
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
-from cvdms_platform.upload_client_utils import validate_manifest, validate_s3_key_prefix
+from cvdms_platform.upload.upload_client_utils import validate_manifest, validate_s3_key_prefix
 
 _ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
 

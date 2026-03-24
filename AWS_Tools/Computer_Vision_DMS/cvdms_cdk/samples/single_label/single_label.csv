@@ -7,7 +7,6 @@ s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_l
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000131138.jpg,inanimate
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000148620.jpg,inanimate
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000162858.jpg,inanimate
-s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000180135.jpg,
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000186282.jpg,inanimate
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000210032.jpg,animal
 s3://cv-imagery-for-ml/samples/cvdms_project/coco/val2017/random_sample_single_label_30/000000263403.jpg,inanimate

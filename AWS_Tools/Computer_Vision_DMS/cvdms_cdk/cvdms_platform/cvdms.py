@@ -6,11 +6,13 @@ from typing import Optional, Dict
 import boto3
 from botocore.exceptions import ClientError
 
-from .upload_client import UploadClient
-from .log_client import LogClient
+from .upload.upload_client import UploadClient
+from .logging.log_client import LogClient
+from .dataset.dataset_client import DatasetClient
 
 SSM_PREFIX_TEMPLATE = "/cvdms/{app}/"
 REQUIRED_KEYS = ["storage/job_table_name", "storage/lock_table_name", "storage/file_bucket_name",
+                 "storage/datasets_bucket_name", "storage/datasets_table_name", "storage/dataset_versions_table_name", "storage/iceberg_database_name",
                  "logging/log_bucket_name", "logging/glue_db_name", "logging/glue_table_name"]
 
 def _session_for_profile(profile_name: Optional[str]) -> boto3.Session:
@@ -46,10 +48,7 @@ def _load_ssm_params(session: boto3.Session, app_name: str, region_name: str) ->
 
 class CvdmsApp:
     """
-    Minimal constructor: require only profile_name.
-    Example:
-      app = CvdmsApp(app_name="cvdmsv1", profile_name="abc")
-      out = app.upload_imagery("/tmp/files.csv")
+    Minimal constructor: require only app_name and profile_name.
     """
 
     def __init__(self, app_name: str, profile_name: Optional[str]):
@@ -108,24 +107,51 @@ class CvdmsApp:
         cfg = _load_ssm_params(session=session, app_name=app_name, region_name=region)
         # logging.info(f"Using AWS profile: {profile_name}, user = {user}, region: {region}, passed config loading step.")
 
-        # map SSM keys to UploadClient args and validate presence
+        # Get buckets and tables
         file_bucket_name = cfg.get("storage/file_bucket_name")
         job_table_name = cfg.get("storage/job_table_name")
         lock_table_name = cfg.get("storage/lock_table_name")
-        if not (file_bucket_name and job_table_name and lock_table_name):
-            missing = [k for k in ("storage/file_bucket_name", "storage/job_table_name", "storage/lock_table_name") if not cfg.get(k)]
+        iceberg_database_name = cfg.get("storage/iceberg_database_name")
+
+        datasets_bucket_name = cfg.get("storage/datasets_bucket_name")
+        datasets_table_name = cfg.get("storage/datasets_table_name")
+        dataset_versions_table_name = cfg.get("storage/dataset_versions_table_name")
+
+        if not (
+                file_bucket_name
+                and job_table_name
+                and lock_table_name
+                and iceberg_database_name
+                and datasets_bucket_name
+                and datasets_table_name
+                and dataset_versions_table_name
+        ):
+            needed = (
+                "storage/file_bucket_name",
+                "storage/job_table_name",
+                "storage/lock_table_name",
+                "storage/iceberg_database_name",
+                "storage/datasets_bucket_name",
+                "storage/datasets_table_name",
+                "storage/dataset_versions_table_name",
+            )
+            missing = [k for k in needed if not cfg.get(k)]
             raise RuntimeError(f"Missing required SSM params for app {app_name}: {missing}")
 
-        # construct UploadClient; it will create its own boto3 clients using the region
-        self._upload_client = UploadClient(
-            user=user,
-            file_bucket_name=file_bucket_name,
-            job_table_name=job_table_name,
-            lock_table_name=lock_table_name,
-            s3_client=session.client("s3", region_name=region),
-            dynamodb_resource=session.resource("dynamodb", region_name=region),
-        )
+        # construct clients or resources
+        s3_client = session.client("s3", region_name=region)
+        dynamodb_resource = session.resource("dynamodb", region_name=region)
+        athena_client = session.client("athena", region_name=region)
 
+        # construct UploadClient
+        self._upload_client = UploadClient(user=user,
+                                        file_bucket_name=file_bucket_name,
+                                        job_table_name=job_table_name,
+                                        lock_table_name=lock_table_name,
+                                        s3_client=s3_client,
+                                        dynamodb_resource=dynamodb_resource)
+
+        # Get the logging specific values.
         logging_glue_db_name = cfg.get("logging/glue_db_name")
         logging_glue_table_name = cfg.get("logging/glue_table_name")
         log_bucket_name = cfg.get("logging/log_bucket_name")
@@ -133,10 +159,21 @@ class CvdmsApp:
         self._log_client = LogClient(glue_db_name=logging_glue_db_name,
                                      glue_table_name=logging_glue_table_name,
                                      log_bucket_name=log_bucket_name,
-                                     athena_client=session.client("athena", region_name=region))
+                                     athena_client=athena_client)
+
+        # Make the dataset client.
+        self._dataset_client = DatasetClient(user=user,
+                                             datasets_bucket_name=datasets_bucket_name,
+                                             datasets_table_name=datasets_table_name,
+                                             dataset_versions_table_name=dataset_versions_table_name,
+                                             s3_client=s3_client,
+                                             dynamodb_resource=dynamodb_resource,
+                                             iceberg_database_name=iceberg_database_name,
+                                             athena_client=athena_client)
 
         logging.info('Instantiation complete.')
 
+    # Main entry to start an uplod job.
     def start_upload_job(self,
                          manifest_path: str,
                          label_type: str,
@@ -150,5 +187,24 @@ class CvdmsApp:
                                                     path_prefix,
                                                     job_summary)
 
+    # Main entry for log retrieval.
     def get_logs_by_job_id(self, job_id: str) -> Dict:
         return self._log_client.get_logs_by_job_id(job_id)
+
+    #------------
+    #Datset ops
+    #------------
+    # Call to create a dataset.
+    def create_dataset(self,
+                         *,
+                         dataset_id: str,
+                         label_type: str,
+                         description: str,
+                         selection_config: dict,
+                         split_strategy_name: str) -> Dict:
+
+        return self._dataset_client.create_dataset(dataset_id=dataset_id,
+                                                    label_type=label_type,
+                                                    description=description,
+                                                    selection_config=selection_config,
+                                                    split_strategy_name=split_strategy_name)
