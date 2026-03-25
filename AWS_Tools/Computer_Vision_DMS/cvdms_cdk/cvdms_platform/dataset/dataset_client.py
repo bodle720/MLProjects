@@ -1,3 +1,6 @@
+import time
+from typing import Any
+
 from boto3.dynamodb.types import TypeSerializer
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_athena.client import AthenaClient
@@ -6,8 +9,6 @@ from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 from cvdms_platform.dataset.input_validators import validate_create_dataset_inputs
 from cvdms_platform.dataset.sql_utils import build_selection_sql
 
-_ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
-_ALLOWED_SPLIT_STRATEGIES = {"stratified_v1"}
 _serializer = TypeSerializer()
 
 def _to_ddb_item(item: dict) -> dict:
@@ -76,6 +77,20 @@ class DatasetClient:
             selection_config=selection_config
         )
 
+        candidates = self._resolve_candidates(selection_sql=selection_sql)
+
+        if not candidates:
+            raise ValueError(
+                f"Dataset '{dataset_id}' selection returned zero candidate rows."
+            )
+
+        return {
+            "dataset_id": dataset_id,
+            "label_type": label_type,
+            "candidate_count": len(candidates),
+            "selection_sql": selection_sql,
+            "candidates_preview": candidates[:5],
+        }
 
         # Create and enter the DDB rows
         # created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -137,3 +152,166 @@ class DatasetClient:
         #     "split_strategy_name": split_strategy_name,
         #     "selection_config": selection_config
         # }
+
+    def _resolve_candidates(self, *, selection_sql: str) -> list[dict]:
+        """
+        Execute the selection SQL in Athena and return all candidate rows as a list of dicts.
+        Values are normalized into expected Python types.
+        """
+        query_execution_id = self._start_athena_query(selection_sql=selection_sql)
+        self._wait_for_athena_query(query_execution_id=query_execution_id)
+        raw_rows = self._fetch_athena_results(query_execution_id=query_execution_id)
+        return [self._normalize_candidate_row(row) for row in raw_rows]
+
+    def _start_athena_query(self, *, selection_sql: str) -> str:
+        """
+        Start an Athena query in the Iceberg database and return the QueryExecutionId.
+        """
+        response = self.athena.start_query_execution(
+            QueryString=selection_sql,
+            QueryExecutionContext={"Database": self.iceberg_database_name},
+        )
+        return response["QueryExecutionId"]
+
+    def _wait_for_athena_query(
+            self,
+            *,
+            query_execution_id: str,
+            poll_interval_seconds: float = 1.0,
+            timeout_seconds: int = 900,
+    ) -> None:
+        """
+        Poll Athena until the query succeeds, fails, or times out.
+        """
+        start = time.time()
+
+        while True:
+            response = self.athena.get_query_execution(QueryExecutionId=query_execution_id)
+            status = response["QueryExecution"]["Status"]["State"]
+
+            if status == "SUCCEEDED":
+                return
+
+            if status in {"FAILED", "CANCELLED"}:
+                reason = response["QueryExecution"]["Status"].get(
+                    "StateChangeReason",
+                    "Unknown Athena error.",
+                )
+                raise RuntimeError(
+                    f"Athena query {query_execution_id} ended with status {status}: {reason}"
+                )
+
+            if time.time() - start > timeout_seconds:
+                try:
+                    self.athena.stop_query_execution(QueryExecutionId=query_execution_id)
+                except Exception:
+                    pass
+
+                raise TimeoutError(
+                    f"Athena query {query_execution_id} did not finish within {timeout_seconds} seconds."
+                )
+
+            time.sleep(poll_interval_seconds)
+
+    def _fetch_athena_results(self, *, query_execution_id: str) -> list[dict]:
+        """
+        Fetch all Athena result rows and return them as a list of dicts.
+        Assumes the first row on the first page is the header row.
+        """
+        rows_out: list[dict] = []
+        next_token: str | None = None
+        column_names: list[str] | None = None
+        is_first_page = True
+
+        while True:
+            kwargs: dict[str, Any] = {"QueryExecutionId": query_execution_id}
+            if next_token:
+                kwargs["NextToken"] = next_token
+
+            response = self.athena.get_query_results(**kwargs)
+            result_set = response["ResultSet"]
+            rows = result_set.get("Rows", [])
+
+            if is_first_page:
+                if not rows:
+                    return []
+
+                header_row = rows[0]
+                column_names = [
+                    col.get("VarCharValue", "")
+                    for col in header_row.get("Data", [])
+                ]
+                data_rows = rows[1:]
+                is_first_page = False
+            else:
+                data_rows = rows
+
+            for row in data_rows:
+                rows_out.append(
+                    self._athena_row_to_dict(
+                        column_names=column_names or [],
+                        row=row,
+                    )
+                )
+
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+
+        return rows_out
+
+    @staticmethod
+    def _athena_row_to_dict(*, column_names: list[str], row: dict) -> dict:
+        """
+        Convert a single Athena row to a Python dict keyed by column name.
+        Missing values become None.
+        """
+        data = row.get("Data", [])
+        out: dict[str, Any] = {}
+
+        for idx, col_name in enumerate(column_names):
+            if idx >= len(data):
+                out[col_name] = None
+                continue
+
+            cell = data[idx]
+            out[col_name] = cell.get("VarCharValue")
+
+        return out
+
+    @staticmethod
+    def _normalize_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
+        """
+        Normalize Athena string-valued result cells into expected Python types.
+        """
+        int_fields = {
+            "img_height",
+            "img_width",
+            "num_channels",
+        }
+
+        float_fields = {
+            "file_size_mb",
+            "luma_mean",
+            "luma_p10",
+            "luma_p90",
+            "dark_frac",
+            "bright_frac",
+            "contrast_luma_std",
+            "contrast_luma_p90_p10",
+            "blur_laplacian_var",
+            "sat_mean",
+            "colorfulness",
+        }
+
+        normalized = dict(row)
+
+        for field in int_fields:
+            value = normalized.get(field)
+            normalized[field] = None if value is None else int(value)
+
+        for field in float_fields:
+            value = normalized.get(field)
+            normalized[field] = None if value is None else float(value)
+
+        return normalized

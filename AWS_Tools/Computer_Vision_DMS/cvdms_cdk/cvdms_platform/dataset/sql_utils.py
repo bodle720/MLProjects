@@ -9,7 +9,11 @@ def build_selection_sql(
     """
     Build Athena SQL that resolves candidate dataset membership rows from canonical tables.
 
-    Returns one row per image-label pair.
+    Returns one row per image-label pair, including:
+    - all analysis-relevant canonical_imagery fields
+    - the dataset label type
+    - the label_id
+    - task-specific artifact references (annotation_ref / mask_ref / mask_meta_ref)
     """
     query_label_type = _map_dataset_label_type_to_query_label_type(dataset_label_type)
 
@@ -40,6 +44,38 @@ def _map_dataset_label_type_to_query_label_type(dataset_label_type: str) -> str:
         return "string-label"
     return dataset_label_type
 
+def _build_common_select_columns(*, dataset_label_type: str) -> str:
+    """
+    Common SELECT columns pulled from canonical_imagery plus common membership fields.
+    """
+    return f"""
+    ci.image_id,
+    ci.source_ref,
+    ci.img_type,
+    ci.img_height,
+    ci.img_width,
+    ci.num_channels,
+    ci.dtype,
+    ci.file_size_mb,
+    ci.uploaded_at,
+    ci.data_source,
+    ci.luma_mean,
+    ci.luma_p10,
+    ci.luma_p90,
+    ci.dark_frac,
+    ci.bright_frac,
+    ci.contrast_luma_std,
+    ci.contrast_luma_p90_p10,
+    ci.blur_laplacian_var,
+    ci.sat_mean,
+    ci.colorfulness,
+    ci.lighting_bucket,
+    ci.blur_bucket,
+    ci.contrast_bucket,
+    ci.color_bucket,
+    '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type,
+    il.label_id"""
+
 def _build_base_query_parts(
     *,
     iceberg_database_name: str,
@@ -54,22 +90,12 @@ def _build_base_query_parts(
     - where_clauses
     """
     class_list_sql = _sql_list(selection_config["allowed_classes"])
+    common_cols = _build_common_select_columns(dataset_label_type=dataset_label_type)
 
     if dataset_label_type in {"single-label", "multi-label"}:
         select_clause = f"""
 SELECT
-    ci.image_id,
-    ci.source_ref,
-    ci.uploaded_at,
-    ci.data_source,
-    ci.img_width,
-    ci.img_height,
-    ci.lighting_bucket,
-    ci.blur_bucket,
-    ci.contrast_bucket,
-    ci.color_bucket,
-    '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type,
-    il.label_id,
+{common_cols},
     CAST(NULL AS varchar) AS annotation_ref,
     CAST(NULL AS varchar) AS mask_ref,
     CAST(NULL AS varchar) AS mask_meta_ref
@@ -88,18 +114,7 @@ JOIN {iceberg_database_name}.image_labels il
     if dataset_label_type == "object-detection":
         select_clause = f"""
 SELECT
-    ci.image_id,
-    ci.source_ref,
-    ci.uploaded_at,
-    ci.data_source,
-    ci.img_width,
-    ci.img_height,
-    ci.lighting_bucket,
-    ci.blur_bucket,
-    ci.contrast_bucket,
-    ci.color_bucket,
-    '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type,
-    il.label_id,
+{common_cols},
     bb.source_ref_meta AS annotation_ref,
     CAST(NULL AS varchar) AS mask_ref,
     CAST(NULL AS varchar) AS mask_meta_ref
@@ -120,18 +135,7 @@ JOIN {iceberg_database_name}.canonical_bounding_boxes bb
     if dataset_label_type == "semantic-segmentation":
         select_clause = f"""
 SELECT
-    ci.image_id,
-    ci.source_ref,
-    ci.uploaded_at,
-    ci.data_source,
-    ci.img_width,
-    ci.img_height,
-    ci.lighting_bucket,
-    ci.blur_bucket,
-    ci.contrast_bucket,
-    ci.color_bucket,
-    '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type,
-    il.label_id,
+{common_cols},
     CAST(NULL AS varchar) AS annotation_ref,
     sm.source_ref_png AS mask_ref,
     sm.source_ref_meta AS mask_meta_ref
@@ -152,18 +156,7 @@ JOIN {iceberg_database_name}.canonical_semantic_masks sm
     if dataset_label_type == "instance-segmentation":
         select_clause = f"""
 SELECT
-    ci.image_id,
-    ci.source_ref,
-    ci.uploaded_at,
-    ci.data_source,
-    ci.img_width,
-    ci.img_height,
-    ci.lighting_bucket,
-    ci.blur_bucket,
-    ci.contrast_bucket,
-    ci.color_bucket,
-    '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type,
-    il.label_id,
+{common_cols},
     CAST(NULL AS varchar) AS annotation_ref,
     ia.source_ref_png AS mask_ref,
     ia.source_ref_meta AS mask_meta_ref

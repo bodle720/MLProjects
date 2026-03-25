@@ -133,7 +133,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.single_label (
     dataset_id string,
     version int,
     image_id string,
-    label string
+    label string,
+    split string
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/single_label/'
@@ -146,7 +147,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
     dataset_id string,
     version int,
     image_id string,
-    label string COMMENT 'One row per label'
+    label string COMMENT 'One row per label',
+    split string
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/multi_label/'
@@ -159,7 +161,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     dataset_id string,
     version int,
     image_id string,
-    bbox_annotation_id string
+    bbox_annotation_id string,
+    split string
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/object_detection/'
@@ -172,7 +175,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     dataset_id string,
     version int,
     image_id string,
-    semantic_mask_id string
+    semantic_mask_id string,
+    split string
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/semantic_segmentation/'
@@ -185,7 +189,8 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     dataset_id string,
     version int,
     image_id string,
-    instance_annotation_id string
+    instance_annotation_id string,
+    split string
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/instance_segmentation/'
