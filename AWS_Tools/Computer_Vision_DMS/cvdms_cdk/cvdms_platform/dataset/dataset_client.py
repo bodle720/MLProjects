@@ -8,6 +8,7 @@ from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 from cvdms_platform.dataset.input_validators import validate_create_dataset_inputs
 from cvdms_platform.dataset.sql_utils import build_selection_sql
+from cvdms_platform.dataset.split_strategies.stratified_v1 import assign_splits_stratified_v1
 
 _serializer = TypeSerializer()
 
@@ -27,7 +28,8 @@ class DatasetClient:
                  s3_client: S3Client,
                  dynamodb_resource: DynamoDBServiceResource,
                  iceberg_database_name: str,
-                 athena_client: AthenaClient):
+                 athena_client: AthenaClient,
+                 file_bucket_name: str):
 
         self.user = user
         self.datasets_bucket_name = datasets_bucket_name
@@ -41,6 +43,7 @@ class DatasetClient:
         self.datasets_table = self.dynamodb.Table(self.datasets_table_name)
         self.dataset_versions_table = self.dynamodb.Table(self.dataset_versions_table_name)
         self.iceberg_database_name = iceberg_database_name
+        self.athena_output_s3_uri = f"s3://{file_bucket_name}/athena-results/"
 
     def create_dataset(self,
                         *,
@@ -83,6 +86,11 @@ class DatasetClient:
             raise ValueError(
                 f"Dataset '{dataset_id}' selection returned zero candidate rows."
             )
+
+        split_rows = self._assign_splits(
+            candidates=candidates,
+            split_strategy_name=split_strategy_name
+        )
 
         return {
             "dataset_id": dataset_id,
@@ -170,6 +178,7 @@ class DatasetClient:
         response = self.athena.start_query_execution(
             QueryString=selection_sql,
             QueryExecutionContext={"Database": self.iceberg_database_name},
+            ResultConfiguration={"OutputLocation": self.athena_output_s3_uri}
         )
         return response["QueryExecutionId"]
 
@@ -280,9 +289,44 @@ class DatasetClient:
         return out
 
     @staticmethod
-    def _normalize_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
+    def _parse_athena_array_string(value: Any) -> list[str]:
         """
-        Normalize Athena string-valued result cells into expected Python types.
+        Parse Athena's string representation of an array<string> into a Python list[str].
+
+        Examples:
+        - "[deer, fox]" -> ["deer", "fox"]
+        - "[deer]" -> ["deer"]
+        - "[]" -> []
+        - None -> []
+        """
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+
+        if not isinstance(value, str):
+            raise TypeError(f"Expected classes_present to be str | list | None, got {type(value).__name__}")
+
+        text = value.strip()
+
+        if text == "" or text == "[]":
+            return []
+
+        if not (text.startswith("[") and text.endswith("]")):
+            raise ValueError(f"Unexpected Athena array format for classes_present: {value!r}")
+
+        inner = text[1:-1].strip()
+        if not inner:
+            return []
+
+        parts = [part.strip() for part in inner.split(",")]
+        return list(dict.fromkeys(p for p in parts if p))
+
+    def _normalize_candidate_row(self,
+                                 row: dict[str, Any]) -> dict[str, Any]:
+        """
+        Normalize Athena result cells into expected Python types.
         """
         int_fields = {
             "img_height",
@@ -314,4 +358,16 @@ class DatasetClient:
             value = normalized.get(field)
             normalized[field] = None if value is None else float(value)
 
+        classes_present = normalized.get("classes_present")
+        normalized["classes_present"] = self._parse_athena_array_string(classes_present)
+
         return normalized
+
+    def _assign_splits(self,
+                        *,
+                        candidates: list[dict],
+                        split_strategy_name: str) -> list[dict]:
+        if split_strategy_name == "stratified_v1":
+            return assign_splits_stratified_v1(candidates=candidates)
+
+        raise ValueError(f"Unsupported split strategy: {split_strategy_name}")

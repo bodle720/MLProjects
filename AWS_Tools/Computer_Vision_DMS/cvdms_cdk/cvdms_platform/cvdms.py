@@ -169,7 +169,8 @@ class CvdmsApp:
                                              s3_client=s3_client,
                                              dynamodb_resource=dynamodb_resource,
                                              iceberg_database_name=iceberg_database_name,
-                                             athena_client=athena_client)
+                                             athena_client=athena_client,
+                                             file_bucket_name=file_bucket_name)
 
         logging.info('Instantiation complete.')
 

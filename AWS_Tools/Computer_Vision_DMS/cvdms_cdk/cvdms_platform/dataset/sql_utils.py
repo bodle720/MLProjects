@@ -11,8 +11,10 @@ def build_selection_sql(
 
     Returns one row per image-label pair, including:
     - all analysis-relevant canonical_imagery fields
-    - the dataset label type
-    - the label_id
+    - sha256_hash for leakage-aware grouping during split assignment
+    - dataset_label_type
+    - label_id
+    - classes_present for structured-label tasks
     - task-specific artifact references (annotation_ref / mask_ref / mask_meta_ref)
     """
     query_label_type = _map_dataset_label_type_to_query_label_type(dataset_label_type)
@@ -51,6 +53,7 @@ def _build_common_select_columns(*, dataset_label_type: str) -> str:
     return f"""
     ci.image_id,
     ci.source_ref,
+    ci.sha256_hash,
     ci.img_type,
     ci.img_height,
     ci.img_width,
@@ -96,6 +99,7 @@ def _build_base_query_parts(
         select_clause = f"""
 SELECT
 {common_cols},
+    ARRAY[il.label_id] AS classes_present,
     CAST(NULL AS varchar) AS annotation_ref,
     CAST(NULL AS varchar) AS mask_ref,
     CAST(NULL AS varchar) AS mask_meta_ref
@@ -115,6 +119,7 @@ JOIN {iceberg_database_name}.image_labels il
         select_clause = f"""
 SELECT
 {common_cols},
+    bb.classes_present,
     bb.source_ref_meta AS annotation_ref,
     CAST(NULL AS varchar) AS mask_ref,
     CAST(NULL AS varchar) AS mask_meta_ref
@@ -136,6 +141,7 @@ JOIN {iceberg_database_name}.canonical_bounding_boxes bb
         select_clause = f"""
 SELECT
 {common_cols},
+    sm.classes_present,
     CAST(NULL AS varchar) AS annotation_ref,
     sm.source_ref_png AS mask_ref,
     sm.source_ref_meta AS mask_meta_ref
@@ -157,6 +163,7 @@ JOIN {iceberg_database_name}.canonical_semantic_masks sm
         select_clause = f"""
 SELECT
 {common_cols},
+    ia.classes_present,
     CAST(NULL AS varchar) AS annotation_ref,
     ia.source_ref_png AS mask_ref,
     ia.source_ref_meta AS mask_meta_ref
