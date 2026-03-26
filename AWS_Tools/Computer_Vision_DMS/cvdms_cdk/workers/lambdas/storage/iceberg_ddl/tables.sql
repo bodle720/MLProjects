@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.multi_label (
     dataset_id string,
     version int,
     image_id string,
-    label string COMMENT 'One row per label',
+    labels array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     dataset_id string,
     version int,
     image_id string,
-    bbox_annotation_id string,
+    bbox_annotation_ids array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     dataset_id string,
     version int,
     image_id string,
-    semantic_mask_id string,
+    semantic_mask_ids array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     dataset_id string,
     version int,
     image_id string,
-    instance_annotation_id string,
+    instance_annotation_ids array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
