@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from hashlib import sha1
 from typing import Any
 
-
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 _SPLIT_RATIOS: dict[str, float] = {
     "train": 0.70,
@@ -24,7 +23,6 @@ _COLOR_WEIGHT = 0.5
 # Soft overflow penalty for exceeding target split size.
 _OVERFLOW_WEIGHT = 6.0
 
-
 @dataclass(frozen=True)
 class GroupSummary:
     group_key: str
@@ -39,7 +37,6 @@ class GroupSummary:
     color_counts: dict[str, int]
     rarity_score: float
     stable_tiebreak: str
-
 
 def assign_splits_stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
@@ -150,7 +147,6 @@ def assign_splits_stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dic
 
     return _attach_split_to_rows(candidates=candidates, group_to_split=group_to_split)
 
-
 def _validate_candidates(candidates: list[dict[str, Any]]) -> None:
     required_fields = {"image_id", "dataset_label_type", "classes_present"}
     for idx, row in enumerate(candidates):
@@ -170,7 +166,6 @@ def _validate_candidates(candidates: list[dict[str, Any]]) -> None:
         # classes_present should never be empty by this point for a selected candidate.
         if len(row["classes_present"]) == 0:
             raise ValueError(f"Candidate row {idx} has empty classes_present")
-
 
 def _build_groups(candidates: list[dict[str, Any]]) -> list[GroupSummary]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -239,13 +234,11 @@ def _build_groups(candidates: list[dict[str, Any]]) -> list[GroupSummary]:
 
     return groups
 
-
 def _group_key_for_row(row: dict[str, Any]) -> str:
     sha256_hash = row.get("sha256_hash")
     if sha256_hash:
         return f"sha256:{sha256_hash}"
     return f"image:{row['image_id']}"
-
 
 def _compute_overall_counts(candidates: list[dict[str, Any]]) -> dict[str, Counter[str]]:
     class_counts = Counter()
@@ -278,7 +271,6 @@ def _compute_overall_counts(candidates: list[dict[str, Any]]) -> dict[str, Count
         "color_counts": color_counts,
     }
 
-
 def _compute_target_counter(*, total: int, ratios: dict[str, float]) -> dict[str, int]:
     raw = {split: total * ratios[split] for split in _SPLITS}
     floors = {split: int(raw[split]) for split in _SPLITS}
@@ -296,7 +288,6 @@ def _compute_target_counter(*, total: int, ratios: dict[str, float]) -> dict[str
 
     return result
 
-
 def _compute_target_nested_counts(
     overall_counts: Counter[str],
     ratios: dict[str, float],
@@ -307,7 +298,6 @@ def _compute_target_nested_counts(
         for split in _SPLITS:
             result[split][key] = targets[split]
     return result
-
 
 def _score_group_for_split(
     *,
@@ -379,7 +369,6 @@ def _score_group_for_split(
 
     return score
 
-
 def _dimension_penalty(
     *,
     current_counts: Counter[str],
@@ -403,7 +392,6 @@ def _dimension_penalty(
 
     return penalty
 
-
 def _attach_split_to_rows(
     *,
     candidates: list[dict[str, Any]],
@@ -418,7 +406,6 @@ def _attach_split_to_rows(
 
     return out
 
-
 def _deduped_strings(values: list[Any]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -432,7 +419,6 @@ def _deduped_strings(values: list[Any]) -> list[str]:
             out.append(text)
 
     return out
-
 
 def _stable_small_bias(group_key: str, split: str) -> float:
     """

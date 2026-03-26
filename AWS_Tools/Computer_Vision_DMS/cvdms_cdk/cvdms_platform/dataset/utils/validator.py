@@ -1,16 +1,26 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 _ALLOWED_LABEL_TYPES = {
     "single-label",
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation"
+    "instance-segmentation",
 }
 
 _ALLOWED_SPLIT_STRATEGIES = {
-    "stratified_v1"
+    "stratified_v1",
+}
+
+_ALLOWED_OPERATIONS = {
+    "add",
+    "remove",
+}
+
+_ALLOWED_SPLIT_APPROACHES = {
+    "maintain",
+    "rebalance",
 }
 
 _ALLOWED_LIGHTING_BUCKETS = {
@@ -18,25 +28,25 @@ _ALLOWED_LIGHTING_BUCKETS = {
     "low_light",
     "normal",
     "bright",
-    "glare"
+    "glare",
 }
 
 _ALLOWED_BLUR_BUCKETS = {
     "sharp",
     "mild_blur",
-    "blurry"
+    "blurry",
 }
 
 _ALLOWED_CONTRAST_BUCKETS = {
     "low",
     "medium",
-    "high"
+    "high",
 }
 
 _ALLOWED_COLOR_BUCKETS = {
     "low",
     "medium",
-    "high"
+    "high",
 }
 
 _ALLOWED_SELECTION_CONFIG_KEYS = {
@@ -48,7 +58,7 @@ _ALLOWED_SELECTION_CONFIG_KEYS = {
     "lighting_buckets",
     "blur_buckets",
     "contrast_buckets",
-    "color_buckets"
+    "color_buckets",
 }
 
 def validate_dataset_id(dataset_id: str) -> str:
@@ -116,6 +126,11 @@ def validate_description(description: str) -> str:
 
     return description
 
+def validate_optional_description(description: str | None) -> str | None:
+    if description is None:
+        return None
+    return validate_description(description)
+
 def validate_split_strategy_name(split_strategy_name: str) -> str:
     if not isinstance(split_strategy_name, str):
         raise TypeError("split_strategy_name must be a string.")
@@ -128,6 +143,39 @@ def validate_split_strategy_name(split_strategy_name: str) -> str:
         )
 
     return split_strategy_name
+
+def validate_optional_split_strategy_name(
+    split_strategy_name: str | None,
+) -> str | None:
+    if split_strategy_name is None:
+        return None
+    return validate_split_strategy_name(split_strategy_name)
+
+def validate_operation(operation: str) -> str:
+    if not isinstance(operation, str):
+        raise TypeError("operation must be a string.")
+
+    operation = operation.strip().lower()
+
+    if operation not in _ALLOWED_OPERATIONS:
+        raise ValueError(
+            f"operation must be one of: {sorted(_ALLOWED_OPERATIONS)}"
+        )
+
+    return operation
+
+def validate_split_approach(split_approach: str) -> str:
+    if not isinstance(split_approach, str):
+        raise TypeError("split_approach must be a string.")
+
+    split_approach = split_approach.strip().lower()
+
+    if split_approach not in _ALLOWED_SPLIT_APPROACHES:
+        raise ValueError(
+            f"split_approach must be one of: {sorted(_ALLOWED_SPLIT_APPROACHES)}"
+        )
+
+    return split_approach
 
 def _validate_nonempty_string_list(
     *,
@@ -237,9 +285,9 @@ def _validate_int_range(
 
     return [low, high]
 
-def validate_creation_selection_config(selection_config: dict[str, Any]) -> dict[str, Any]:
+def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any]:
     """
-    Validate selection_config for dataset creation.
+    Validate selection_config for dataset create/update selection.
 
     Required:
     - allowed_classes
@@ -253,12 +301,6 @@ def validate_creation_selection_config(selection_config: dict[str, Any]) -> dict
     - blur_buckets
     - contrast_buckets
     - color_buckets
-
-    Validation behavior:
-    - unknown keys are rejected
-    - missing optional fields mean no restriction
-    - present list filters must be non-empty
-    - range filters must be [min, max]
     """
     if not isinstance(selection_config, dict):
         raise TypeError("selection_config must be a dict.")
@@ -277,62 +319,62 @@ def validate_creation_selection_config(selection_config: dict[str, Any]) -> dict
     validated["allowed_classes"] = _validate_nonempty_string_list(
         name="allowed_classes",
         value=selection_config["allowed_classes"],
-        normalize=True
+        normalize=True,
     )
 
     if "allowed_sources" in selection_config:
         validated["allowed_sources"] = _validate_nonempty_string_list(
             name="allowed_sources",
             value=selection_config["allowed_sources"],
-            normalize=False
+            normalize=False,
         )
 
     if "upload_date_range" in selection_config:
         validated["upload_date_range"] = _validate_date_range(
             name="upload_date_range",
-            value=selection_config["upload_date_range"]
+            value=selection_config["upload_date_range"],
         )
 
     if "width_range" in selection_config:
         validated["width_range"] = _validate_int_range(
             name="width_range",
             value=selection_config["width_range"],
-            min_allowed=1
+            min_allowed=1,
         )
 
     if "height_range" in selection_config:
         validated["height_range"] = _validate_int_range(
             name="height_range",
             value=selection_config["height_range"],
-            min_allowed=1
+            min_allowed=1,
         )
 
     if "lighting_buckets" in selection_config:
         validated["lighting_buckets"] = _validate_enum_string_list(
             name="lighting_buckets",
             value=selection_config["lighting_buckets"],
-            allowed_values=_ALLOWED_LIGHTING_BUCKETS
+            allowed_values=_ALLOWED_LIGHTING_BUCKETS,
         )
 
     if "blur_buckets" in selection_config:
         validated["blur_buckets"] = _validate_enum_string_list(
             name="blur_buckets",
             value=selection_config["blur_buckets"],
-            allowed_values=_ALLOWED_BLUR_BUCKETS
+            allowed_values=_ALLOWED_BLUR_BUCKETS,
         )
 
     if "contrast_buckets" in selection_config:
         validated["contrast_buckets"] = _validate_enum_string_list(
             name="contrast_buckets",
             value=selection_config["contrast_buckets"],
-            allowed_values=_ALLOWED_CONTRAST_BUCKETS
+            allowed_values=_ALLOWED_CONTRAST_BUCKETS,
         )
 
     if "color_buckets" in selection_config:
         validated["color_buckets"] = _validate_enum_string_list(
             name="color_buckets",
             value=selection_config["color_buckets"],
-            allowed_values=_ALLOWED_COLOR_BUCKETS
+            allowed_values=_ALLOWED_COLOR_BUCKETS,
         )
 
     return validated
@@ -347,13 +389,57 @@ def validate_create_dataset_inputs(
 ) -> dict[str, Any]:
     """
     Top-level validator for DatasetClient.create_dataset(...).
-
-    Returns a normalized validated payload.
     """
     return {
         "dataset_id": validate_dataset_id(dataset_id),
         "label_type": validate_label_type(label_type),
         "description": validate_description(description),
-        "selection_config": validate_creation_selection_config(selection_config),
+        "selection_config": validate_selection_config(selection_config),
         "split_strategy_name": validate_split_strategy_name(split_strategy_name),
+    }
+
+def validate_update_dataset_inputs(
+    *,
+    dataset_id: str,
+    operation: Literal["add", "remove"] | str,
+    selection_config: dict[str, Any],
+    split_approach: Literal["maintain", "rebalance"] | str = "maintain",
+    split_strategy_name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """
+    Top-level validator for DatasetClient.update_dataset(...).
+
+    Rules:
+    - dataset_id is required
+    - operation must be add/remove
+    - selection_config is validated the same way as create
+    - split_approach must be maintain/rebalance
+    - if split_approach == 'rebalance', split_strategy_name is required
+    - if split_approach == 'maintain', split_strategy_name is optional
+    - description is optional
+    """
+    validated_dataset_id = validate_dataset_id(dataset_id)
+    validated_operation = validate_operation(operation)
+    validated_selection_config = validate_selection_config(selection_config)
+    validated_split_approach = validate_split_approach(split_approach)
+    validated_description = validate_optional_description(description)
+    validated_split_strategy_name = validate_optional_split_strategy_name(split_strategy_name)
+
+    if validated_split_approach == "rebalance" and validated_split_strategy_name is None:
+        raise ValueError(
+            "split_strategy_name is required when split_approach='rebalance'."
+        )
+    elif validated_split_approach == "maintain" and validated_split_strategy_name is not None:
+        raise ValueError(
+            "split_strategy_name must be None when split_approach='maintain'."
+        )
+
+    return {
+        "dataset_id": validated_dataset_id,
+        "operation": validated_operation,
+        "selection_config": validated_selection_config,
+        "split_approach": validated_split_approach,
+        "split_strategy_name": validated_split_strategy_name,
+        "description": validated_description,
     }
