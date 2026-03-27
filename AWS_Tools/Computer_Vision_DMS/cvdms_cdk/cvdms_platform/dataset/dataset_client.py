@@ -12,6 +12,7 @@ from cvdms_platform.dataset.utils.write_artifacts import write_dataset_artifacts
 from cvdms_platform.dataset.utils.ddb_update import write_dataset_ddb_records
 
 from cvdms_platform.dataset.utils.get_dataset import get_dataset_info
+from cvdms_platform.dataset.utils.update_dataset_membership import get_updated_split_rows
 
 LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
     "single-label": "single_label",
@@ -193,15 +194,14 @@ class DatasetClient:
         1. validate inputs
         2. load existing dataset metadata
         3. determine latest version and dataset invariants
-        4. build selection SQL
-        5. resolve and normalize candidate rows from Athena
-        6. derive the next dataset image set
-        7. assign or preserve train/val/test splits
-        8. write Iceberg membership rows for the new version
-        9. write S3 dataset artifacts for the new version
-        10. write DynamoDB dataset metadata for the new version
+        4. build selection SQL and resolve rows for both imagery to add/remove and existing dataset membership rows
+        5. derive the next dataset image set
+        6. assign or preserve train/val/test splits
+        7. write Iceberg membership rows for the new version
+        8. write S3 dataset artifacts for the new version
+        9. write DynamoDB dataset metadata for the new version
         """
-        # Validate inputs
+        # 1. Validate inputs
         validated = validate_update_dataset_inputs(
             dataset_id=dataset_id,
             operation=operation,
@@ -218,12 +218,13 @@ class DatasetClient:
         split_strategy_name = validated["split_strategy_name"]
         description = validated["description"]
 
-        # Load current dataset state
+        # 2. Load current dataset state
         dataset_info = self.get_dataset(dataset_id)
 
         if not dataset_info["exists"]:
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
+        # 3. Determine latest version
         latest_version = dataset_info["latest_version"]
         new_version = latest_version + 1
         label_type = dataset_info["label_type"]
@@ -241,6 +242,19 @@ class DatasetClient:
         else:
             effective_description = description
 
+        # 4. Build the SQL for obtaining canonical imagery selection and retrieve the normalized candidates from Iceberg
+        # This represents the images we want to add or remove from the dataset in making the new version.
+        selection_sql_for_update, selected_imagery_rows = resolve_candidate_imagery(self.iceberg_database_name,
+                                                                                   label_type,
+                                                                                   selection_config,
+                                                                                   self.athena,
+                                                                                   self.athena_output_s3_uri)
+
+        if not selected_imagery_rows:
+            raise ValueError(
+                f"Selection returned zero candidate imagery rows to {operation} to/from dataset {dataset_id}."
+            )
+
         dataset_membership_table_name = LABEL_TYPE_TO_MEMBERSHIP_TABLE.get(label_type)
         if dataset_membership_table_name is None:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
@@ -250,6 +264,81 @@ class DatasetClient:
                                                                     canonical_imagery_table_name=self.canonical_imagery_table_name,
                                                                     dataset_id=dataset_id,
                                                                     version=latest_version,
+                                                                    label_type=label_type,
                                                                     mode="minimal" if split_approach == "maintain" else "enriched",
                                                                     athena_client=self.athena,
                                                                     athena_output_s3_uri=self.athena_output_s3_uri)
+
+        if not current_rows:
+            raise ValueError(
+                f"Selection returned zero current rows in dataset {dataset_id}."
+            )
+
+        # 5 and 6: get final dataset after applying operation, and assign split to each row according to specifications
+        split_rows = get_updated_split_rows(selected_imagery_rows,
+                                            current_rows,
+                                            operation,
+                                            split_approach,
+                                            effective_split_strategy_name)
+
+        if not split_rows:
+            raise ValueError(
+                f"After {operation} operation, {dataset_id} had no rows for the newest updated version."
+            )
+
+        # 7. Write the rows to the iceberg dataset tables
+        membership_result = write_membership_rows(
+            athena_client=self.athena,
+            iceberg_database_name=self.iceberg_database_name,
+            athena_output_s3_uri=self.athena_output_s3_uri,
+            dataset_id=dataset_id,
+            version=new_version,
+            dataset_label_type=label_type,
+            split_rows=split_rows
+        )
+
+        # 8. Write the S3 artifacts
+        artifact_result = write_dataset_artifacts(
+            s3_client=self.s3,
+            dataset_bucket_name=self.datasets_bucket_name,
+            dataset_id=dataset_id,
+            version=new_version,
+            label_type=label_type,
+            split_strategy_name=effective_split_strategy_name,
+            selection_sql=selection_sql_for_update,
+            selection_config=selection_config,
+            split_rows=split_rows
+        )
+
+        # 9. Write the new ddb dataset-version row and update the dataset table's row.
+        ddb_result = write_dataset_ddb_records(
+            new_dataset=False,
+            dynamodb_resource=self.dynamodb,
+            datasets_table_name=self.datasets_table_name,
+            dataset_versions_table_name=self.dataset_versions_table_name,
+            dataset_id=dataset_id,
+            new_version=new_version,
+            label_type=label_type,
+            description=effective_description,
+            split_strategy_name=effective_split_strategy_name,
+            created_by=self.user,
+            operation=operation,
+            split_approach=split_approach,
+            selection_config=selection_config,
+            split_rows=split_rows,
+            artifact_result=artifact_result
+        )
+
+        return {
+            "dataset_id": dataset_id,
+            "new_version": new_version,
+            "label_type": label_type,
+            "description": effective_description,
+            "effective_split_strategy_name": effective_split_strategy_name,
+            f"candidate_imagery_count_to_{operation}": len(selected_imagery_rows),
+            "preexisting_membership_count": len(current_rows),
+            "final_membership_row_count": membership_result["row_count"],
+            "membership_table_name": membership_result["table_name"],
+            "artifact_result": artifact_result,
+            "ddb_result": ddb_result
+        }

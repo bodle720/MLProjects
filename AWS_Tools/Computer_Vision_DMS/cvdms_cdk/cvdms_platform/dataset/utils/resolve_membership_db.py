@@ -3,6 +3,24 @@ from mypy_boto3_athena.client import AthenaClient
 
 from cvdms_platform.dataset.utils.athena_utils import resolve_sql
 
+DatasetLabelType = Literal[
+    "single-label",
+    "multi-label",
+    "object-detection",
+    "semantic-segmentation",
+    "instance-segmentation",
+]
+
+MembershipMode = Literal["minimal", "enriched"]
+
+LABEL_TYPE_TO_MEMBERSHIP_FIELD: dict[DatasetLabelType, str] = {
+    "single-label": "label",
+    "multi-label": "labels",
+    "object-detection": "bbox_annotation_ids",
+    "semantic-segmentation": "semantic_mask_ids",
+    "instance-segmentation": "instance_annotation_ids",
+}
+
 def resolve_dataset_membership(
     *,
     iceberg_database_name: str,
@@ -10,7 +28,8 @@ def resolve_dataset_membership(
     canonical_imagery_table_name: str,
     dataset_id: str,
     version: int,
-    mode: Literal["minimal", "enriched"],
+    label_type: DatasetLabelType,
+    mode: MembershipMode,
     athena_client: AthenaClient,
     athena_output_s3_uri: str,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -19,13 +38,19 @@ def resolve_dataset_membership(
 
     Modes:
     - minimal:
-        returns only the fields needed to preserve membership/splits
+        returns the fields needed to preserve membership rows directly
+        during maintain flows:
+            dataset_id, version, image_id, split, <label payload field>
+
     - enriched:
-        joins to canonical imagery and returns the fields needed for
-        split recomputation / rebalance flows
+        returns the same membership payload fields plus canonical imagery
+        features needed for split recomputation / rebalance flows
     """
     if mode not in {"minimal", "enriched"}:
         raise ValueError(f"Unsupported mode: {mode!r}")
+
+    if label_type not in LABEL_TYPE_TO_MEMBERSHIP_FIELD:
+        raise ValueError(f"Unsupported label_type: {label_type!r}")
 
     if not dataset_id or not str(dataset_id).strip():
         raise ValueError("dataset_id must be a non-empty string.")
@@ -33,31 +58,46 @@ def resolve_dataset_membership(
     if type(version) is not int or version < 1:
         raise ValueError("version must be an integer >= 1.")
 
-    membership_sql = build_dataset_membership_sql(iceberg_database_name=iceberg_database_name,
-                                                    dataset_membership_table_name=dataset_membership_table_name,
-                                                    canonical_imagery_table_name=canonical_imagery_table_name,
-                                                    dataset_id=dataset_id,
-                                                    version=version,
-                                                    mode=mode)
+    membership_sql = build_dataset_membership_sql(
+        iceberg_database_name=iceberg_database_name,
+        dataset_membership_table_name=dataset_membership_table_name,
+        canonical_imagery_table_name=canonical_imagery_table_name,
+        dataset_id=dataset_id,
+        version=version,
+        label_type=label_type,
+        mode=mode,
+    )
 
-    raw_rows = resolve_sql(athena_client=athena_client,
-                           iceberg_database_name=iceberg_database_name,
-                           athena_output_s3_uri=athena_output_s3_uri,
-                           selection_sql=membership_sql)
+    raw_rows = resolve_sql(
+        athena_client=athena_client,
+        iceberg_database_name=iceberg_database_name,
+        athena_output_s3_uri=athena_output_s3_uri,
+        selection_sql=membership_sql,
+    )
 
-    normalized_rows = [normalize_membership_row(row=row, mode=mode) for row in raw_rows]
+    normalized_rows = [
+        normalize_membership_row(
+            row=row,
+            label_type=label_type,
+            mode=mode,
+        )
+        for row in raw_rows
+    ]
 
     return membership_sql, normalized_rows
 
 def normalize_membership_row(
     *,
     row: dict[str, Any],
-    mode: Literal["minimal", "enriched"],
+    label_type: DatasetLabelType,
+    mode: MembershipMode,
 ) -> dict[str, Any]:
     """
     Normalize Athena string-valued result cells into expected Python types and
     enforce the membership-row contract.
     """
+    membership_field = LABEL_TYPE_TO_MEMBERSHIP_FIELD[label_type]
+
     int_fields = {
         "version",
         "img_height",
@@ -79,6 +119,13 @@ def normalize_membership_row(
         "colorfulness",
     }
 
+    array_fields = {
+        "labels",
+        "bbox_annotation_ids",
+        "semantic_mask_ids",
+        "instance_annotation_ids",
+    }
+
     normalized: dict[str, Any] = {}
 
     for key, value in row.items():
@@ -90,7 +137,7 @@ def normalize_membership_row(
             normalized[key] = int(value)
         elif key in float_fields:
             normalized[key] = float(value)
-        elif key == "string_label_ids":
+        elif key in array_fields:
             normalized[key] = _normalize_array_field(value)
         else:
             normalized[key] = value
@@ -99,6 +146,12 @@ def normalize_membership_row(
     _require_positive_int(normalized.get("version"), "version")
     _require_nonempty_string(normalized.get("image_id"), "image_id")
     _require_valid_split(normalized.get("split"))
+
+    _require_membership_payload(
+        value=normalized.get(membership_field),
+        field_name=membership_field,
+        label_type=label_type,
+    )
 
     if mode == "enriched":
         _require_nonempty_string(normalized.get("source_ref"), "source_ref")
@@ -123,9 +176,11 @@ def build_dataset_membership_sql(
     canonical_imagery_table_name: str,
     dataset_id: str,
     version: int,
-    mode: Literal["minimal", "enriched"],
+    label_type: DatasetLabelType,
+    mode: MembershipMode,
 ) -> str:
     dataset_id_sql = _sql_quote(dataset_id)
+    membership_field = LABEL_TYPE_TO_MEMBERSHIP_FIELD[label_type]
 
     if mode == "minimal":
         return f"""
@@ -133,6 +188,7 @@ SELECT
     m.dataset_id,
     m.version,
     m.image_id,
+    m.{membership_field},
     m.split
 FROM "{iceberg_database_name}"."{dataset_membership_table_name}" AS m
 WHERE m.dataset_id = {dataset_id_sql}
@@ -145,6 +201,7 @@ SELECT
     m.dataset_id,
     m.version,
     m.image_id,
+    m.{membership_field},
     m.split,
 
     ci.source_ref,
@@ -205,7 +262,7 @@ def _normalize_array_field(value: Any) -> list[str]:
         if not inner:
             return []
         parts = [p.strip() for p in inner.split(",")]
-        cleaned = []
+        cleaned: list[str] = []
         for p in parts:
             p = p.strip().strip('"').strip("'")
             if p:
@@ -213,6 +270,23 @@ def _normalize_array_field(value: Any) -> list[str]:
         return cleaned
 
     return [text]
+
+def _require_membership_payload(
+    *,
+    value: Any,
+    field_name: str,
+    label_type: DatasetLabelType,
+) -> None:
+    if label_type == "single-label":
+        _require_nonempty_string(value, field_name)
+        return
+
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Field '{field_name}' must be a non-empty list[str].")
+
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"Field '{field_name}' contains an invalid string value.")
 
 def _require_nonempty_string(value: Any, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
