@@ -5,13 +5,21 @@ from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 from cvdms_platform.dataset.split_strategies.stratified_v1 import assign_splits_stratified_v1
 from cvdms_platform.dataset.utils.validator import validate_create_dataset_inputs, validate_update_dataset_inputs
-from cvdms_platform.dataset.utils.build_sql import build_selection_sql
-from cvdms_platform.dataset.utils.resolve import resolve_candidates
+from cvdms_platform.dataset.utils.resolve_imagery_db import resolve_candidate_imagery
+from cvdms_platform.dataset.utils.resolve_membership_db import resolve_dataset_membership
 from cvdms_platform.dataset.utils.add_membership import write_membership_rows
 from cvdms_platform.dataset.utils.write_artifacts import write_dataset_artifacts
 from cvdms_platform.dataset.utils.ddb_update import write_dataset_ddb_records
 
 from cvdms_platform.dataset.utils.get_dataset import get_dataset_info
+
+LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
+    "single-label": "single_label",
+    "multi-label": "multi_label",
+    "object-detection": "object_detection",
+    "semantic-segmentation": "semantic_segmentation",
+    "instance-segmentation": "instance_segmentation",
+}
 
 class DatasetClient:
     """
@@ -41,6 +49,7 @@ class DatasetClient:
         self.datasets_table = self.dynamodb.Table(self.datasets_table_name)
         self.iceberg_database_name = iceberg_database_name
         self.athena_output_s3_uri = f"s3://{file_bucket_name}/athena-results/"
+        self.canonical_imagery_table_name = "canonical_imagery"
 
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         """
@@ -99,17 +108,12 @@ class DatasetClient:
         if existing:
             raise ValueError(f"Dataset '{dataset_id}' already exists.")
 
-        # Build the SQL for obtaining membership
-        selection_sql = build_selection_sql(
-            iceberg_database_name=self.iceberg_database_name,
-            dataset_label_type=label_type,
-            selection_config=selection_config
-        )
-
-        candidates = resolve_candidates(athena_client=self.athena,
-                                        iceberg_database_name=self.iceberg_database_name,
-                                        athena_output_s3_uri=self.athena_output_s3_uri,
-                                        selection_sql=selection_sql)
+        # Build the SQL for obtaining canonical imagery selection and retrieve the normalized candidates from Iceberg
+        selection_sql, candidates = resolve_candidate_imagery(self.iceberg_database_name,
+                                                               label_type,
+                                                               selection_config,
+                                                               self.athena,
+                                                               self.athena_output_s3_uri)
 
         if not candidates:
             raise ValueError(
@@ -236,3 +240,16 @@ class DatasetClient:
             effective_description = dataset_info.get("latest_version_description")
         else:
             effective_description = description
+
+        dataset_membership_table_name = LABEL_TYPE_TO_MEMBERSHIP_TABLE.get(label_type)
+        if dataset_membership_table_name is None:
+            raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
+
+        membership_sql, current_rows = resolve_dataset_membership(iceberg_database_name=self.iceberg_database_name,
+                                                                    dataset_membership_table_name=dataset_membership_table_name,
+                                                                    canonical_imagery_table_name=self.canonical_imagery_table_name,
+                                                                    dataset_id=dataset_id,
+                                                                    version=latest_version,
+                                                                    mode="minimal" if split_approach == "maintain" else "enriched",
+                                                                    athena_client=self.athena,
+                                                                    athena_output_s3_uri=self.athena_output_s3_uri)

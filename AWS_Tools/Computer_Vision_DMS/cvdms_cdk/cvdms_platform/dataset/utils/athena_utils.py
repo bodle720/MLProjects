@@ -1,6 +1,41 @@
 import time
 from typing import Any
 
+##########################################################################
+# Run SQL in Athena and return results.
+##########################################################################
+
+def resolve_sql(
+    *,
+    athena_client: Any,
+    iceberg_database_name: str,
+    athena_output_s3_uri: str,
+    selection_sql: str
+) -> list[dict[str, Any]]:
+    """
+    Execute the selection SQL in Athena and return normalized candidate rows.
+    """
+    query_execution_id = start_athena_query(
+        athena_client=athena_client,
+        iceberg_database_name=iceberg_database_name,
+        athena_output_s3_uri=athena_output_s3_uri,
+        selection_sql=selection_sql
+    )
+    wait_for_athena_query(
+        athena_client=athena_client,
+        query_execution_id=query_execution_id
+    )
+    raw_rows = fetch_athena_results(
+        athena_client=athena_client,
+        query_execution_id=query_execution_id
+    )
+
+    return raw_rows
+
+##########################################################################
+# Athena Execution helpers
+##########################################################################
+
 def start_athena_query(
     *,
     athena_client: Any,
@@ -109,6 +144,10 @@ def fetch_athena_results(
             break
 
     return rows_out
+
+##########################################################################
+# Parsing helpers for Athena
+##########################################################################
 
 def athena_row_to_dict(
     *,
