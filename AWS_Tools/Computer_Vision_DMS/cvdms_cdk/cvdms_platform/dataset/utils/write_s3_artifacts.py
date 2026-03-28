@@ -6,7 +6,7 @@ from typing import Any
 
 _VALID_SPLITS = ("train", "val", "test")
 
-def write_dataset_artifacts(
+def write_s3_artifacts(
     *,
     s3_client: Any,
     dataset_bucket_name: str,

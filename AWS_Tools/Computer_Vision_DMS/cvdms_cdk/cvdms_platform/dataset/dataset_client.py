@@ -3,16 +3,24 @@ from mypy_boto3_s3.client import S3Client
 from mypy_boto3_athena.client import AthenaClient
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
-from cvdms_platform.dataset.split_strategies.stratified_v1 import assign_splits_stratified_v1
-from cvdms_platform.dataset.utils.validator import validate_create_dataset_inputs, validate_update_dataset_inputs
-from cvdms_platform.dataset.utils.resolve_imagery_db import resolve_candidate_imagery
-from cvdms_platform.dataset.utils.resolve_membership_db import resolve_dataset_membership
-from cvdms_platform.dataset.utils.add_membership import write_membership_rows
-from cvdms_platform.dataset.utils.write_artifacts import write_dataset_artifacts
-from cvdms_platform.dataset.utils.ddb_update import write_dataset_ddb_records
+# Misc. helpers needed
+from cvdms_platform.dataset.split_strategies.stratified_v1 import stratified_v1
+from cvdms_platform.dataset.utils.get_dataset_info import get_dataset_info
 
-from cvdms_platform.dataset.utils.get_dataset import get_dataset_info
-from cvdms_platform.dataset.utils.update_dataset_membership import get_updated_split_rows
+# Shared helper used for validating user inputs
+from cvdms_platform.dataset.utils.validator import validate_create_dataset_inputs, validate_update_dataset_inputs
+
+# Helpers meant to build and run SQL code and retrieve rows from Iceberg
+from cvdms_platform.dataset.utils.resolve_candidate_imagery import resolve_candidate_imagery
+from cvdms_platform.dataset.utils.resolve_dataset_membership import resolve_dataset_membership
+
+# Helpers that write out Iceberg rows, S3 artifacts, and DDB rows, respectively
+from cvdms_platform.dataset.utils.write_dataset_membership import write_dataset_membership
+from cvdms_platform.dataset.utils.write_s3_artifacts import write_s3_artifacts
+from cvdms_platform.dataset.utils.write_ddb_artifacts import write_ddb_artifacts
+
+# Helper to update a dataset with new rows or remove rows, as needed, and assign splits in the update flow
+from cvdms_platform.dataset.utils.update_dataset_splits import update_dataset_splits
 
 LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
     "single-label": "single_label",
@@ -122,11 +130,11 @@ class DatasetClient:
             )
 
         if split_strategy_name == "stratified_v1":
-            split_rows = assign_splits_stratified_v1(candidates=candidates)
+            split_rows = stratified_v1(candidates=candidates)
         else:
             raise ValueError(f"Split strategy '{split_strategy_name}' not supported.")
 
-        membership_result = write_membership_rows(
+        membership_result = write_dataset_membership(
             athena_client=self.athena,
             iceberg_database_name=self.iceberg_database_name,
             athena_output_s3_uri=self.athena_output_s3_uri,
@@ -136,7 +144,7 @@ class DatasetClient:
             split_rows=split_rows
         )
 
-        artifact_result = write_dataset_artifacts(
+        artifact_result = write_s3_artifacts(
             s3_client=self.s3,
             dataset_bucket_name=self.datasets_bucket_name,
             dataset_id=dataset_id,
@@ -148,7 +156,7 @@ class DatasetClient:
             split_rows=split_rows
         )
 
-        ddb_result = write_dataset_ddb_records(
+        ddb_result = write_ddb_artifacts(
             new_dataset=True,
             dynamodb_resource=self.dynamodb,
             datasets_table_name=self.datasets_table_name,
@@ -271,11 +279,11 @@ class DatasetClient:
 
         if not current_rows:
             raise ValueError(
-                f"Selection returned zero current rows in dataset {dataset_id}."
+                f"Current dataset version for {dataset_id} contains zero rows."
             )
 
         # 5 and 6: get final dataset after applying operation, and assign split to each row according to specifications
-        split_rows = get_updated_split_rows(selected_imagery_rows,
+        split_rows = update_dataset_splits(selected_imagery_rows,
                                             current_rows,
                                             operation,
                                             split_approach,
@@ -287,7 +295,7 @@ class DatasetClient:
             )
 
         # 7. Write the rows to the iceberg dataset tables
-        membership_result = write_membership_rows(
+        membership_result = write_dataset_membership(
             athena_client=self.athena,
             iceberg_database_name=self.iceberg_database_name,
             athena_output_s3_uri=self.athena_output_s3_uri,
@@ -298,7 +306,7 @@ class DatasetClient:
         )
 
         # 8. Write the S3 artifacts
-        artifact_result = write_dataset_artifacts(
+        artifact_result = write_s3_artifacts(
             s3_client=self.s3,
             dataset_bucket_name=self.datasets_bucket_name,
             dataset_id=dataset_id,
@@ -311,7 +319,7 @@ class DatasetClient:
         )
 
         # 9. Write the new ddb dataset-version row and update the dataset table's row.
-        ddb_result = write_dataset_ddb_records(
+        ddb_result = write_ddb_artifacts(
             new_dataset=False,
             dynamodb_resource=self.dynamodb,
             datasets_table_name=self.datasets_table_name,

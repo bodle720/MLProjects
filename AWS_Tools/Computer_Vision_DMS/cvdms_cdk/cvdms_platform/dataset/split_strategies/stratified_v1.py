@@ -38,7 +38,7 @@ class GroupSummary:
     rarity_score: float
     stable_tiebreak: str
 
-def assign_splits_stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Deterministic greedy multi-objective split assignment.
 

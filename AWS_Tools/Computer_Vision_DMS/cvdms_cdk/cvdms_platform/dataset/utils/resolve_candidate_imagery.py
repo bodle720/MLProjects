@@ -31,7 +31,14 @@ def resolve_candidate_imagery(iceberg_database_name: str,
                            athena_output_s3_uri=athena_output_s3_uri,
                            selection_sql=selection_sql)
 
-    candidates = [normalize_candidate_row(row) for row in raw_rows]
+    allowed_classes = selection_config["allowed_classes"]
+    candidates = [
+        normalize_candidate_row(
+            row,
+            allowed_classes=allowed_classes
+        )
+        for row in raw_rows
+    ]
 
     return selection_sql, candidates
 
@@ -39,7 +46,7 @@ def resolve_candidate_imagery(iceberg_database_name: str,
 # Helpers to normalize candidate rows from Iceberg tables
 ######################################################################################
 
-def normalize_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
+def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) -> dict[str, Any]:
     """
     Normalize Athena result cells into expected Python types for dataset candidates.
 
@@ -139,6 +146,22 @@ def normalize_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
 
     dataset_label_type = normalized.get("dataset_label_type")
 
+    if dataset_label_type in {
+        "object-detection",
+        "semantic-segmentation",
+        "instance-segmentation"
+    }:
+        normalized["classes_present"] = _filter_classes_present_to_allowed(
+            normalized.get("classes_present", []),
+            allowed_classes
+        )
+
+        if len(normalized["classes_present"]) < 1:
+            raise ValueError(
+                f"{dataset_label_type} candidate must include non-empty filtered "
+                f"'classes_present': {normalized!r}"
+            )
+
     if dataset_label_type == "single-label":
         if not normalized["label"]:
             raise ValueError(
@@ -183,6 +206,26 @@ def normalize_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
 
     return normalized
 
+def _filter_classes_present_to_allowed(
+    values: list[str],
+    allowed_classes: list[str],
+) -> list[str]:
+    allowed = set(allowed_classes)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        if text not in allowed:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return out
 ######################################################################################
 # Helpers to build the correct SQL query from the selection config, the output of
 # which is used in resolve_candidates() above to obtain normalized candidates.

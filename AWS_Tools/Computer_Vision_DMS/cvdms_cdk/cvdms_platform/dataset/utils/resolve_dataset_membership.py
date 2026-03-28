@@ -21,6 +21,12 @@ LABEL_TYPE_TO_MEMBERSHIP_FIELD: dict[DatasetLabelType, str] = {
     "instance-segmentation": "instance_annotation_ids",
 }
 
+_LABEL_TYPES_WITH_CLASSES_PRESENT: set[DatasetLabelType] = {
+    "object-detection",
+    "semantic-segmentation",
+    "instance-segmentation",
+}
+
 def resolve_dataset_membership(
     *,
     iceberg_database_name: str,
@@ -40,7 +46,8 @@ def resolve_dataset_membership(
     - minimal:
         returns the fields needed to preserve membership rows directly
         during maintain flows:
-            dataset_id, version, image_id, split, <label payload field>
+            dataset_id, version, image_id, split, dataset_label_type,
+            <label payload field>, and classes_present for the 3 structured task types
 
     - enriched:
         returns the same membership payload fields plus canonical imagery
@@ -124,6 +131,7 @@ def normalize_membership_row(
         "bbox_annotation_ids",
         "semantic_mask_ids",
         "instance_annotation_ids",
+        "classes_present",
     }
 
     normalized: dict[str, Any] = {}
@@ -145,13 +153,26 @@ def normalize_membership_row(
     _require_nonempty_string(normalized.get("dataset_id"), "dataset_id")
     _require_positive_int(normalized.get("version"), "version")
     _require_nonempty_string(normalized.get("image_id"), "image_id")
+    _require_nonempty_string(normalized.get("dataset_label_type"), "dataset_label_type")
     _require_valid_split(normalized.get("split"))
+
+    if normalized["dataset_label_type"] != label_type:
+        raise ValueError(
+            f"dataset_label_type mismatch: expected {label_type!r}, "
+            f"got {normalized['dataset_label_type']!r}"
+        )
 
     _require_membership_payload(
         value=normalized.get(membership_field),
         field_name=membership_field,
         label_type=label_type,
     )
+
+    if label_type in _LABEL_TYPES_WITH_CLASSES_PRESENT:
+        _require_nonempty_string_array(
+            normalized.get("classes_present"),
+            field_name="classes_present",
+        )
 
     if mode == "enriched":
         _require_nonempty_string(normalized.get("source_ref"), "source_ref")
@@ -181,6 +202,10 @@ def build_dataset_membership_sql(
 ) -> str:
     dataset_id_sql = _sql_quote(dataset_id)
     membership_field = LABEL_TYPE_TO_MEMBERSHIP_FIELD[label_type]
+    include_classes_present = label_type in _LABEL_TYPES_WITH_CLASSES_PRESENT
+    dataset_label_type_sql = _sql_quote(label_type)
+
+    classes_present_select = ",\n    m.classes_present" if include_classes_present else ""
 
     if mode == "minimal":
         return f"""
@@ -188,7 +213,8 @@ SELECT
     m.dataset_id,
     m.version,
     m.image_id,
-    m.{membership_field},
+    {dataset_label_type_sql} AS dataset_label_type,
+    m.{membership_field}{classes_present_select},
     m.split
 FROM "{iceberg_database_name}"."{dataset_membership_table_name}" AS m
 WHERE m.dataset_id = {dataset_id_sql}
@@ -201,7 +227,8 @@ SELECT
     m.dataset_id,
     m.version,
     m.image_id,
-    m.{membership_field},
+    {dataset_label_type_sql} AS dataset_label_type,
+    m.{membership_field}{classes_present_select},
     m.split,
 
     ci.source_ref,
@@ -240,13 +267,6 @@ ORDER BY m.image_id
 """.strip()
 
 def _normalize_array_field(value: Any) -> list[str]:
-    """
-    Normalize Athena array output into a Python list[str].
-
-    This is intentionally conservative. If your shared Athena row resolver
-    already parses arrays into lists, this will preserve them. If it returns
-    strings like '[a, b]', this will parse them.
-    """
     if value is None:
         return []
 
@@ -281,6 +301,9 @@ def _require_membership_payload(
         _require_nonempty_string(value, field_name)
         return
 
+    _require_nonempty_string_array(value, field_name=field_name)
+
+def _require_nonempty_string_array(value: Any, *, field_name: str) -> None:
     if not isinstance(value, list) or not value:
         raise ValueError(f"Field '{field_name}' must be a non-empty list[str].")
 
@@ -301,7 +324,4 @@ def _require_valid_split(value: Any) -> None:
         raise ValueError(f"Invalid split value: {value!r}")
 
 def _sql_quote(value: str) -> str:
-    """
-    Basic SQL string escaping for Athena string literals.
-    """
     return "'" + value.replace("'", "''") + "'"

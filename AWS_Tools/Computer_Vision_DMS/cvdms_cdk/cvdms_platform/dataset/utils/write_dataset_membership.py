@@ -15,7 +15,7 @@ _MEMBERSHIP_TABLE_BY_LABEL_TYPE: dict[str, str] = {
 
 _VALID_SPLITS = {"train", "val", "test"}
 
-def write_membership_rows(
+def write_dataset_membership(
     *,
     athena_client: Any,
     iceberg_database_name: str,
@@ -116,12 +116,18 @@ def build_membership_rows(
                 field_name="bbox_annotation_ids",
                 require_nonempty=True,
             )
+            classes_present = _normalize_string_array(
+                row.get("classes_present"),
+                field_name="classes_present",
+                require_nonempty=True,
+            )
             out.append(
                 {
                     "dataset_id": dataset_id,
                     "version": version,
                     "image_id": image_id,
                     "bbox_annotation_ids": bbox_annotation_ids,
+                    "classes_present": classes_present,
                     "split": split,
                 }
             )
@@ -133,12 +139,18 @@ def build_membership_rows(
                 field_name="semantic_mask_ids",
                 require_nonempty=True,
             )
+            classes_present = _normalize_string_array(
+                row.get("classes_present"),
+                field_name="classes_present",
+                require_nonempty=True,
+            )
             out.append(
                 {
                     "dataset_id": dataset_id,
                     "version": version,
                     "image_id": image_id,
                     "semantic_mask_ids": semantic_mask_ids,
+                    "classes_present": classes_present,
                     "split": split,
                 }
             )
@@ -150,12 +162,18 @@ def build_membership_rows(
                 field_name="instance_annotation_ids",
                 require_nonempty=True,
             )
+            classes_present = _normalize_string_array(
+                row.get("classes_present"),
+                field_name="classes_present",
+                require_nonempty=True,
+            )
             out.append(
                 {
                     "dataset_id": dataset_id,
                     "version": version,
                     "image_id": image_id,
                     "instance_annotation_ids": instance_annotation_ids,
+                    "classes_present": classes_present,
                     "split": split,
                 }
             )
@@ -192,7 +210,7 @@ def insert_membership_rows(
     column_names = get_membership_column_names(dataset_label_type=dataset_label_type)
 
     for i in range(0, len(membership_rows), chunk_size):
-        chunk = membership_rows[i : i + chunk_size]
+        chunk = membership_rows[i: i + chunk_size]
         sql = build_membership_insert_sql(
             iceberg_database_name=iceberg_database_name,
             table_name=table_name,
@@ -220,13 +238,34 @@ def get_membership_column_names(*, dataset_label_type: str) -> list[str]:
         return ["dataset_id", "version", "image_id", "labels", "split"]
 
     if dataset_label_type == "object-detection":
-        return ["dataset_id", "version", "image_id", "bbox_annotation_ids", "split"]
+        return [
+            "dataset_id",
+            "version",
+            "image_id",
+            "bbox_annotation_ids",
+            "classes_present",
+            "split",
+        ]
 
     if dataset_label_type == "semantic-segmentation":
-        return ["dataset_id", "version", "image_id", "semantic_mask_ids", "split"]
+        return [
+            "dataset_id",
+            "version",
+            "image_id",
+            "semantic_mask_ids",
+            "classes_present",
+            "split",
+        ]
 
     if dataset_label_type == "instance-segmentation":
-        return ["dataset_id", "version", "image_id", "instance_annotation_ids", "split"]
+        return [
+            "dataset_id",
+            "version",
+            "image_id",
+            "instance_annotation_ids",
+            "classes_present",
+            "split",
+        ]
 
     raise ValueError(f"Unsupported dataset_label_type: {dataset_label_type}")
 
@@ -277,15 +316,27 @@ def _membership_row_to_values_sql(
 
     if dataset_label_type == "object-detection":
         bbox_ids_sql = _sql_array_literal(row["bbox_annotation_ids"])
-        return f"({dataset_id_sql}, {version_sql}, {image_id_sql}, {bbox_ids_sql}, {split_sql})"
+        classes_present_sql = _sql_array_literal(row["classes_present"])
+        return (
+            f"({dataset_id_sql}, {version_sql}, {image_id_sql}, "
+            f"{bbox_ids_sql}, {classes_present_sql}, {split_sql})"
+        )
 
     if dataset_label_type == "semantic-segmentation":
         semantic_ids_sql = _sql_array_literal(row["semantic_mask_ids"])
-        return f"({dataset_id_sql}, {version_sql}, {image_id_sql}, {semantic_ids_sql}, {split_sql})"
+        classes_present_sql = _sql_array_literal(row["classes_present"])
+        return (
+            f"({dataset_id_sql}, {version_sql}, {image_id_sql}, "
+            f"{semantic_ids_sql}, {classes_present_sql}, {split_sql})"
+        )
 
     if dataset_label_type == "instance-segmentation":
         instance_ids_sql = _sql_array_literal(row["instance_annotation_ids"])
-        return f"({dataset_id_sql}, {version_sql}, {image_id_sql}, {instance_ids_sql}, {split_sql})"
+        classes_present_sql = _sql_array_literal(row["classes_present"])
+        return (
+            f"({dataset_id_sql}, {version_sql}, {image_id_sql}, "
+            f"{instance_ids_sql}, {classes_present_sql}, {split_sql})"
+        )
 
     raise ValueError(f"Unsupported dataset_label_type: {dataset_label_type}")
 

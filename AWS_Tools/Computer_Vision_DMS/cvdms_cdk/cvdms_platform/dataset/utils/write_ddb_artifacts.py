@@ -5,7 +5,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-def write_dataset_ddb_records(
+def write_ddb_artifacts(
     *,
     new_dataset: bool,
     dynamodb_resource: Any,

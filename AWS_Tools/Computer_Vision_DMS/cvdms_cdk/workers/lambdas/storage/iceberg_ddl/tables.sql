@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.object_detection (
     version int,
     image_id string,
     bbox_annotation_ids array<string>,
+    classes_present array<string> COMMENT 'The deduped allowed-class subset present in the label, not the full raw classes present in the canonical artifact',
     split string
 )
 PARTITIONED BY (dataset_id, version)
@@ -176,6 +177,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.semantic_segmentation (
     version int,
     image_id string,
     semantic_mask_ids array<string>,
+    classes_present array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
@@ -190,6 +192,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
     version int,
     image_id string,
     instance_annotation_ids array<string>,
+    classes_present array<string>,
     split string
 )
 PARTITIONED BY (dataset_id, version)
