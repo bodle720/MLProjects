@@ -16,7 +16,8 @@ from cvdms_platform.dataset.utils.athena_utils import (
 # ran and the results are normalized and returned.
 ######################################################################################
 
-def resolve_candidate_imagery(iceberg_database_name: str,
+def resolve_candidate_imagery(*,
+                               iceberg_database_name: str,
                                label_type: str,
                                selection_config: dict[str, Any],
                                athena_client: AthenaClient,

@@ -8,7 +8,8 @@ from cvdms_platform.dataset.split_strategies.stratified_v1 import stratified_v1
 from cvdms_platform.dataset.utils.get_dataset_info import get_dataset_info
 
 # Shared helper used for validating user inputs
-from cvdms_platform.dataset.utils.validator import validate_create_dataset_inputs, validate_update_dataset_inputs
+from cvdms_platform.dataset.utils.validator import (validate_create_dataset_inputs, validate_update_dataset_inputs,
+                                                    validate_delete_dataset_inputs, validate_get_dataset_inputs)
 
 # Helpers meant to build and run SQL code and retrieve rows from Iceberg
 from cvdms_platform.dataset.utils.resolve_candidate_imagery import resolve_candidate_imagery
@@ -21,6 +22,9 @@ from cvdms_platform.dataset.utils.write_ddb_artifacts import write_ddb_artifacts
 
 # Helper to update a dataset with new rows or remove rows, as needed, and assign splits in the update flow
 from cvdms_platform.dataset.utils.update_dataset_splits import update_dataset_splits
+
+# Deletion helpers
+from cvdms_platform.dataset.utils.delete_dataset_utils import delete_iceberg_membership, delete_s3_artifacts, delete_ddb_rows
 
 LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
     "single-label": "single_label",
@@ -60,7 +64,7 @@ class DatasetClient:
         self.athena_output_s3_uri = f"s3://{file_bucket_name}/athena-results/"
         self.canonical_imagery_table_name = "canonical_imagery"
 
-    def get_dataset(self, dataset_id: str) -> dict[str, Any]:
+    def get_dataset(self, *, dataset_id: str) -> dict[str, Any]:
         """
         Return dataset information for the latest version.
 
@@ -71,6 +75,10 @@ class DatasetClient:
         Otherwise returns a dict with dataset-level metadata, latest version
         metadata, split counts, and artifact pointers.
         """
+
+        validated = validate_get_dataset_inputs(dataset_id=dataset_id)
+        dataset_id = validated["dataset_id"]
+
         return get_dataset_info(
             dynamodb_resource=self.dynamodb,
             datasets_table_name=self.datasets_table_name,
@@ -118,11 +126,11 @@ class DatasetClient:
             raise ValueError(f"Dataset '{dataset_id}' already exists.")
 
         # Build the SQL for obtaining canonical imagery selection and retrieve the normalized candidates from Iceberg
-        selection_sql, candidates = resolve_candidate_imagery(self.iceberg_database_name,
-                                                               label_type,
-                                                               selection_config,
-                                                               self.athena,
-                                                               self.athena_output_s3_uri)
+        selection_sql, candidates = resolve_candidate_imagery(iceberg_database_name=self.iceberg_database_name,
+                                                               label_type=label_type,
+                                                               selection_config=selection_config,
+                                                               athena_client=self.athena,
+                                                               athena_output_s3_uri=self.athena_output_s3_uri)
 
         if not candidates:
             raise ValueError(
@@ -227,7 +235,7 @@ class DatasetClient:
         description = validated["description"]
 
         # 2. Load current dataset state
-        dataset_info = self.get_dataset(dataset_id)
+        dataset_info = self.get_dataset(dataset_id=dataset_id)
 
         if not dataset_info["exists"]:
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
@@ -252,11 +260,11 @@ class DatasetClient:
 
         # 4. Build the SQL for obtaining canonical imagery selection and retrieve the normalized candidates from Iceberg
         # This represents the images we want to add or remove from the dataset in making the new version.
-        selection_sql_for_update, selected_imagery_rows = resolve_candidate_imagery(self.iceberg_database_name,
-                                                                                   label_type,
-                                                                                   selection_config,
-                                                                                   self.athena,
-                                                                                   self.athena_output_s3_uri)
+        selection_sql_for_update, selected_imagery_rows = resolve_candidate_imagery(iceberg_database_name=self.iceberg_database_name,
+                                                                                   label_type=label_type,
+                                                                                   selection_config=selection_config,
+                                                                                   athena_client=self.athena,
+                                                                                   athena_output_s3_uri=self.athena_output_s3_uri)
 
         if not selected_imagery_rows:
             raise ValueError(
@@ -283,11 +291,11 @@ class DatasetClient:
             )
 
         # 5 and 6: get final dataset after applying operation, and assign split to each row according to specifications
-        split_rows = update_dataset_splits(selected_imagery_rows,
-                                            current_rows,
-                                            operation,
-                                            split_approach,
-                                            effective_split_strategy_name)
+        split_rows = update_dataset_splits(selected_imagery_rows=selected_imagery_rows,
+                                            current_rows=current_rows,
+                                            operation=operation,
+                                            split_approach=split_approach,
+                                            split_strategy_name=effective_split_strategy_name)
 
         if not split_rows:
             raise ValueError(
@@ -350,3 +358,109 @@ class DatasetClient:
             "artifact_result": artifact_result,
             "ddb_result": ddb_result
         }
+
+    def delete_dataset_all_versions(self, *, dataset_id: str) -> dict:
+        """
+        Delete a dataset and all its versions.
+
+        Best-effort, non-atomic workflow:
+        1. validate inputs
+        2. load existing dataset metadata and confirm the dataset exists;
+           if not found, return a not_found result
+        3. determine the fixed dataset label_type and target Iceberg membership table
+        4. delete all Iceberg membership rows for this dataset_id
+        5. delete all S3 artifacts under s3://<dataset bucket>/datasets/<dataset_id>/
+        6. delete DynamoDB rows:
+           - the single datasets table row for dataset_id
+           - all dataset_versions rows for dataset_id
+
+        Returns a structured result describing what was deleted and any partial failures.
+        """
+        result: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "dataset_id_exists": False,
+            "deleted_iceberg_rows": False,
+            "deleted_s3_artifacts": False,
+            "deleted_ddb_records": False,
+            "error": None,
+        }
+
+        # 1. Validate inputs
+        try:
+            validated = validate_delete_dataset_inputs(dataset_id=dataset_id)
+            dataset_id = validated["dataset_id"]
+            result["dataset_id"] = dataset_id
+        except Exception as e:
+            result["error"] = str(e)
+            return result
+
+        # 2. Load existing dataset metadata and confirm dataset exists
+        try:
+            dataset_record = self.get_dataset(dataset_id=dataset_id)
+        except Exception as e:
+            result["error"] = f"Failed loading dataset metadata for '{dataset_id}': {e}"
+            return result
+
+        if not dataset_record["exists"]:
+            result["dataset_id_exists"] = False
+            result["error"] = f"Dataset '{dataset_id}' does not exist."
+            return result
+
+        result["dataset_id_exists"] = True
+
+        dataset_label_type = dataset_record.get("label_type")
+        if not dataset_label_type:
+            result["error"] = (
+                f"Dataset '{dataset_id}' exists but is missing required field 'label_type'."
+            )
+            return result
+
+        # 3. Delete Iceberg membership rows
+        try:
+            iceberg_result = delete_iceberg_membership(
+                athena_client=self.athena,
+                iceberg_database_name=self.iceberg_database_name,
+                athena_output_s3_uri=self.athena_output_s3_uri,
+                dataset_id=dataset_id,
+                dataset_label_type=dataset_label_type
+            )
+            result["deleted_iceberg_rows"] = True
+            result["iceberg_result"] = iceberg_result
+        except Exception as e:
+            result["error"] = (
+                f"Failed deleting Iceberg membership rows for dataset '{dataset_id}': {e}"
+            )
+            return result
+
+        # 4. Delete S3 artifacts
+        try:
+            s3_result = delete_s3_artifacts(
+                s3_client=self.s3,
+                datasets_bucket_name=self.datasets_bucket_name,
+                dataset_id=dataset_id
+            )
+            result["deleted_s3_artifacts"] = True
+            result["s3_result"] = s3_result
+        except Exception as e:
+            result["error"] = (
+                f"Failed deleting S3 artifacts for dataset '{dataset_id}': {e}"
+            )
+            return result
+
+        # 5. Delete DynamoDB rows
+        try:
+            ddb_result = delete_ddb_rows(
+                dynamodb_resource=self.dynamodb,
+                datasets_table_name=self.datasets_table_name,
+                dataset_versions_table_name=self.dataset_versions_table_name,
+                dataset_id=dataset_id
+            )
+            result["deleted_ddb_records"] = True
+            result["ddb_result"] = ddb_result
+        except Exception as e:
+            result["error"] = (
+                f"Failed deleting DynamoDB records for dataset '{dataset_id}': {e}"
+            )
+            return result
+
+        return result

@@ -1,12 +1,20 @@
 # Dataset Operations Overview
 
-This document describes the current dataset functionality available through the dataset API. At this stage, the core implemented operations are:
+This document describes the current dataset functionality available
+through the dataset API. The core implemented operations are:
 
 - `create_dataset(...)`
 - `get_dataset(...)`
 - `update_dataset(...)`
+- `delete_dataset_all_versions(...)`
 
-The dataset system is designed around **versioned dataset definitions** built from canonical imagery and canonical labels already stored in the platform. A dataset is not a mutable blob that is edited in place. Instead, each create or update operation produces a **new dataset version** with its own membership rows, manifest artifacts, metadata, and version record. The top-level dataset record points to the latest version, while historical versions remain queryable and auditable.
+The dataset system is designed around **versioned dataset definitions**
+built from canonical imagery and canonical labels already stored in the
+platform. A dataset is not a mutable blob that is edited in place.
+Instead, each create or update operation produces a **new dataset version**
+with its own membership rows, manifest artifacts, metadata, and version
+record. The top-level dataset record points to the latest version, while
+historical versions remain queryable and auditable.
 
 ---
 
@@ -15,7 +23,9 @@ The dataset system is designed around **versioned dataset definitions** built fr
 Dataset state is distributed across three layers:
 
 ### 1. Iceberg membership tables
-These store the versioned membership rows for each dataset. Membership is partitioned by `dataset_id` and `version`, and the table used depends on the dataset label type.
+These store the versioned membership rows for each dataset. Membership is
+partitioned by `dataset_id` and `version`, and the table used depends on
+the dataset label type.
 
 There are five dataset membership shapes:
 
@@ -57,7 +67,10 @@ There are five dataset membership shapes:
   - `classes_present`
   - `split`
 
-For the three structured task types, `classes_present` stores the **dataset-version-specific allowed-class subset** represented by that membership row, not necessarily the full raw class set present in the canonical artifact.
+For the three structured task types, `classes_present` stores the
+**dataset-version-specific allowed-class subset** represented by
+that membership row, not necessarily the full raw class set present
+in the canonical artifact.
 
 ### 2. DynamoDB metadata
 Two DynamoDB tables hold dataset metadata:
@@ -78,7 +91,8 @@ The version table is the authoritative provenance ledger. It records things like
 - artifact URIs
 
 ### 3. S3 version artifacts
-Each dataset version writes a version-specific artifact bundle under a versioned prefix. These artifacts include:
+Each dataset version writes a version-specific artifact bundle under
+a versioned prefix. These artifacts include:
 
 - the selection SQL used for that version
 - the selection config JSON
@@ -105,7 +119,8 @@ Each dataset version is derived from either:
 - an **update add**
 - an **update remove**
 
-The important conceptual rule is that a dataset evolves by **versioning**, not by mutating a single stored definition in place.
+The important conceptual rule is that a dataset evolves by
+**versioning**, not by mutating a single stored definition in place.
 
 ---
 
@@ -119,7 +134,8 @@ The dataset system currently supports five task types:
 - `semantic-segmentation`
 - `instance-segmentation`
 
-These differ in how candidates are selected, how membership rows are stored, and how overlapping rows are handled during update operations.
+These differ in how candidates are selected, how membership rows
+are stored, and how overlapping rows are handled during update operations.
 
 ---
 
@@ -145,15 +161,19 @@ Both create and update use a `selection_config` to specify which canonical image
 ## Meaning of fields
 
 ### `allowed_classes`
-Required. A non-empty list of allowed class names. These are normalized to lowercase and deduped.
+Required. A non-empty list of allowed class names. These are
+normalized to lowercase and deduped.
 
-This is the most important selection filter. Dataset selection is always class-scoped.
+This is the most important selection filter. Dataset selection is
+always class-scoped.
 
 ### `allowed_sources`
-Optional list of source names. If provided, only images whose canonical imagery row has a matching `data_source` are eligible.
+Optional list of source names. If provided, only images whose
+canonical imagery row has a matching `data_source` are eligible.
 
 ### `upload_date_range`
-Optional 2-element list of ISO date strings: `[start, end]`. This filters by canonical imagery upload date.
+Optional 2-element list of ISO date strings: `[start, end]`. This
+filters by canonical imagery upload date.
 
 ### `width_range` and `height_range`
 Optional 2-element integer ranges. These filter by image width and height.
@@ -161,7 +181,8 @@ Optional 2-element integer ranges. These filter by image width and height.
 ### `lighting_buckets`, `blur_buckets`, `contrast_buckets`, `color_buckets`
 Optional lists of allowed quality-bucket values.
 
-These filters operate on the canonical imagery profiling fields and are useful for building datasets with controlled visual characteristics.
+These filters operate on the canonical imagery profiling fields and are
+useful for building datasets with controlled visual characteristics.
 
 ---
 
@@ -190,18 +211,25 @@ The system validates:
 - selection config structure
 - split strategy
 
-The dataset id must be lowercase, use only letters/digits/hyphens, and be globally unique.
+The dataset id must be lowercase, use only letters/digits/hyphens, and be
+globally unique.
 
 ### 2. Canonical candidates are resolved
-The system queries canonical imagery plus canonical label structures and returns **one candidate row per image** in a task-specific shape.
+The system queries canonical imagery plus canonical label structures and
+returns **one candidate row per image** in a task-specific shape.
 
-The candidate resolver also normalizes the rows into Python-native forms and ensures they are ready for the split assignment stage.
+The candidate resolver also normalizes the rows into Python-native forms
+and ensures they are ready for the split assignment stage.
 
 ### 3. Split assignment is performed
-The resolved candidates are passed into the split strategy, currently `stratified_v1`, which deterministically assigns each row to `train`, `val`, or `test`.
+The resolved candidates are passed into the split strategy,
+currently `stratified_v1`, which deterministically assigns each
+row to `train`, `val`, or `test`.
 
 ### 4. Membership rows are written
-The split rows are projected down into the minimal membership schema for the dataset label type and inserted into the correct Iceberg membership table under version `1`.
+The split rows are projected down into the minimal membership schema
+for the dataset label type and inserted into the correct Iceberg
+membership table under version `1`.
 
 ### 5. S3 artifacts are written
 The system writes the version artifact bundle:
@@ -213,21 +241,24 @@ The system writes the version artifact bundle:
 - metadata JSON
 
 ### 6. DynamoDB metadata is written
-The dataset row is created and the first dataset version row is created transactionally.
+The dataset row is created and the first dataset version row is created
+transactionally.
 
 ---
 
 ## Candidate resolution by task type during create
 
 ### Single-label
-Only images that resolve to **exactly one distinct allowed class** are retained.
+Only images that resolve to **exactly one distinct allowed class** are
+retained.
 
 Example:
 
 - raw string labels on image: `["cat", "feline"]`
 - `allowed_classes = ["cat", "dog"]`
 
-After filtering to allowed classes, only `cat` remains, so the image is a valid single-label candidate.
+After filtering to allowed classes, only `cat` remains, so the image is a
+valid single-label candidate.
 
 The resulting candidate row contains:
 
@@ -243,14 +274,20 @@ The resulting row contains:
 - `classes_present` = same deduped allowed labels
 
 ### Object detection / semantic segmentation / instance segmentation
-Any image whose linked structured label artifacts contain at least one allowed class is retained.
+Any image whose linked structured label artifacts contain at least one
+allowed class is retained.
 
 The resulting row contains:
 
 - the appropriate structured label id array (`bbox_annotation_ids`, `semantic_mask_ids`, or `instance_annotation_ids`)
 - `classes_present` normalized to the allowed-class subset only
 
-Important: for these three task types, the label ids are **not trimmed or rewritten** at dataset creation time. The system keeps the qualifying canonical label ids unchanged and only normalizes `classes_present` to the dataset-relevant subset. Downstream export or training-prep can later decide how to merge or trim label content.
+Important: for these three task types, the label ids are
+**not trimmed or rewritten** at dataset creation time. The system
+keeps the qualifying canonical label ids unchanged and only
+normalizes `classes_present` to the dataset-relevant subset.
+Downstream export or training-prep can later decide how to merge
+or trim label content.
 
 ---
 
@@ -298,7 +335,8 @@ The result includes:
 * artifact URIs for the latest version
 * latest version selection config
 
-This means callers can inspect the latest dataset definition and provenance without re-querying membership tables directly.
+This means callers can inspect the latest dataset definition and
+provenance without re-querying membership tables directly.
 
 ---
 
@@ -306,9 +344,11 @@ This means callers can inspect the latest dataset definition and provenance with
 
 ## Purpose
 
-Creates a new dataset version by applying either an `add` or `remove` operation to the latest existing version.
+Creates a new dataset version by applying either an `add` or `remove`
+operation to the latest existing version.
 
-This does **not** overwrite the old version. Instead, it produces a new version number.
+This does **not** overwrite the old version. Instead, it produces a
+new version number.
 
 ## Arguments
 
@@ -352,19 +392,22 @@ The system derives:
 * effective split strategy
 * effective description
 
-For `maintain`, the effective split strategy is pulled from the current latest version metadata.
+For `maintain`, the effective split strategy is pulled from the current
+latest version metadata.
 
 For `rebalance`, the caller must supply the split strategy explicitly.
 
 ### 4. Resolve selected imagery rows
 
-The update selection config is resolved through the same candidate-resolution logic used in create.
+The update selection config is resolved through the same candidate-resolution
+logic used in create.
 
 These selected rows represent the imagery to **add** or **remove**.
 
 ### 5. Resolve current membership rows
 
-The current latest-version membership rows are loaded from the appropriate Iceberg membership table.
+The current latest-version membership rows are loaded from the
+appropriate Iceberg membership table.
 
 The shape of these rows depends on task type:
 
@@ -374,13 +417,17 @@ The shape of these rows depends on task type:
 
 ### 6. Compute next-version rows
 
-The system computes the next dataset-version membership rows by comparing the selected imagery set to the current version’s membership set by `image_id`.
+The system computes the next dataset-version membership rows by comparing
+the selected imagery set to the current version’s membership set by
+`image_id`.
 
-This is where add/remove logic, label enrichment rules, and maintain/rebalance behavior all happen.
+This is where add/remove logic, label enrichment rules, and
+maintain/rebalance behavior all happen.
 
 ### 7. Write membership rows
 
-The final split rows for the new version are inserted into the appropriate Iceberg membership table.
+The final split rows for the new version are inserted into the
+appropriate Iceberg membership table.
 
 ### 8. Write version artifacts
 
@@ -388,7 +435,8 @@ The version’s S3 artifacts are written.
 
 ### 9. Write DDB version metadata
 
-The dataset row is advanced to the new version, and a new immutable dataset-version row is written transactionally.
+The dataset row is advanced to the new version, and a new immutable
+dataset-version row is written transactionally.
 
 ---
 
@@ -400,11 +448,13 @@ Update operations are applied strictly at the `image_id` level.
 
 ### `operation="add"`
 
-The next version starts from the current version and includes all selected images. Overlapping images may be merged depending on task type.
+The next version starts from the current version and includes all
+selected images. Overlapping images may be merged depending on task type.
 
 ### `operation="remove"`
 
-The next version removes any current membership row whose `image_id` appears in the selected imagery set.
+The next version removes any current membership row whose `image_id`
+appears in the selected imagery set.
 
 ---
 
@@ -436,7 +486,8 @@ This means:
 
 are recombined and passed through the split strategy again.
 
-This is useful when the update changes dataset composition enough that the original split balance should be reconsidered.
+This is useful when the update changes dataset composition enough that
+the original split balance should be reconsidered.
 
 ---
 
@@ -450,13 +501,18 @@ This behavior depends on task type.
 
 **Current row wins.** The selected row is ignored for overlap purposes.
 
-Reason: one image can only contribute one effective scalar label in a single-label dataset. If a later selection produces another string label for the same image, that would create a contradiction. The system therefore keeps the existing version’s single-label membership row unchanged.
+Reason: one image can only contribute one effective scalar label in a
+single-label dataset. If a later selection produces another string label
+for the same image, that would create a contradiction. The system
+therefore keeps the existing version’s single-label membership row
+unchanged.
 
 ## Multi-label
 
 **Labels are enriched.**
 
-If the image already exists in the dataset and the selected row includes new allowed string labels, the final row merges them.
+If the image already exists in the dataset and the selected row
+includes new allowed string labels, the final row merges them.
 
 Behavior:
 
@@ -472,7 +528,8 @@ This allows a multi-label dataset image to grow its label set over time.
 
 **Structured label ids are enriched.**
 
-If the image already exists in the dataset and the selected row introduces new structured label artifacts, the final row merges them.
+If the image already exists in the dataset and the selected row
+introduces new structured label artifacts, the final row merges them.
 
 Behavior:
 
@@ -491,7 +548,8 @@ Examples include:
 * additional segmentation masks
 * additional instance annotations
 
-The downstream training-prep/export layer is responsible for interpreting those arrays for a particular model architecture.
+The downstream training-prep/export layer is responsible for
+interpreting those arrays for a particular model architecture.
 
 ---
 
@@ -581,14 +639,15 @@ The SQL artifact stored for a version means:
 * for version `1`: the original full dataset-selection SQL
 * for later versions: the **diff SQL** that selected the imagery to add or remove for that version
 
-This is an important design decision.
-
-The system does **not** try to recompute a monolithic “full current dataset SQL” for every update version. Instead, version history is represented as:
+The system does **not** try to recompute a monolithic “full current
+dataset SQL” for every update version. Instead, version history is
+represented as:
 
 * initial full definition at v1
 * a sequence of changes for v2, v3, ...
 
-To understand the full evolution of a dataset, you start from version 1 and then follow the version-by-version updates.
+To understand the full evolution of a dataset, you start from
+version 1 and then follow the version-by-version updates.
 
 ### Selection config
 
@@ -632,7 +691,9 @@ For each version, DynamoDB stores:
 * total counts
 * artifact URIs
 
-This means the authoritative provenance for dataset evolution lives in the version table, while S3 stores the heavier artifacts themselves.
+This means the authoritative provenance for dataset evolution
+lives in the version table, while S3 stores the heavier artifacts
+themselves.
 
 ---
 
@@ -720,7 +781,8 @@ This is best when:
 
 ## When to use `rebalance`
 
-Use rebalance when the update materially changes dataset composition and you want splits recalculated globally.
+Use rebalance when the update materially changes dataset
+composition and you want splits recalculated globally.
 
 This is best when:
 
@@ -733,9 +795,10 @@ This is best when:
 
 # Summary
 
-The dataset API currently supports three core operations:
+The dataset API currently supports four core operations:
 
 * create a new versioned dataset
+* delete a dataset and all its versions
 * fetch the latest dataset metadata and artifact pointers
 * create a new dataset version by updating the latest version through add/remove logic
 

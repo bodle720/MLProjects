@@ -443,3 +443,35 @@ def validate_update_dataset_inputs(
         "split_strategy_name": validated_split_strategy_name,
         "description": validated_description,
     }
+
+def validate_delete_dataset_inputs(
+    *,
+    dataset_id: str
+) -> dict[str, Any]:
+    """
+    Top-level validator for DatasetClient.delete_dataset_all_versions(...).
+
+    Rules:
+    - dataset_id is required
+    """
+    validated_dataset_id = validate_dataset_id(dataset_id)
+
+    return {
+        "dataset_id": validated_dataset_id
+    }
+
+def validate_get_dataset_inputs(
+    *,
+    dataset_id: str
+) -> dict[str, Any]:
+    """
+    Top-level validator for DatasetClient.get_dataset(...).
+
+    Rules:
+    - dataset_id is required
+    """
+    validated_dataset_id = validate_dataset_id(dataset_id)
+
+    return {
+        "dataset_id": validated_dataset_id
+    }

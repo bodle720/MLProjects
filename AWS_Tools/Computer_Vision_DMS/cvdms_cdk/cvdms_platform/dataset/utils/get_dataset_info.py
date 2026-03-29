@@ -27,9 +27,6 @@ def get_dataset_info(
     dataset-level state and the latest dataset_versions row for current version
     metadata, counts, and artifact locations.
     """
-    if not dataset_id or not str(dataset_id).strip():
-        raise ValueError("dataset_id must be a non-empty string")
-
     datasets_table = dynamodb_resource.Table(datasets_table_name)
     dataset_versions_table = dynamodb_resource.Table(dataset_versions_table_name)
 

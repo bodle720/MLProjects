@@ -17,13 +17,13 @@ _TASK_TYPE_TO_ID_FIELD = {
     "instance-segmentation": "instance_annotation_ids",
 }
 
-def update_dataset_splits(
-    selected_imagery_rows: list[dict[str, Any]],
-    current_rows: list[dict[str, Any]],
-    operation: Operation,
-    split_approach: SplitApproach,
-    split_strategy_name: str,
-) -> list[dict[str, Any]]:
+def update_dataset_splits(*,
+                            selected_imagery_rows: list[dict[str, Any]],
+                            current_rows: list[dict[str, Any]],
+                            operation: Operation,
+                            split_approach: SplitApproach,
+                            split_strategy_name: str,
+                        ) -> list[dict[str, Any]]:
     """
     Compute the next dataset-version rows after applying an add/remove operation.
 
