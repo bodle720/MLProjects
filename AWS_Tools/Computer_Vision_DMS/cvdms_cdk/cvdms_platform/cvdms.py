@@ -195,6 +195,13 @@ class CvdmsApp:
     #------------
     #Datset ops
     #------------
+    # Call to retrieve info about a dataset.
+    def get_dataset(self,
+                     *,
+                     dataset_id: str) -> Dict:
+
+        return self._dataset_client.get_dataset(dataset_id=dataset_id)
+
     # Call to create a dataset.
     def create_dataset(self,
                          *,
@@ -209,3 +216,27 @@ class CvdmsApp:
                                                     description=description,
                                                     selection_config=selection_config,
                                                     split_strategy_name=split_strategy_name)
+
+    # Call to update a dataset.
+    def update_dataset(self,
+                         *,
+                         dataset_id: str,
+                         operation: str,
+                         selection_config: dict,
+                         split_approach: str = "maintain",
+                         split_strategy_name: str | None = None,
+                         description: str | None = None) -> Dict:
+
+        return self._dataset_client.update_dataset(dataset_id=dataset_id,
+                                                    operation=operation,
+                                                    selection_config=selection_config,
+                                                    split_approach=split_approach,
+                                                    split_strategy_name=split_strategy_name,
+                                                    description=description)
+
+    # Call to delete a dataset.
+    def delete_dataset_all_versions(self,
+                                     *,
+                                     dataset_id: str) -> Dict:
+
+        return self._dataset_client.delete_dataset_all_versions(dataset_id=dataset_id)

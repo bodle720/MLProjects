@@ -1,7 +1,7 @@
 # Upload Workflow
 
 For a step-by-step walkthrough of the upload workflow using the programmatic API located in
-`cvdms_platform/`, see `sample_walkthrough.ipynb`.
+`cvdms_platform/`, see `sample_walkthrough_upload.ipynb`.
 
 ## Input Formats
 

@@ -61,5 +61,7 @@ the capability of the code to detect such cases.
   - [README_stacks.md](README_stacks.md)
 - **Upload Workflow** – manifest formats and ingestion pipeline  
   - [README_upload.md](README_upload.md)
-- **Upload Walkthrough** – sample notebook to show the upload steps 
-  - [sample_walkthrough.ipynb](sample_walkthrough.ipynb)
+- **Upload Walkthrough for Upload** – sample notebook to show the upload steps 
+  - [sample_walkthrough_upload.ipynb](sample_walkthrough_upload.ipynb)
+- **Upload Walkthrough for Datasets** – sample notebook to show the various dataset operations 
+  - [sample_walkthrough_datasets.ipynb](sample_walkthrough_datasets.ipynb)
