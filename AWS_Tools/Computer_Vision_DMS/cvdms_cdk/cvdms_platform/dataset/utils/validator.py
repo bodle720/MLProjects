@@ -61,6 +61,9 @@ _ALLOWED_SELECTION_CONFIG_KEYS = {
     "color_buckets",
 }
 
+#############################################################
+# The validation helper functions
+#############################################################
 def validate_dataset_id(dataset_id: str) -> str:
     """
     Validate dataset_id.
@@ -147,8 +150,10 @@ def validate_split_strategy_name(split_strategy_name: str) -> str:
 def validate_optional_split_strategy_name(
     split_strategy_name: str | None,
 ) -> str | None:
+
     if split_strategy_name is None:
         return None
+
     return validate_split_strategy_name(split_strategy_name)
 
 def validate_operation(operation: str) -> str:
@@ -379,6 +384,9 @@ def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any
 
     return validated
 
+#############################################################
+# The four main validator entrypoints
+#############################################################
 def validate_create_dataset_inputs(
     *,
     dataset_id: str,

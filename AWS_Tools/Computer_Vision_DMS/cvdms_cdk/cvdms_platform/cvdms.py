@@ -203,40 +203,40 @@ class CvdmsApp:
         return self._dataset_client.get_dataset(dataset_id=dataset_id)
 
     # Call to create a dataset.
-    def create_dataset(self,
-                         *,
-                         dataset_id: str,
-                         label_type: str,
-                         description: str,
-                         selection_config: dict,
-                         split_strategy_name: str) -> Dict:
+    def submit_create_dataset(self,
+                                 *,
+                                 dataset_id: str,
+                                 label_type: str,
+                                 description: str,
+                                 selection_config: dict,
+                                 split_strategy_name: str) -> Dict:
 
-        return self._dataset_client.create_dataset(dataset_id=dataset_id,
-                                                    label_type=label_type,
-                                                    description=description,
-                                                    selection_config=selection_config,
-                                                    split_strategy_name=split_strategy_name)
+        return self._dataset_client.submit_create_dataset(dataset_id=dataset_id,
+                                                            label_type=label_type,
+                                                            description=description,
+                                                            selection_config=selection_config,
+                                                            split_strategy_name=split_strategy_name)
 
     # Call to update a dataset.
-    def update_dataset(self,
-                         *,
-                         dataset_id: str,
-                         operation: str,
-                         selection_config: dict,
-                         split_approach: str = "maintain",
-                         split_strategy_name: str | None = None,
-                         description: str | None = None) -> Dict:
+    def submit_update_dataset(self,
+                                 *,
+                                 dataset_id: str,
+                                 operation: str,
+                                 selection_config: dict,
+                                 split_approach: str = "maintain",
+                                 split_strategy_name: str | None = None,
+                                 description: str | None = None) -> Dict:
 
-        return self._dataset_client.update_dataset(dataset_id=dataset_id,
-                                                    operation=operation,
-                                                    selection_config=selection_config,
-                                                    split_approach=split_approach,
-                                                    split_strategy_name=split_strategy_name,
-                                                    description=description)
+        return self._dataset_client.submit_update_dataset(dataset_id=dataset_id,
+                                                            operation=operation,
+                                                            selection_config=selection_config,
+                                                            split_approach=split_approach,
+                                                            split_strategy_name=split_strategy_name,
+                                                            description=description)
 
     # Call to delete a dataset.
-    def delete_dataset_all_versions(self,
-                                     *,
-                                     dataset_id: str) -> Dict:
+    def submit_delete_dataset_all_versions(self,
+                                             *,
+                                             dataset_id: str) -> Dict:
 
-        return self._dataset_client.delete_dataset_all_versions(dataset_id=dataset_id)
+        return self._dataset_client.submit_delete_dataset_all_versions(dataset_id=dataset_id)

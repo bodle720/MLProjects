@@ -17,7 +17,7 @@ def get_dataset_info(
         {"exists": False}
     if the dataset row does not exist.
 
-    Otherwise returns:
+    Otherwise, returns:
         {
             "exists": True,
             ...

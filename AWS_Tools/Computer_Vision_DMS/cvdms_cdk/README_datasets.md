@@ -3,10 +3,10 @@
 This document describes the current dataset functionality available
 through the dataset API. The core implemented operations are:
 
-- `create_dataset(...)`
 - `get_dataset(...)`
-- `update_dataset(...)`
-- `delete_dataset_all_versions(...)`
+- `submit_create_dataset(...)`
+- `submit_update_dataset(...)`
+- `submit_delete_dataset_all_versions(...)`
 
 The dataset system is designed around **versioned dataset definitions**
 built from canonical imagery and canonical labels already stored in the
