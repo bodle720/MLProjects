@@ -23,6 +23,7 @@ class StorageStack(Stack):
     def __init__(self,
                  scope: Construct,
                  construct_id: str,
+                 *,
                  app_name: str,
                  common_utils_layer: _lambda.LayerVersion,
                  **kwargs) -> None:
@@ -398,9 +399,11 @@ class StorageStack(Stack):
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
         self.datasets_bucket = datasets_bucket
+
         self.job_table = job_table
         self.sha256_table = sha256_table
         self.lock_table = lock_table
+
         self.iceberg_database_name = iceberg_database_name
 
         # Expose the datasets table as well

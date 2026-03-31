@@ -26,10 +26,11 @@ from stacks.helper_constructs.batching_stage import BatchingStage
 from stacks.helper_constructs.ingest_stage import IngestStage
 from config_models import ComputeEnvConfig, LambdaConfig
 
-class ImageUploadStack(Stack):
+class UploadStack(Stack):
     def __init__(self,
                  scope: Construct,
                  construct_id: str,
+                 *,
                  app_name: str,
                  common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,

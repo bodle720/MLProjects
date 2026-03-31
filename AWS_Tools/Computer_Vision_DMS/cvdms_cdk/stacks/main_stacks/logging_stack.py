@@ -19,6 +19,7 @@ class LoggingStack(Stack):
     def __init__(self,
                  scope: Construct,
                  construct_id: str,
+                 *,
                  app_name: str,
                  **kwargs) -> None:
         '''
