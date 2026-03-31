@@ -1,5 +1,6 @@
 import uuid
 from constructs import Construct
+from stacks.helper_constructs.dlq_ops import DLQOps
 
 from aws_cdk import (
     Stack,
@@ -15,7 +16,9 @@ from aws_cdk import (
     aws_iam as iam,
     aws_sqs as sqs,
     aws_dynamodb as dynamodb,
-    aws_kinesisfirehose as firehose
+    aws_kinesisfirehose as firehose,
+    aws_s3_notifications as s3n,
+    aws_ssm as ssm
 )
 
 from config import CONFIG
@@ -34,9 +37,7 @@ class ImageUploadStack(Stack):
                  job_table: dynamodb.Table,
                  sha256_table: dynamodb.Table,
                  lock_table: dynamodb.Table,
-                 global_dlq: sqs.Queue,
                  iceberg_database_name: str,
-                 upload_events_queue: sqs.Queue,
                  firehose_delivery_stream: firehose.CfnDeliveryStream,  # L1 type
                  **kwargs) -> None:
 
@@ -49,19 +50,23 @@ class ImageUploadStack(Stack):
         self.job_table = job_table
         self.sha256_table = sha256_table
         self.lock_table = lock_table
-        self.global_dlq = global_dlq
         self.iceberg_database_name = iceberg_database_name
-        self.upload_events_queue = upload_events_queue
         self.firehose_delivery_stream = firehose_delivery_stream
         self.common_utils_layer = common_utils_layer
 
+        # Make the SQS Queue that will receive upload events
+        self.upload_events_queue = self.make_upload_events_queue()
+
+        # Make the dlq
+        self.dlq = self.make_dlq_assign_permissions()
+
         # Creates Batch compute environment and job queue pointing to the compute environment.
-        job_queue = self._make_compute_env(CONFIG.compute_env)
+        job_queue = self._make_compute_env(CONFIG.upload.compute_env)
 
         validation_stage = BatchingStage(
             self, "validationStage",
             stage_name="validationStage",
-            config=CONFIG.validation,
+            config=CONFIG.upload.validation,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -69,7 +74,7 @@ class ImageUploadStack(Stack):
             sha256_table=self.sha256_table,
             job_queue=job_queue,
             iceberg_database_name=self.iceberg_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+            ce_maxv_cpus=CONFIG.upload.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             dlq_chain_factory=self._make_dlq_chain,
@@ -80,7 +85,7 @@ class ImageUploadStack(Stack):
         deduplication_stage = BatchingStage(
             self, "deduplicationStage",
             stage_name="deduplicationStage",
-            config=CONFIG.deduplication,
+            config=CONFIG.upload.deduplication,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -88,7 +93,7 @@ class ImageUploadStack(Stack):
             sha256_table=self.sha256_table,
             job_queue=job_queue,
             iceberg_database_name=self.iceberg_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+            ce_maxv_cpus=CONFIG.upload.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             dlq_chain_factory=self._make_dlq_chain,
@@ -99,7 +104,7 @@ class ImageUploadStack(Stack):
         registration_stage = BatchingStage(
             self, "registrationStage",
             stage_name="registrationStage",
-            config=CONFIG.registration,
+            config=CONFIG.upload.registration,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -107,7 +112,7 @@ class ImageUploadStack(Stack):
             sha256_table=self.sha256_table,
             job_queue=job_queue,
             iceberg_database_name=self.iceberg_database_name,
-            ce_maxv_cpus=CONFIG.compute_env.maxv_cpus,
+            ce_maxv_cpus=CONFIG.upload.compute_env.maxv_cpus,
             region=self.region,
             account=self.account,
             dlq_chain_factory=self._make_dlq_chain,
@@ -118,7 +123,7 @@ class ImageUploadStack(Stack):
         validation_ingest_stage = IngestStage(
             self, "validationIngestStage",
             stage_name="validationIngestStage",
-            config=CONFIG.validation_ingest,
+            config=CONFIG.upload.validation_ingest,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -138,7 +143,7 @@ class ImageUploadStack(Stack):
         deduplication_ingest_stage = IngestStage(
             self, "deduplicationIngestStage",
             stage_name="deduplicationIngestStage",
-            config=CONFIG.deduplication_ingest,
+            config=CONFIG.upload.deduplication_ingest,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -157,7 +162,7 @@ class ImageUploadStack(Stack):
         registration_ingest_stage = IngestStage(
             self, "registrationIngestStage",
             stage_name="registrationIngestStage",
-            config=CONFIG.registration_ingest,
+            config=CONFIG.upload.registration_ingest,
             common_utils_layer=self.common_utils_layer,
             file_bucket=self.file_bucket,
             iceberg_bucket=self.iceberg_bucket,
@@ -175,7 +180,7 @@ class ImageUploadStack(Stack):
         )
 
         # Make cleanup lambda to run once entire upload job is done.
-        cleanup_task = self._make_cleanup_task(CONFIG.cleanup_lambda)
+        cleanup_task = self._make_cleanup_task(CONFIG.upload.cleanup_lambda)
 
         workflow_definition = sfn.Chain.start(validation_stage.batching_task) \
             .next(validation_stage.map_state) \
@@ -196,11 +201,11 @@ class ImageUploadStack(Stack):
 
         upload_state_machine = sfn.StateMachine(self, "UploadStateMachine",
                               definition_body=sfn.DefinitionBody.from_chainable(workflow_definition),
-                              timeout=Duration.hours(CONFIG.upload_state_machine.duration_hours)
+                              timeout=Duration.hours(CONFIG.upload.upload_state_machine.duration_hours)
                               )
 
         upload_state_machine.role.add_to_principal_policy(
-            iam.PolicyStatement(actions=["sqs:SendMessage"], resources=[self.global_dlq.queue_arn]))
+            iam.PolicyStatement(actions=["sqs:SendMessage"], resources=[self.dlq.queue_arn]))
 
         upload_state_machine.apply_removal_policy(RemovalPolicy.DESTROY)
 
@@ -222,7 +227,101 @@ class ImageUploadStack(Stack):
             ))
 
         # Make kickoff lambda to trigger on job.json upload
-        self._make_kickoff_lambda(upload_state_machine, CONFIG.kickoff_lambda)
+        self._make_kickoff_lambda(upload_state_machine, CONFIG.upload.kickoff_lambda)
+
+    def make_upload_events_queue(self):
+        upload_events_dlq = sqs.Queue(
+            self, "UploadEventsDLQ",
+            retention_period=Duration.days(14)
+        )
+
+        upload_events_queue = sqs.Queue(
+            self, "UploadEventsQueue",
+            visibility_timeout=Duration.minutes(CONFIG.upload.events_queue.visibility_timeout_minutes),
+            retention_period=Duration.days(CONFIG.upload.events_queue.retention_period_days),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                queue=upload_events_dlq,
+                max_receive_count=1
+            )
+        )
+
+        self.file_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.SqsDestination(upload_events_queue),
+            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="/job.json")
+        )
+
+        # Add it to SSM
+        ssm.StringParameter(self, "UploadEventsQueueNameParam",
+                            parameter_name=f"/cvdms/{self.app_name}/upload/upload_events_queue_name",
+                            string_value=upload_events_queue.queue_name)
+
+        return upload_events_queue
+
+    def make_dlq_assign_permissions(self):
+        dlq_processor_env_vars = {
+            "JOB_TABLE_NAME": self.job_table.table_name,
+            "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+            "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+            "LOCK_TABLE_NAME": self.lock_table.table_name,
+            "ATHENA_WORKGROUP": "primary",
+            "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
+            "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
+            "SHA256_TABLE_NAME": self.sha256_table.table_name
+        }
+
+        dlq_out = DLQOps(self,
+                         "upload_dlq",
+                         name="upload",
+                         app_name=self.app_name,
+                         dlq_processor_env_vars=dlq_processor_env_vars,
+                         region=self.region,
+                         account=self.account,
+                         dlq_ops_config=CONFIG.upload.dlq_ops,
+                         iceberg_database_name=self.iceberg_database_name,
+                         common_utils_layer=self.common_utils_layer,
+                         file_bucket=self.file_bucket,
+                         firehose_delivery_stream=self.firehose_delivery_stream)
+
+        dlq = dlq_out.dlq
+        dlq_processor = dlq_out.dlq_processor
+
+        # Assign proper permissions
+        # 1) DynamoDB
+        self.lock_table.grant_read_write_data(dlq_processor)
+        self.job_table.grant_read_write_data(dlq_processor)
+        self.sha256_table.grant_read_write_data(dlq_processor)
+
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"]
+        ))
+
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+        ))
+
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*",
+                       f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/canonical/*"]
+        ))
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
+            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}}
+        ))
+
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["glue:DeleteTable"],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/dedup_export_*"
+            ]
+        ))
+
+        return dlq
 
     def _make_dlq_chain(self) -> sfn.Chain:
         suffix = uuid.uuid4().hex[:8]
@@ -244,13 +343,13 @@ class ImageUploadStack(Stack):
             service="sqs",
             action="sendMessage",
             parameters={
-                "QueueUrl": self.global_dlq.queue_url,
+                "QueueUrl": self.dlq.queue_url,
                 "MessageBody.$": "States.JsonToString($.dlqMessage)"
             },
-            iam_resources=[self.global_dlq.queue_arn],
+            iam_resources=[self.dlq.queue_arn],
         )
 
-        fail = sfn.Fail(self, f"WorkflowFailed_{suffix}", cause="SentToGlobalDLQ", error="WorkflowError")
+        fail = sfn.Fail(self, f"WorkflowFailed_{suffix}", cause="SentToUploadDLQ", error="WorkflowError")
 
         return sfn.Chain.start(make_dlq_message).next(send_to_dlq).next(fail)
 
@@ -436,50 +535,50 @@ class ImageUploadStack(Stack):
     def _make_kickoff_lambda(self,
                             upload_state_machine,
                             kickoff_config: LambdaConfig):
-            # Make Kickoff lambda
-            kickoff_lambda = _lambda.Function(
-                self,
-                "KickoffLambda",
-                runtime=_lambda.Runtime.PYTHON_3_11,
-                handler=kickoff_config.handler,
-                code=_lambda.Code.from_asset(kickoff_config.path),
-                layers=[self.common_utils_layer],
-                memory_size=kickoff_config.memory_size,
-                timeout=Duration.seconds(kickoff_config.timeout_sec),
-                environment={
-                    "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
-                    "LOCK_TABLE_NAME": self.lock_table.table_name,
-                    "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn,
-                    "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                    "GLOBAL_DLQ_URL": self.global_dlq.queue_url
-                }
-            )
+        # Make Kickoff lambda
+        kickoff_lambda = _lambda.Function(
+            self,
+            "KickoffLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler=kickoff_config.handler,
+            code=_lambda.Code.from_asset(kickoff_config.path),
+            layers=[self.common_utils_layer],
+            memory_size=kickoff_config.memory_size,
+            timeout=Duration.seconds(kickoff_config.timeout_sec),
+            environment={
+                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+                "LOCK_TABLE_NAME": self.lock_table.table_name,
+                "UPLOAD_STATE_MACHINE_ARN": upload_state_machine.state_machine_arn,
+                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+                "UPLOAD_DLQ_URL": self.dlq.queue_url
+            }
+        )
 
-            upload_state_machine.grant_start_execution(kickoff_lambda)
+        upload_state_machine.grant_start_execution(kickoff_lambda)
 
-            # Permissions for the kickoff lambda
-            self.job_table.grant_read_write_data(kickoff_lambda)
-            self.file_bucket.grant_read(kickoff_lambda)
-            self.lock_table.grant_read_data(kickoff_lambda)
+        # Permissions for the kickoff lambda
+        self.job_table.grant_read_write_data(kickoff_lambda)
+        self.file_bucket.grant_read(kickoff_lambda)
+        self.lock_table.grant_read_data(kickoff_lambda)
 
-            # ensure S3 bucket-level list and get-location are permitted
-            kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
-                actions=["s3:ListBucket", "s3:GetBucketLocation"],
-                resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
-            ))
+        # ensure S3 bucket-level list and get-location are permitted
+        kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket", "s3:GetBucketLocation"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
+        ))
 
-            # explicitly allow GetObject on the athena-results prefix only if you will read it;
-            # otherwise GetObject on whole bucket is already covered by grant_read above.
-            kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
-                actions=["s3:GetObject"],
-                resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/*"],
-            ))
+        # explicitly allow GetObject on the athena-results prefix only if you will read it;
+        # otherwise GetObject on whole bucket is already covered by grant_read above.
+        kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"],
+            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/*"],
+        ))
 
-            kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
-                actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
-                resources=[self.firehose_delivery_stream.attr_arn],  # use ARN provided by the L1
-            ))
+        kickoff_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[self.firehose_delivery_stream.attr_arn],  # use ARN provided by the L1
+        ))
 
-            # Trigger: S3 event for job.json, add the queue as an event source
-            kickoff_lambda.add_event_source(event_sources.SqsEventSource(self.upload_events_queue, batch_size=1))
-            self.upload_events_queue.grant_consume_messages(kickoff_lambda)
+        # Trigger: S3 event for job.json, add the queue as an event source
+        kickoff_lambda.add_event_source(event_sources.SqsEventSource(self.upload_events_queue, batch_size=1))
+        self.upload_events_queue.grant_consume_messages(kickoff_lambda)

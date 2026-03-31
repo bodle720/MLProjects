@@ -9,15 +9,11 @@ from aws_cdk import (
     CustomResource,
     aws_iam as iam,
     aws_s3 as s3,
-    aws_sqs as sqs,
     aws_logs as logs,
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     custom_resources as cr,
-    aws_ssm as ssm,
-    aws_s3_notifications as s3n,
-    aws_kinesisfirehose as firehose,
-    aws_lambda_event_sources as event_sources
+    aws_ssm as ssm
 )
 
 from config import CONFIG
@@ -29,7 +25,6 @@ class StorageStack(Stack):
                  construct_id: str,
                  app_name: str,
                  common_utils_layer: _lambda.LayerVersion,
-                 firehose_delivery_stream: firehose.CfnDeliveryStream,
                  **kwargs) -> None:
         '''
         This stack makes the file bucket that will store all files and the iceberg bucket, which will store all
@@ -42,7 +37,6 @@ class StorageStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         self.common_utils_layer = common_utils_layer
-        self.firehose_delivery_stream = firehose_delivery_stream
 
         # Derive a unique glue database name from the stack name to store the iceberg table schema.
         # Make it deterministic, collision resistant, and length bounded.
@@ -327,14 +321,6 @@ class StorageStack(Stack):
                        removal_policy=RemovalPolicy.DESTROY
                        )
 
-        # Global DLQ for async failures (S3->Lambda, Lambda async invokes, etc.)
-        dlq = sqs.Queue(
-            self, "GlobalDeadLetterQueue",
-            retention_period=Duration.days(14),
-            visibility_timeout=Duration.minutes(15),
-            removal_policy=RemovalPolicy.DESTROY
-        )
-
         cleanup_fn = _lambda.Function(
             self, "DatabaseCleanupLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
@@ -408,136 +394,6 @@ class StorageStack(Stack):
                        removal_policy=RemovalPolicy.DESTROY
                        )
 
-        upload_events_dlq = sqs.Queue(
-            self, "UploadEventsDLQ",
-            retention_period=Duration.days(14)
-        )
-
-        upload_events_queue = sqs.Queue(
-            self, "UploadEventsQueue",
-            visibility_timeout=Duration.minutes(15),
-            retention_period=Duration.days(4),
-            dead_letter_queue=sqs.DeadLetterQueue(
-                queue=upload_events_dlq,
-                max_receive_count=1
-            )
-        )
-
-        file_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.SqsDestination(upload_events_queue),
-            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="/job.json")
-        )
-
-        # Make a lambda that polls the dlq and processes the messages
-        dlq_processor = _lambda.Function(
-            self,
-            "DLQProcessor",
-            runtime=_lambda.Runtime.PYTHON_3_11,
-            handler=CONFIG.dlq_processor.handler,
-            code=_lambda.Code.from_asset(CONFIG.dlq_processor.path),
-            layers=[self.common_utils_layer],
-            memory_size=CONFIG.dlq_processor.memory_size,
-            timeout=Duration.seconds(CONFIG.dlq_processor.timeout_sec),
-            environment={
-                "JOB_TABLE_NAME": job_table.table_name,
-                "FILE_BUCKET_NAME": file_bucket.bucket_name,
-                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
-                "LOCK_TABLE_NAME": lock_table.table_name,
-                "ATHENA_WORKGROUP": "primary",
-                "ICEBERG_DATABASE_NAME": iceberg_database_name,
-                "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
-                "SHA256_TABLE_NAME": sha256_table.table_name
-            }
-        )
-
-        # 1) DynamoDB
-        lock_table.grant_read_write_data(dlq_processor)
-        job_table.grant_read_write_data(dlq_processor)
-        sha256_table.grant_read_write_data(dlq_processor)
-
-        # 2) S3: delete temp files under temp/image-upload/ and read them
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:GetObject", "s3:DeleteObject"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/temp/image-upload/*"]
-        ))
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
-        ))
-
-        # 3) S3: Athena results write only to athena-results/
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:PutObject", "s3:GetObject"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/athena-results/*"]
-        ))
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket", "s3:GetBucketLocation"],
-            resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"]
-        ))
-
-        # 4) Athena: start and poll queries in the workgroup
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
-            resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
-        ))
-
-        # 5) Firehose logging
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
-            resources=[self.firehose_delivery_stream.attr_arn]
-        ))
-
-        # 6) Glue metadata read (catalog, DB, and tables)
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=[
-                "glue:GetDatabase", "glue:GetDatabases",
-                "glue:GetTable", "glue:GetTables",
-                "glue:GetPartition", "glue:GetPartitions",
-                "glue:GetTableVersion", "glue:GetTableVersions"
-            ],
-            resources=[
-                f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
-                f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/*"
-            ]
-        ))
-
-        # 7) Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=[
-                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
-                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
-            ],
-            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                       f"arn:aws:glue:{self.region}:{self.account}:database/{iceberg_database_name}",
-                       f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/upload_staging"
-                       ]
-        ))
-
-        # 8) S3: read and delete Iceberg files for upload_staging prefix
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
-            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*",
-                       f"arn:aws:s3:::{iceberg_bucket.bucket_name}/canonical/*"]
-        ))
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"],
-            resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}}
-        ))
-
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["glue:DeleteTable"],
-            resources=[
-                f"arn:aws:glue:{self.region}:{self.account}:table/{iceberg_database_name}/dedup_export_*"
-            ],
-        ))
-
-        dlq_processor.add_event_source(event_sources.SqsEventSource(dlq, batch_size=10))
-        dlq.grant_consume_messages(dlq_processor)
-
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
@@ -545,14 +401,11 @@ class StorageStack(Stack):
         self.job_table = job_table
         self.sha256_table = sha256_table
         self.lock_table = lock_table
-        self.global_dlq = dlq
         self.iceberg_database_name = iceberg_database_name
-        self.upload_events_queue = upload_events_queue
 
         # Expose the datasets table as well
         self.datasets_table = datasets_table
         self.dataset_versions_table = dataset_versions_table
-
 
         # SSM params
         # Buckets
@@ -600,15 +453,4 @@ class StorageStack(Stack):
         ssm.StringParameter(self, "Sha256TableNameParam",
                             parameter_name=f"/cvdms/{app_name}/storage/sha256_table_name",
                             string_value=sha256_table.table_name
-                            )
-
-        # Queues
-        ssm.StringParameter(self, "GlobalDlqNameParam",
-                            parameter_name=f"/cvdms/{app_name}/storage/global_dlq_name",
-                            string_value=dlq.queue_name
-                            )
-
-        ssm.StringParameter(self, "UploadEventsQueueNameParam",
-                            parameter_name=f"/cvdms/{app_name}/storage/upload_events_queue_name",
-                            string_value=upload_events_queue.queue_name
                             )

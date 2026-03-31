@@ -7,6 +7,7 @@ from config import CONFIG
 from stacks.main_stacks.logging_stack import LoggingStack
 from stacks.main_stacks.storage_stack import StorageStack
 from stacks.main_stacks.upload_stack import ImageUploadStack
+from stacks.main_stacks.dataset_stack import DatasetStack
 
 APP_NAME = CONFIG.app_name
 
@@ -38,6 +39,19 @@ upload_stack = ImageUploadStack(app,
                                 global_dlq=storage_stack.global_dlq,
                                 iceberg_database_name=storage_stack.iceberg_database_name,
                                 upload_events_queue=storage_stack.upload_events_queue,
+                                firehose_delivery_stream=logging_stack.firehose_delivery_stream,
+                                env=env)
+
+dataset_stack = DatasetStack(app,
+                                f"{APP_NAME}-DatasetStack",
+                                app_name=APP_NAME,
+                                common_utils_layer=logging_stack.common_utils_layer,
+                                file_bucket=storage_stack.file_bucket,
+                                iceberg_bucket=storage_stack.iceberg_bucket,
+                                job_table=storage_stack.job_table,
+                                sha256_table=storage_stack.sha256_table,
+                                lock_table=storage_stack.lock_table,
+                                iceberg_database_name=storage_stack.iceberg_database_name,
                                 firehose_delivery_stream=logging_stack.firehose_delivery_stream,
                                 env=env)
 

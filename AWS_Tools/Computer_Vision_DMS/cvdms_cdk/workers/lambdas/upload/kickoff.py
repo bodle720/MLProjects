@@ -15,7 +15,7 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-GLOBAL_DLQ_URL = os.environ["GLOBAL_DLQ_URL"]
+UPLOAD_DLQ_URL = os.environ["UPLOAD_DLQ_URL"]
 
 ALLOWED_LABEL_TYPES = {
     "single-label",
@@ -79,7 +79,7 @@ def send_to_dlq(job_id, user, event_type, error):
 
     try:
         sqs.send_message(
-            QueueUrl=GLOBAL_DLQ_URL,
+            QueueUrl=UPLOAD_DLQ_URL,
             MessageBody=json.dumps({
                 "source": "kickoff",
                 "job_id": job_id,
