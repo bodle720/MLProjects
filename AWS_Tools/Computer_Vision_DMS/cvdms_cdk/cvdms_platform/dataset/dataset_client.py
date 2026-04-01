@@ -1,6 +1,11 @@
+import uuid
+import json
 import logging
-from typing import Literal, Any
+
+from typing import Literal, Any, Tuple, Optional
+from datetime import datetime, timezone
 from mypy_boto3_s3.client import S3Client
+from botocore.exceptions import ClientError
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 # Helpers for validating user inputs
@@ -10,17 +15,6 @@ from cvdms_platform.dataset.utils.validator import (validate_create_dataset_inpu
 # Helper to retrieve information about a dataset
 from cvdms_platform.dataset.utils.get_dataset_info import get_dataset_info
 
-# Helper to upload JSON request to S3
-from cvdms_platform.dataset.utils.upload_submission import upload_submission
-
-LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
-    "single-label": "single_label",
-    "multi-label": "multi_label",
-    "object-detection": "object_detection",
-    "semantic-segmentation": "semantic_segmentation",
-    "instance-segmentation": "instance_segmentation"
-}
-
 class DatasetClient:
     """
     High-level client to perform dataset operations.
@@ -28,16 +22,33 @@ class DatasetClient:
     def __init__(self,
                  *,
                  user: str,
+                 file_bucket_name: str,
+                 job_table_name: str,
+                 lock_table_name: str,
                  datasets_table_name: str,
                  dataset_versions_table_name: str,
                  s3_client: S3Client,
                  dynamodb_resource: DynamoDBServiceResource):
 
         self.user = user
+        self.file_bucket_name = file_bucket_name
+        self.job_table_name = job_table_name
+        self.lock_table_name = lock_table_name
         self.datasets_table_name = datasets_table_name
         self.dataset_versions_table_name = dataset_versions_table_name
+
+        # Clients and resources
         self.s3_client = s3_client
         self.dynamodb_resource = dynamodb_resource
+
+        # Get the DDB tables needed.
+        self.job_table = self.dynamodb_resource.Table(self.job_table_name)
+        self.lock_table = self.dynamodb_resource.Table(self.lock_table_name)
+        self.datasets_table = self.dynamodb_resource.Table(self.datasets_table_name)
+        self.dataset_versions_table = self.dynamodb_resource.Table(self.dataset_versions_table_name)
+
+        # Constants
+        self.event_type = "DATASET_OP"
 
     def get_dataset(self, *, dataset_id: str) -> dict[str, Any]:
         """
@@ -51,14 +62,18 @@ class DatasetClient:
         metadata, split counts, and artifact pointers.
         """
 
-        validated = validate_get_dataset_inputs(dataset_id=dataset_id)
-        dataset_id = validated["dataset_id"]
-        logging.info(f"Validated dataset_id successfully: {dataset_id}")
+        try:
+            validated = validate_get_dataset_inputs(dataset_id=dataset_id)
+            dataset_id = validated["dataset_id"]
+        except Exception as e:
+            logging.error(str(e))
+            raise
+
+        logging.info(f"Validated dataset_id successfully: {dataset_id}. Starting retrieval...")
 
         return get_dataset_info(
-            dynamodb_resource=self.dynamodb_resource,
-            datasets_table_name=self.datasets_table_name,
-            dataset_versions_table_name=self.dataset_versions_table_name,
+            datasets_table=self.datasets_table,
+            dataset_versions_table=self.dataset_versions_table,
             dataset_id=dataset_id
         )
 
@@ -80,32 +95,53 @@ class DatasetClient:
 
         # 1. Validate inputs
         logging.info("Validating inputs...")
-        validated = validate_create_dataset_inputs(
-            dataset_id=dataset_id,
-            label_type=label_type,
-            description=description,
-            selection_config=selection_config,
-            split_strategy_name=split_strategy_name
-        )
 
-        dataset_id = validated["dataset_id"]
-        label_type = validated["label_type"]
-        description = validated["description"]
-        selection_config = validated["selection_config"]
-        split_strategy_name = validated["split_strategy_name"]
+        try:
+            validated = validate_create_dataset_inputs(
+                dataset_id=dataset_id,
+                label_type=label_type,
+                description=description,
+                selection_config=selection_config,
+                split_strategy_name=split_strategy_name
+            )
+
+            dataset_id = validated["dataset_id"]
+            label_type = validated["label_type"]
+            description = validated["description"]
+            selection_config = validated["selection_config"]
+            split_strategy_name = validated["split_strategy_name"]
+        except Exception as e:
+            logging.error(str(e))
+            raise
 
         logging.info("Inputs validated.")
 
         # 2. Ensure dataset_id is not previously used
         logging.info("Checking if dataset already exists...")
-        dataset_info = self.get_dataset(dataset_id=dataset_id)
+        try:
+            dataset_info = self.get_dataset(dataset_id=dataset_id)
+        except Exception as e:
+            logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
+            raise
+
         if dataset_info["exists"]:
             logging.error(f"Dataset '{dataset_id}' already exists, choose a different name.")
             raise ValueError(f"Dataset '{dataset_id}' already exists, choose a different name.")
 
         # 3. Submit task to S3
-        payload = {}
-        submission = upload_submission(payload=payload)
+        payload = {"user": self.user,
+                    "event_type": self.event_type,
+                    "task_type": "create_dataset",
+                    "request": {
+                        "dataset_id": dataset_id,
+                        "label_type": label_type,
+                        "description": description,
+                        "selection_config": selection_config,
+                        "split_strategy_name": split_strategy_name
+                    }
+                }
+
+        submission = self._submit_job(payload=payload)
 
         return submission
 
@@ -129,35 +165,55 @@ class DatasetClient:
         # 1. Validate inputs
         logging.info("Validating inputs...")
 
-        validated = validate_update_dataset_inputs(
-            dataset_id=dataset_id,
-            operation=operation,
-            selection_config=selection_config,
-            split_approach=split_approach,
-            split_strategy_name=split_strategy_name,
-            description=description,
-        )
+        try:
+            validated = validate_update_dataset_inputs(
+                dataset_id=dataset_id,
+                operation=operation,
+                selection_config=selection_config,
+                split_approach=split_approach,
+                split_strategy_name=split_strategy_name,
+                description=description,
+            )
 
-        dataset_id = validated["dataset_id"]
-        operation = validated["operation"]
-        selection_config = validated["selection_config"]
-        split_approach = validated["split_approach"]
-        split_strategy_name = validated["split_strategy_name"]
-        description = validated["description"]
+            dataset_id = validated["dataset_id"]
+            operation = validated["operation"]
+            selection_config = validated["selection_config"]
+            split_approach = validated["split_approach"]
+            split_strategy_name = validated["split_strategy_name"]
+            description = validated["description"]
+        except Exception as e:
+            logging.error(str(e))
+            raise
 
         logging.info("Inputs validated.")
 
         # 2. Load current dataset state
         logging.info("Checking if dataset already exists...")
-        dataset_info = self.get_dataset(dataset_id=dataset_id)
+        try:
+            dataset_info = self.get_dataset(dataset_id=dataset_id)
+        except Exception as e:
+            logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
+            raise
 
         if not dataset_info["exists"]:
             logging.error(f"Dataset '{dataset_id}' does not exist.")
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
         # 3. Submit task to S3
-        payload = {}
-        submission = upload_submission(payload=payload)
+        payload = {"user": self.user,
+                    "event_type": self.event_type,
+                    "task_type": "update_dataset",
+                    "request": {
+                        "dataset_id": dataset_id,
+                        "operation": operation,
+                        "selection_config": selection_config,
+                        "split_approach": split_approach,
+                        "split_strategy_name": split_strategy_name,
+                        "description": description
+                    }
+                }
+
+        submission = self._submit_job(payload=payload)
 
         return submission
 
@@ -171,12 +227,13 @@ class DatasetClient:
         """
 
         # 1. Validate inputs
+        logging.info("Validating inputs")
+
         try:
-            logging.info("Validating inputs")
             validated = validate_delete_dataset_inputs(dataset_id=dataset_id)
             dataset_id = validated["dataset_id"]
         except Exception as e:
-            logging.error(f"Failed validating inputs: {str(e)}")
+            logging.error(str(e))
             raise
 
         # 2. Load existing dataset metadata and confirm dataset exists
@@ -184,15 +241,226 @@ class DatasetClient:
         try:
             dataset_record = self.get_dataset(dataset_id=dataset_id)
         except Exception as e:
-            logging.error(f"Failed loading dataset metadata for '{dataset_id}': {e}")
+            logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
 
         if not dataset_record["exists"]:
             logging.error(f"Dataset '{dataset_id}' does not exist.")
-            raise
+            raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
         # 3. Submit task to S3
-        payload = {}
-        submission = upload_submission(payload=payload)
+        payload = {"user": self.user,
+                   "event_type": self.event_type,
+                   "task_type": "delete_dataset",
+                   "request": {
+                       "dataset_id": dataset_id
+                        }
+                   }
+
+        submission = self._submit_job(payload=payload)
 
         return submission
+
+    def _acquire_lock(self) -> Tuple[bool, str]:
+        """
+        Try to set locked = True, locked_by = holder (job_id).
+        Returns (True, "") on success, (False, error_message) on failure.
+        Uses conditional update so only one caller can win.
+        """
+        lock_id = "global"
+        holder = str(uuid.uuid4())
+        logging.info(f"Acquiring lock for lock {lock_id}, new potential holder = {holder}, used lock table name {self.lock_table_name}")
+        try:
+            self.lock_table.update_item(
+                Key={"lock_id": lock_id},
+                UpdateExpression="SET locked = :true, locked_by = :holder",
+                ConditionExpression="attribute_not_exists(locked) OR locked = :false",
+                ExpressionAttributeValues={":true": True, ":false": False, ":holder": holder},
+                ReturnValues="ALL_NEW",
+            )
+            return True, holder
+        except ClientError as e:
+            logging.error(f"Unable to acquire lock for lock id {lock_id}, error message: {e}")
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                return False, "lock_already_held"
+            return False, f"dynamodb_error: {e}"
+
+    def _create_job_row(self,
+                       job_id: str,
+                       *,
+                       task_type: str,
+                       dataset_id: str,
+                       summary: str = "") -> Tuple[bool, str]:
+        """
+        Insert initial job row with status=PENDING. Returns (True,"") or (False,error).
+        Uses a condition to avoid overwriting an existing job_id.
+        """
+        item = {
+            "job_id": job_id,
+            "user": self.user,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": "PENDING",
+            "summary": summary,
+            "event_type": self.event_type,
+            "task_type": task_type,
+            "dataset_id": dataset_id,
+            "error": "",
+        }
+
+        try:
+            self.job_table.put_item(Item=item, ConditionExpression="attribute_not_exists(job_id)")
+            return True, ""
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                return False, "job_already_exists"
+            return False, f"dynamodb_error: {e}"
+
+    def _release_lock(self, expected_holder: str = "") -> Tuple[bool, str]:
+        """
+        Release lock only if current locked_by matches expected_holder (the job id holding the lock).
+        Returns (True, "") on success.
+        """
+        lock_id = "global"
+        try:
+            self.lock_table.update_item(
+                Key={"lock_id": lock_id},
+                UpdateExpression="SET locked = :false REMOVE locked_by",
+                ConditionExpression="locked_by = :holder",
+                ExpressionAttributeValues={":false": False, ":holder": expected_holder},
+                ReturnValues="ALL_NEW",
+            )
+            return True, ""
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            logging.error(f"Failed releasing lock for job id {expected_holder}: {e}")
+            if code == "ConditionalCheckFailedException":
+                return False, "lock_not_held_by_expected_holder"
+            return False, f"dynamodb_error: {e}"
+
+    def _update_job_status(self, job_id: str, status: str, error_msg: Optional[str] = None) -> Tuple[bool, str]:
+        valid_statuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED']
+        if status not in valid_statuses:
+            logging.error(f"Failed updating job status because specified status was invalid: {status}")
+            return False, f"invalid_status: {status}"
+
+        try:
+            self.job_table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET #s = :s, #e = :e",
+                ExpressionAttributeNames={"#s": "status", "#e": "error"},
+                ExpressionAttributeValues={":s": status, ":e": error_msg or ""},
+            )
+            logging.info(f"Successfully updated job status to {status}")
+            return True, "success"
+        except ClientError as e:
+            logging.error(f"Failed updating job status: {e}")
+            return False, f"dynamodb_error: {e}"
+
+    def _delete_temp_job_folder(self, job_id: str) -> Tuple[bool, str]:
+        """
+        Deletes all S3 objects under temp/dataset-ops/<job_id>/.
+        Returns (True, "deleted") or (False, error_message).
+        """
+        prefix = f"temp/dataset-ops/{job_id}/"
+        try:
+            paginator = self.s3_client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self.file_bucket_name, Prefix=prefix)
+
+            keys_to_delete = []
+            for page in pages:
+                for obj in page.get("Contents", []):
+                    keys_to_delete.append({"Key": obj["Key"]})
+
+            if not keys_to_delete:
+                return True, "no_files_to_delete"
+
+            # Delete in batches of 1000
+            for i in range(0, len(keys_to_delete), 1000):
+                batch = keys_to_delete[i:i + 1000]
+                self.s3_client.delete_objects(
+                    Bucket=self.file_bucket_name,
+                    Delete={"Objects": batch}
+                )
+
+            return True, "deleted"
+        except Exception as e:
+            return False, f"delete_error: {e}"
+
+    def _upload_submission_to_s3(self,
+                               job_id: str,
+                               payload: dict) -> Tuple[bool, str]:
+
+        try:
+            prefix = f"temp/dataset-ops/{job_id}"
+            submission_key = f"{prefix}/submission.json"
+            self.s3_client.put_object(
+                Bucket=self.file_bucket_name,
+                Key=submission_key,
+                Body=json.dumps(payload).encode("utf-8"),
+                ContentType="application/json"
+            )
+
+            logging.info(f"Upload of submission.json success: s3://{self.file_bucket_name}/{submission_key}")
+
+            return True, "success"
+
+        except Exception as e:
+            delete_ok, delete_msg = self._delete_temp_job_folder(job_id)
+
+            if not delete_ok:
+                logging.error(f"Failed to delete temp folder for job {job_id} after a failed upload attempt. Delete error: {delete_msg}, upload error: {e}")
+            else:
+                logging.error(f"Upload failed: {e}")
+                logging.info(f"Cleaned up temp folder for job {job_id}")
+
+            return False, f"upload_error: {e}"
+
+    def _submit_job(self, *, payload: dict) -> dict:
+        # try to acquire lock
+        ok, holder_or_err = self._acquire_lock()
+        if not ok:
+            logging.error(f"Failed to acquire lock: {holder_or_err}")
+            raise RuntimeError(f"Failed to acquire lock: {holder_or_err}")
+
+        job_id = holder_or_err  # we used holder as generated job id in acquire lock
+        logging.info(f"Acquired lock: {job_id}")
+        payload["job_id"] = job_id
+        payload["submission_s3_uri"] = f"s3://{self.file_bucket_name}/temp/dataset-ops/{job_id}/submission.json"
+
+        # create job row
+        dataset_id = payload["request"]["dataset_id"]
+        task_type = payload["task_type"]
+        job_summary = payload["request"].get("description")
+        if not job_summary:
+            if task_type == "delete_dataset":
+                job_summary = f"Deleting dataset_id={dataset_id}"
+            else:
+                job_summary = "No description provided."
+
+        ok, err = self._create_job_row(job_id,
+                                       task_type=task_type,
+                                       dataset_id=dataset_id,
+                                       summary=job_summary)
+        if not ok:
+            logging.error(f"Failed to create job row: {err}")
+            # release lock before returning
+            self._release_lock(expected_holder=job_id)
+            raise RuntimeError(f"Failed to create job row: {err}")
+
+        logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
+
+        logging.info('Uploading submission file to S3.')
+        ok, msg = self._upload_submission_to_s3(job_id,
+                                                payload)
+        if not ok:
+            logging.error(f"Failed to upload file to S3: {msg}")
+            self._update_job_status(job_id, "FAILED", error_msg=msg)
+            self._release_lock(expected_holder=job_id)
+            raise RuntimeError(f"Failed to upload file to S3: {msg}")
+
+        logging.info("Done uploading submission.json to S3.")
+        self._update_job_status(job_id, "IN_PROGRESS")
+
+        return {"submission_status": "success", "job_id": job_id}

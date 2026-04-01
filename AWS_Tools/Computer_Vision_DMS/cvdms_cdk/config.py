@@ -1,8 +1,8 @@
 from config_models import (
-    AppConfig, ComputeEnvConfig, UploadStateMachineConfig,
+    AppConfig, ComputeEnvConfig, StateMachineConfig,
     BatchingStageConfig, BatchTaskJobDefConfig, StorageConfig,
     LoggingConfig, LambdaConfig, IngestStageConfig, UploadConfig,
-    DLQOpsConfig, SQSConfig
+    DLQOpsConfig, SQSConfig, DatasetConfig
 )
 
 CONFIG = AppConfig(
@@ -21,10 +21,10 @@ CONFIG = AppConfig(
         provider_cleanup_lambda_path = "workers/lambdas/storage"
     ),
     upload=UploadConfig(
-        upload_state_machine=UploadStateMachineConfig(duration_hours=2),
+        upload_state_machine=StateMachineConfig(duration_hours=2),
         kickoff_lambda=LambdaConfig(
             path="workers/lambdas/upload",
-            handler="kickoff.handler",
+            handler="kickoff_upload.handler",
             memory_size=1024,
             timeout_sec=500
         ),
@@ -36,7 +36,7 @@ CONFIG = AppConfig(
         dlq_ops=DLQOpsConfig(
             dlq_processor=LambdaConfig(
                     path="workers/lambdas/upload",
-                    handler="upload_dlq_processor.handler",
+                    handler="dlq_processor_upload.handler",
                     memory_size=512,
                     timeout_sec=600
                 ),
@@ -156,9 +156,64 @@ CONFIG = AppConfig(
         ),
         cleanup_lambda=LambdaConfig(
             path="workers/lambdas/upload",
-            handler="cleanup.handler",
+            handler="cleanup_upload.handler",
             memory_size=1024,
             timeout_sec=500
         )
-    )
+    ),
+    dataset=DatasetConfig(
+            dataset_state_machine=StateMachineConfig(duration_hours=2),
+            kickoff_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="kickoff_dataset.handler",
+                memory_size=1024,
+                timeout_sec=500
+            ),
+            dlq_ops=DLQOpsConfig(
+                dlq_processor=LambdaConfig(
+                        path="workers/lambdas/dataset",
+                        handler="dlq_processor_dataset.handler",
+                        memory_size=512,
+                        timeout_sec=600
+                    ),
+                sqs_queue=SQSConfig(
+                        retention_period_days=14,
+                        visibility_timeout_minutes=15
+                )
+            ),
+            events_queue=SQSConfig(
+                        retention_period_days=4,
+                        visibility_timeout_minutes=15
+            ),
+            create_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="create_dataset.handler",
+                memory_size=1024,
+                timeout_sec=900
+            ),
+            update_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="update_dataset.handler",
+                memory_size=1024,
+                timeout_sec=900
+            ),
+            delete_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="delete_dataset.handler",
+                memory_size=1024,
+                timeout_sec=900
+            ),
+            visualization_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="visualize_dataset.handler",
+                memory_size=1024,
+                timeout_sec=900
+            ),
+            cleanup_lambda=LambdaConfig(
+                path="workers/lambdas/dataset",
+                handler="cleanup_dataset.handler",
+                memory_size=1024,
+                timeout_sec=500
+            )
+        )
 )

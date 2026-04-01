@@ -44,7 +44,7 @@ class UploadStack(Stack):
 
         super().__init__(scope, construct_id, **kwargs)
 
-        # Variables from Storage stack and app name.
+        # Variables from Storage/Logging stack and app name.
         self.app_name = app_name
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
@@ -288,7 +288,6 @@ class UploadStack(Stack):
         dlq_processor = dlq_out.dlq_processor
 
         # Assign proper permissions
-        # 1) DynamoDB
         self.lock_table.grant_read_write_data(dlq_processor)
         self.job_table.grant_read_write_data(dlq_processor)
         self.sha256_table.grant_read_write_data(dlq_processor)
@@ -419,7 +418,7 @@ class UploadStack(Stack):
                            cleanup_config: LambdaConfig):
         cleanup_lambda = _lambda.Function(
             self,
-            "CleanupLambda",
+            "CleanupLambdaUpload",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=cleanup_config.handler,
             code=_lambda.Code.from_asset(cleanup_config.path),

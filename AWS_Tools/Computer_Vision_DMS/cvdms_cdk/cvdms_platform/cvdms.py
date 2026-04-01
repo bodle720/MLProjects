@@ -163,18 +163,17 @@ class CvdmsApp:
 
         # Make the dataset client.
         self._dataset_client = DatasetClient(user=user,
-                                             datasets_bucket_name=datasets_bucket_name,
+                                             file_bucket_name=file_bucket_name,
+                                             job_table_name=job_table_name,
+                                             lock_table_name=lock_table_name,
                                              datasets_table_name=datasets_table_name,
                                              dataset_versions_table_name=dataset_versions_table_name,
                                              s3_client=s3_client,
-                                             dynamodb_resource=dynamodb_resource,
-                                             iceberg_database_name=iceberg_database_name,
-                                             athena_client=athena_client,
-                                             file_bucket_name=file_bucket_name)
+                                             dynamodb_resource=dynamodb_resource)
 
         logging.info('Instantiation complete.')
 
-    # Main entry to start an uplod job.
+    # Main entry to start an upload job.
     def start_upload_job(self,
                          manifest_path: str,
                          label_type: str,

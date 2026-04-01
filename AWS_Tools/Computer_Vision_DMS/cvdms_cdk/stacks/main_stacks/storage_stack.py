@@ -167,13 +167,6 @@ class StorageStack(Stack):
         )
 
         job_table.add_global_secondary_index(
-            index_name="jobType-createdAt-index",
-            partition_key=dynamodb.Attribute(name="job_type", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
-            projection_type=dynamodb.ProjectionType.ALL
-        )
-
-        job_table.add_global_secondary_index(
             index_name="datasetId-createdAt-index",
             partition_key=dynamodb.Attribute(name="dataset_id", type=dynamodb.AttributeType.STRING),
             sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),

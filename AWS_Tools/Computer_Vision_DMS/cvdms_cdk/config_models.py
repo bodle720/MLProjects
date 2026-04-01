@@ -53,7 +53,7 @@ class DLQOpsConfig:
 # Upload flow specific configs
 ####################################################################
 @dataclass
-class UploadStateMachineConfig:
+class StateMachineConfig:
     duration_hours: int
 
 @dataclass
@@ -80,7 +80,7 @@ class IngestStageConfig:
 ####################################################################
 @dataclass
 class UploadConfig:
-    upload_state_machine: UploadStateMachineConfig
+    upload_state_machine: StateMachineConfig
     kickoff_lambda: LambdaConfig
     compute_env: ComputeEnvConfig
     dlq_ops: DLQOpsConfig
@@ -94,8 +94,21 @@ class UploadConfig:
     cleanup_lambda: LambdaConfig
 
 @dataclass
+class DatasetConfig:
+    dataset_state_machine: StateMachineConfig
+    kickoff_lambda: LambdaConfig
+    dlq_ops: DLQOpsConfig
+    events_queue: SQSConfig
+    create_lambda: LambdaConfig
+    update_lambda: LambdaConfig
+    delete_lambda: LambdaConfig
+    visualization_lambda: LambdaConfig
+    cleanup_lambda: LambdaConfig
+
+@dataclass
 class AppConfig:
     app_name: str
     logging: LoggingConfig
     storage: StorageConfig
     upload: UploadConfig
+    dataset: DatasetConfig

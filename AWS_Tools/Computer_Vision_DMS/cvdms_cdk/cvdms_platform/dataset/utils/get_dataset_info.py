@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 from typing import Any
 
@@ -5,9 +6,8 @@ from botocore.exceptions import ClientError
 
 def get_dataset_info(
     *,
-    dynamodb_resource: Any,
-    datasets_table_name: str,
-    dataset_versions_table_name: str,
+    datasets_table: Any,
+    dataset_versions_table: Any,
     dataset_id: str,
 ) -> dict[str, Any]:
     """
@@ -27,12 +27,10 @@ def get_dataset_info(
     dataset-level state and the latest dataset_versions row for current version
     metadata, counts, and artifact locations.
     """
-    datasets_table = dynamodb_resource.Table(datasets_table_name)
-    dataset_versions_table = dynamodb_resource.Table(dataset_versions_table_name)
-
+    logging.info("Getting dataset row.")
     dataset_item = get_dataset_row(
         datasets_table=datasets_table,
-        dataset_id=dataset_id,
+        dataset_id=dataset_id
     )
     if dataset_item is None:
         return {"exists": False}
@@ -42,6 +40,7 @@ def get_dataset_info(
         field_name="latest_version",
     )
 
+    logging.info("Getting dataset version row.")
     dataset_version_item = get_dataset_version_row(
         dataset_versions_table=dataset_versions_table,
         dataset_id=dataset_id,
@@ -51,11 +50,16 @@ def get_dataset_info(
     # This should not normally happen if writes are correct, but fail loudly so
     # the inconsistency is visible rather than returning partial truth.
     if dataset_version_item is None:
+        logging.error(
+            f"Dataset '{dataset_id}' exists, but latest version row "
+            f"{latest_version} was not found in dataset versions table."
+        )
         raise ValueError(
             f"Dataset '{dataset_id}' exists, but latest version row "
-            f"{latest_version} was not found in '{dataset_versions_table_name}'."
+            f"{latest_version} was not found in dataset versions table."
         )
 
+    logging.info("Rows obtained. Building and returning result.")
     return build_get_dataset_result(
         dataset_item=dataset_item,
         dataset_version_item=dataset_version_item,
