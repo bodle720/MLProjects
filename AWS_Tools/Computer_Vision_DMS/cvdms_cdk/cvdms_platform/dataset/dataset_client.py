@@ -9,11 +9,11 @@ from botocore.exceptions import ClientError
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 # Helpers for validating user inputs
-from cvdms_platform.dataset.utils.validator import (validate_create_dataset_inputs, validate_update_dataset_inputs,
+from cvdms_platform.dataset.validator import (validate_create_dataset_inputs, validate_update_dataset_inputs,
                                                     validate_delete_dataset_inputs, validate_get_dataset_inputs)
 
 # Helper to retrieve information about a dataset
-from cvdms_platform.dataset.utils.get_dataset_info import get_dataset_info
+from cvdms_platform.dataset.get_dataset_info import get_dataset_info
 
 class DatasetClient:
     """
