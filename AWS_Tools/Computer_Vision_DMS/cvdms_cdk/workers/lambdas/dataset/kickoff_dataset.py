@@ -5,30 +5,26 @@ from datetime import datetime
 from urllib.parse import unquote_plus
 
 import boto3
-from botocore.exceptions import ClientError
 
-# Lambda layer imports, add to path to avoid pycharm complaining.
-from common.logging_utils import log
-from common.s3_utils import s3_read_json, parse_s3_uri
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_read_json
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
+JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
-UPLOAD_STATE_MACHINE_ARN = os.environ["UPLOAD_STATE_MACHINE_ARN"]
+DATASET_STATE_MACHINE_ARN = os.environ["DATASET_STATE_MACHINE_ARN"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-UPLOAD_DLQ_URL = os.environ["UPLOAD_DLQ_URL"]
+DATASET_DLQ_URL = os.environ["DATASET_DLQ_URL"]
 
-ALLOWED_LABEL_TYPES = {
-    "single-label",
-    "multi-label",
-    "object-detection",
-    "semantic-segmentation",
-    "instance-segmentation"
+ALLOWED_TASK_TYPES = {
+    "create_dataset",
+    "update_dataset",
+    "delete_dataset",
 }
 
-TASK_NAME = "[UPLOAD_KICKOFF]"
+TASK_NAME = "[DATASET_KICKOFF]"
 
 sf = boto3.client("stepfunctions")
-s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
 
@@ -72,155 +68,174 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
+
 def send_to_dlq(job_id, user, event_type, error):
-    job_id = job_id or 'unknown'
-    user = user or 'unknown'
-    event_type = event_type or "IMAGE_UPLOAD"
+    job_id = job_id or "unknown"
+    user = user or "unknown"
+    event_type = event_type or "DATASET_OP"
 
     try:
         sqs.send_message(
-            QueueUrl=UPLOAD_DLQ_URL,
+            QueueUrl=DATASET_DLQ_URL,
             MessageBody=json.dumps({
                 "source": "kickoff",
                 "job_id": job_id,
                 "user": user,
                 "event_type": event_type,
-                "error": str(error)
-            })
+                "error": str(error),
+            }),
         )
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed to send to DLQ: {str(error)}, exception: {e}", level='error')
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed to send to DLQ: {str(error)}, exception: {e}",
+            level="error",
+        )
+
 
 def fail(job_id, user, event_type, msg):
     job_id = job_id or "unknown"
     user = user or "unknown"
-    event_type = event_type or "IMAGE_UPLOAD"
+    event_type = event_type or "DATASET_OP"
     send_to_dlq(job_id, user, event_type, msg)
-    return {"status": "failed", "job_id": job_id, "user": user, "event_type": event_type}
+    return {
+        "status": "failed",
+        "job_id": job_id,
+        "user": user,
+        "event_type": event_type,
+    }
+
 
 def handler(event, context):
     job_id = "unknown"
     user = "unknown"
-    event_type = "IMAGE_UPLOAD"
+    event_type = "DATASET_OP"
 
-    # Guard: ensure there's at least one record
+    # Guard: ensure there is at least one SQS record.
     records = event.get("Records", [])
     if not records:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: No Records in event")
+        return fail(job_id, user, event_type, f"{TASK_NAME} No Records in event")
 
-    # Use the first SQS record (batch_size=1 configured)
+    # batch_size=1 in CDK, so use the first SQS record.
     sqs_rec = records[0]
-
-    # SQS message body contains the S3 notification JSON as a string
     body = sqs_rec.get("body")
     if not body:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: SQS record missing")
+        return fail(job_id, user, event_type, f"{TASK_NAME} SQS record missing body")
 
     try:
         body_json = json.loads(body)
     except Exception as e:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Failed to parse SQS body as JSON: {str(e)}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to parse SQS body as JSON: {e}")
 
-    # Expect the S3 notification inside body_json["Records"][0]["s3"]
+    # The SQS body should contain the S3 notification event.
     s3_records = body_json.get("Records", [])
     if not s3_records:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: No S3 Records inside SQS body")
+        return fail(job_id, user, event_type, f"{TASK_NAME} No S3 Records inside SQS body")
 
     s3_rec = s3_records[0]
     s3_info = s3_rec.get("s3", {})
     bucket = s3_info.get("bucket", {}).get("name")
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
-    # key: "temp/image-upload/<job_id>/job.json"
-    if not key.endswith("job.json"):
+    # Expect temp/dataset-ops/<job_id>/submission.json
+    if not key.endswith("submission.json"):
         return fail(job_id, user, event_type, f"{TASK_NAME} Unexpected key: {key}")
 
     parts = key.split("/")
-    if len(parts) >= 3 and parts[0] == "temp" and parts[1] == "image-upload":
-        job_id = parts[2]  # use this even before reading the manifest
+    if len(parts) >= 3 and parts[0] == "temp" and parts[1] == "dataset-ops":
+        job_id = parts[2]
 
     if bucket != FILE_BUCKET_NAME:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Bucket mismatch in upload kickoff lambda")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Bucket mismatch: got {bucket}, expected {FILE_BUCKET_NAME}")
 
-    # Now proceed with your existing logic to fetch job.json, validate, etc.
+    # Load submission.json
     try:
-        job_data = s3_read_json(bucket, key, TASK_NAME)
-        job_id = job_data["job_id"]
-        user = job_data["user"]
-        event_type = job_data.get("event_type", "IMAGE_UPLOAD")
-        label_type = job_data["label_type"]
-        data_source = job_data["data_source"]
-        path_prefix = job_data["path_prefix"]
-        registration_time = job_data["registration_time"]
-        original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
+        submission = s3_read_json(bucket, key, TASK_NAME)
+        job_id = submission["job_id"]
+        user = submission["user"]
+        event_type = submission.get("event_type", "DATASET_OP")
+        task_type = submission["task_type"]
+        request = submission["request"]
+        submission_s3_uri = submission["submission_s3_uri"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json", level='error')
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Could not initialize expected fields from submission.json: {e}",
+            level="error",
+        )
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid submission.json payload: {e}")
 
-    if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid label_type: {label_type}")
+    # Minimal validation only.
+    if event_type != "DATASET_OP":
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid event_type: {event_type}")
 
-    if not isinstance(original_manifest_s3_uri, str) or not original_manifest_s3_uri.startswith("s3://"):
-        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid S3 URI original_manifest_s3_uri: {original_manifest_s3_uri}")
+    if not isinstance(task_type, str) or task_type not in ALLOWED_TASK_TYPES:
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid task_type: {task_type}")
 
-    # Enforce: this job.json must correspond to the currently-held global lock
+    if not isinstance(request, dict):
+        return fail(job_id, user, event_type, f"{TASK_NAME} request must be an object")
+
+    expected_submission_s3_uri = f"s3://{FILE_BUCKET_NAME}/temp/dataset-ops/{job_id}/submission.json"
+    if submission_s3_uri != expected_submission_s3_uri:
+        return fail(
+            job_id,
+            user,
+            event_type,
+            f"{TASK_NAME} submission_s3_uri mismatch: got {submission_s3_uri}, expected {expected_submission_s3_uri}",
+        )
+
+    # Enforce that this submission corresponds to the currently-held global lock.
     ok, reason = assert_lock_held_by_job(job_id)
     if not ok:
         msg = f"{TASK_NAME} Lock mismatch for job_id={job_id}: {reason}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
         return fail(job_id, user, event_type, msg)
 
-    manifest_bucket, manifest_key = parse_s3_uri(original_manifest_s3_uri, TASK_NAME)
-
-    if manifest_bucket is None:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest missing key: {original_manifest_s3_uri}")
-
-    if manifest_bucket != FILE_BUCKET_NAME:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest bucket mismatch in upload kickoff lambda, manifest is in bucket: {manifest_bucket}, expected {FILE_BUCKET_NAME}")
-
-    if manifest_key != f"temp/image-upload/{job_id}/{job_id}.manifest":
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest key incorrect: got {manifest_key}, expected temp/image-upload/{job_id}/{job_id}.manifest")
-
-    # Make sure we have <job id>.manifest located next to job.json: "temp/image-upload/<job_id>/<job_id>.manifest"
-    try:
-        head = s3.head_object(Bucket=manifest_bucket, Key=manifest_key)
-        if head.get("ContentLength", 0) <= 0:
-            return fail(job_id, user, event_type, f"{TASK_NAME} Manifest is empty: {original_manifest_s3_uri}")
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code in ("404", "NoSuchKey", "NotFound"):
-            return fail(job_id, user, event_type, f"{TASK_NAME} Missing manifest next to job.json: {original_manifest_s3_uri}")
-        return fail(job_id, user, event_type, f"{TASK_NAME} head_object failed for manifest: {original_manifest_s3_uri}: {e}")
-
-    # Start the upload step function.
+    # Start the dataset state machine.
     try:
         response = sf.start_execution(
-            stateMachineArn=UPLOAD_STATE_MACHINE_ARN,
-            name = f"{job_id}-{int(datetime.now().timestamp() * 1000)}"[:80],
+            stateMachineArn=DATASET_STATE_MACHINE_ARN,
+            name=f"{job_id}-{int(datetime.now().timestamp() * 1000)}"[:80],
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
                 "event_type": event_type,
-                "label_type": label_type,
-                "data_source": data_source,
-                "path_prefix": path_prefix,
-                "original_manifest_s3_uri": original_manifest_s3_uri,
-                "registration_time": registration_time
-            })
+                "task_type": task_type,
+                "request": request,
+                "submission_s3_uri": submission_s3_uri,
+            }),
         )
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Error starting state machine for upload workflow.", level='error')
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Error starting dataset state machine: {e}",
+            level="error",
+        )
+        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Kickoff Lambda started state machine execution {response['executionArn']}")
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Started dataset state machine execution {response['executionArn']}",
+        level="info",
+    )
 
     return {
         "status": "ok",
         "job_id": job_id,
         "user": user,
-        "label_type": label_type,
         "event_type": event_type,
-        "data_source": data_source,
-        "path_prefix": path_prefix,
-        "original_manifest_s3_uri": original_manifest_s3_uri
+        "task_type": task_type,
+        "submission_s3_uri": submission_s3_uri,
     }

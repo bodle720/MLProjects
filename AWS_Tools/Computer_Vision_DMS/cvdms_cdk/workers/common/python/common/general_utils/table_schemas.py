@@ -8,6 +8,13 @@ CANONICAL_SEMANTIC_TABLE_NAME = "canonical_semantic_masks"
 CANONICAL_INSTANCE_TABLE_NAME = "canonical_instance_annotations"
 UPLOAD_STAGING_TABLE_NAME = "upload_staging"
 
+# The dataset membership tables
+SINGLE_LABEL_TABLE_NAME = "single_label"
+MULTI_LABEL_TABLE_NAME = "multi_label"
+OBJECT_DETECTION_TABLE_NAME = "object_detection"
+SEMANTIC_SEGMENTATION_TABLE_NAME = "semantic_segmentation"
+INSTANCE_SEGMENTATION_TABLE_NAME = "instance_segmentation"
+
 SqlType = Literal["string", "int", "float", "timestamp", "array_string"]
 
 @dataclass(frozen=True)
@@ -235,11 +242,112 @@ UPLOAD_STAGING_SCHEMA = TableSchema(
     },
 )
 
+SINGLE_LABEL_SCHEMA = TableSchema(
+    cols=[
+        "dataset_id",
+        "version",
+        "image_id",
+        "label",
+        "split"
+    ],
+    key_cols=["dataset_id", "version", "image_id"],
+    types={
+        "dataset_id": "string",
+        "version": "int",
+        "image_id": "string",
+        "label": "string",
+        "split": "string"
+    },
+)
+
+MULTI_LABEL_SCHEMA = TableSchema(
+    cols=[
+        "dataset_id",
+        "version",
+        "image_id",
+        "labels",
+        "split"
+    ],
+    key_cols=["dataset_id", "version", "image_id"],
+    types={
+        "dataset_id": "string",
+        "version": "int",
+        "image_id": "string",
+        "labels": "array_string",
+        "split": "string"
+    },
+)
+
+OBJECT_DETECTION_SCHEMA = TableSchema(
+    cols=[
+        "dataset_id",
+        "version",
+        "image_id",
+        "bbox_annotation_ids",
+        "classes_present",
+        "split"
+    ],
+    key_cols=["dataset_id", "version", "image_id"],
+    types={
+        "dataset_id": "string",
+        "version": "int",
+        "image_id": "string",
+        "bbox_annotation_ids": "array_string",
+        "classes_present": "array_string",
+        "split": "string"
+    },
+)
+
+SEMANTIC_SEGMENTATION_SCHEMA = TableSchema(
+    cols=[
+        "dataset_id",
+        "version",
+        "image_id",
+        "semantic_mask_ids",
+        "classes_present",
+        "split"
+    ],
+    key_cols=["dataset_id", "version", "image_id"],
+    types={
+        "dataset_id": "string",
+        "version": "int",
+        "image_id": "string",
+        "semantic_mask_ids": "array_string",
+        "classes_present": "array_string",
+        "split": "string"
+    },
+)
+
+INSTANCE_SEGMENTATION_SCHEMA = TableSchema(
+    cols=[
+        "dataset_id",
+        "version",
+        "image_id",
+        "instance_annotation_ids",
+        "classes_present",
+        "split"
+    ],
+    key_cols=["dataset_id", "version", "image_id"],
+    types={
+        "dataset_id": "string",
+        "version": "int",
+        "image_id": "string",
+        "instance_annotation_ids": "array_string",
+        "classes_present": "array_string",
+        "split": "string"
+    },
+)
+
 TABLES: dict[str, TableSchema] = {
     CANONICAL_IMAGERY_TABLE_NAME: CANONICAL_IMAGERY_SCHEMA,
     IMAGE_LABELS_TABLE_NAME: IMAGE_LABELS_SCHEMA,
     CANONICAL_BBOX_TABLE_NAME: CANONICAL_BOUNDING_BOXES_SCHEMA,
     CANONICAL_SEMANTIC_TABLE_NAME: CANONICAL_SEMANTIC_MASKS_SCHEMA,
     CANONICAL_INSTANCE_TABLE_NAME: CANONICAL_INSTANCE_ANNOTATIONS_SCHEMA,
-    UPLOAD_STAGING_TABLE_NAME: UPLOAD_STAGING_SCHEMA
+    UPLOAD_STAGING_TABLE_NAME: UPLOAD_STAGING_SCHEMA,
+    SINGLE_LABEL_TABLE_NAME: SINGLE_LABEL_SCHEMA,
+    MULTI_LABEL_TABLE_NAME: MULTI_LABEL_SCHEMA,
+    OBJECT_DETECTION_TABLE_NAME: OBJECT_DETECTION_SCHEMA,
+    SEMANTIC_SEGMENTATION_TABLE_NAME: SEMANTIC_SEGMENTATION_SCHEMA,
+    INSTANCE_SEGMENTATION_TABLE_NAME: INSTANCE_SEGMENTATION_SCHEMA,
 }

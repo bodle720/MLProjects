@@ -321,6 +321,18 @@ class UploadStack(Stack):
             ]
         ))
 
+        # Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+            ],
+            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                       f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
+                       f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/upload_staging"
+                       ]
+        ))
+
         return dlq
 
     def _make_dlq_chain(self) -> sfn.Chain:

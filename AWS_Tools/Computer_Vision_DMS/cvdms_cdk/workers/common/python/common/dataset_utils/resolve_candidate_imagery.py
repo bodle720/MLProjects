@@ -1,14 +1,35 @@
-from typing import Any
+from typing import Any, Union
 
-from mypy_boto3_athena.client import AthenaClient
-
-from cvdms_platform.dataset.utils.athena_utils import (
-    resolve_sql,
+from common.general_utils.athena_utils import (
+    run_athena,
+    athena_fetch_all_rows,
     parse_optional_string,
     parse_optional_float,
     parse_optional_int,
     parse_athena_array_string
 )
+
+def resolve_sql(sql: str,
+                task_name: str,
+                athena_output_s3_uri: str,
+                athena_workgroup: str,
+                poll: Union[int, float] = 1.5,
+                timeout: Union[int, float] = 900) -> list[dict[str, Any]]:
+    """
+    Execute the selection SQL in Athena and return normalized candidate rows.
+    """
+    query_execution_id, _ = run_athena(
+        sql,
+        task_name,
+        athena_output_s3_uri,
+        athena_workgroup,
+        poll=poll,
+        timeout=timeout
+    )
+
+    raw_rows = athena_fetch_all_rows(query_execution_id)
+
+    return raw_rows
 
 ######################################################################################
 # The main function utilizing helpers below to return candidates from the
@@ -20,17 +41,18 @@ def resolve_candidate_imagery(*,
                                iceberg_database_name: str,
                                label_type: str,
                                selection_config: dict[str, Any],
-                               athena_client: AthenaClient,
-                               athena_output_s3_uri: str) -> tuple[str, list[dict[str, Any]]]:
+                               athena_output_s3_uri: str,
+                               athena_workgroup: str,
+                               task_name: str) -> tuple[str, list[dict[str, Any]]]:
 
-    selection_sql = build_selection_sql(iceberg_database_name=iceberg_database_name,
-                                        dataset_label_type=label_type,
-                                        selection_config=selection_config)
+    sql = build_selection_sql(iceberg_database_name=iceberg_database_name,
+                              dataset_label_type=label_type,
+                              selection_config=selection_config)
 
-    raw_rows = resolve_sql(athena_client=athena_client,
-                           iceberg_database_name=iceberg_database_name,
-                           athena_output_s3_uri=athena_output_s3_uri,
-                           selection_sql=selection_sql)
+    raw_rows = resolve_sql(sql,
+                           f"{task_name} RESOLVE CAND IMG SQL",
+                           athena_output_s3_uri,
+                           athena_workgroup)
 
     allowed_classes = selection_config["allowed_classes"]
     candidates = [
@@ -41,7 +63,7 @@ def resolve_candidate_imagery(*,
         for row in raw_rows
     ]
 
-    return selection_sql, candidates
+    return sql, candidates
 
 ######################################################################################
 # Helpers to normalize candidate rows from Iceberg tables
@@ -211,7 +233,8 @@ def _filter_classes_present_to_allowed(
     values: list[str],
     allowed_classes: list[str],
 ) -> list[str]:
-    allowed = set(allowed_classes)
+
+    allowed = set(str(v).strip().lower() for v in allowed_classes)
     out: list[str] = []
     seen: set[str] = set()
 
@@ -227,6 +250,7 @@ def _filter_classes_present_to_allowed(
         out.append(text)
 
     return out
+
 ######################################################################################
 # Helpers to build the correct SQL query from the selection config, the output of
 # which is used in resolve_candidates() above to obtain normalized candidates.

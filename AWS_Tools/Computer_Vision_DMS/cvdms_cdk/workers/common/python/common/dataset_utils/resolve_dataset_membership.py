@@ -1,7 +1,13 @@
-from typing import Any, Literal
-from mypy_boto3_athena.client import AthenaClient
+from typing import Any, Literal, Union
 
-from cvdms_platform.dataset.utils.athena_utils import resolve_sql
+from common.general_utils.athena_utils import (
+    run_athena,
+    athena_fetch_all_rows,
+    parse_optional_int,
+    parse_optional_float,
+    parse_athena_array_string,
+    parse_optional_string,
+)
 
 DatasetLabelType = Literal[
     "single-label",
@@ -27,18 +33,39 @@ _LABEL_TYPES_WITH_CLASSES_PRESENT: set[DatasetLabelType] = {
     "instance-segmentation",
 }
 
-def resolve_dataset_membership(
-    *,
-    iceberg_database_name: str,
-    dataset_membership_table_name: str,
-    canonical_imagery_table_name: str,
-    dataset_id: str,
-    version: int,
-    label_type: DatasetLabelType,
-    mode: MembershipMode,
-    athena_client: AthenaClient,
-    athena_output_s3_uri: str,
-) -> tuple[str, list[dict[str, Any]]]:
+def resolve_sql(sql: str,
+                task_name: str,
+                athena_output_s3_uri: str,
+                athena_workgroup: str,
+                poll: Union[int, float] = 1.5,
+                timeout: Union[int, float] = 900) -> list[dict[str, Any]]:
+    """
+    Execute the selection SQL in Athena and return normalized membership rows.
+    """
+    query_execution_id, _ = run_athena(
+        sql,
+        task_name,
+        athena_output_s3_uri,
+        athena_workgroup,
+        poll=poll,
+        timeout=timeout
+    )
+
+    raw_rows = athena_fetch_all_rows(query_execution_id)
+
+    return raw_rows
+
+def resolve_dataset_membership(*,
+                                iceberg_database_name: str,
+                                dataset_membership_table_name: str,
+                                canonical_imagery_table_name: str,
+                                dataset_id: str,
+                                version: int,
+                                label_type: DatasetLabelType,
+                                mode: MembershipMode,
+                                athena_output_s3_uri: str,
+                                athena_workgroup: str,
+                                task_name: str) -> tuple[str, list[dict[str, Any]]]:
     """
     Build SQL for current dataset-version membership and return normalized rows.
 
@@ -65,28 +92,24 @@ def resolve_dataset_membership(
     if type(version) is not int or version < 1:
         raise ValueError("version must be an integer >= 1.")
 
-    membership_sql = build_dataset_membership_sql(
-        iceberg_database_name=iceberg_database_name,
-        dataset_membership_table_name=dataset_membership_table_name,
-        canonical_imagery_table_name=canonical_imagery_table_name,
-        dataset_id=dataset_id,
-        version=version,
-        label_type=label_type,
-        mode=mode,
-    )
+    membership_sql = build_dataset_membership_sql(iceberg_database_name=iceberg_database_name,
+                                                    dataset_membership_table_name=dataset_membership_table_name,
+                                                    canonical_imagery_table_name=canonical_imagery_table_name,
+                                                    dataset_id=dataset_id,
+                                                    version=version,
+                                                    label_type=label_type,
+                                                    mode=mode)
 
-    raw_rows = resolve_sql(
-        athena_client=athena_client,
-        iceberg_database_name=iceberg_database_name,
-        athena_output_s3_uri=athena_output_s3_uri,
-        selection_sql=membership_sql,
-    )
+    raw_rows = resolve_sql(membership_sql,
+                           f"{task_name} RESOLVE DS MEMBERSHIP SQL",
+                           athena_output_s3_uri,
+                           athena_workgroup)
 
     normalized_rows = [
         normalize_membership_row(
             row=row,
             label_type=label_type,
-            mode=mode,
+            mode=mode
         )
         for row in raw_rows
     ]
@@ -137,18 +160,14 @@ def normalize_membership_row(
     normalized: dict[str, Any] = {}
 
     for key, value in row.items():
-        if value in ("", None):
-            normalized[key] = None
-            continue
-
         if key in int_fields:
-            normalized[key] = int(value)
+            normalized[key] = parse_optional_int(value, field_name=key)
         elif key in float_fields:
-            normalized[key] = float(value)
+            normalized[key] = parse_optional_float(value, field_name=key)
         elif key in array_fields:
-            normalized[key] = _normalize_array_field(value)
+            normalized[key] = parse_athena_array_string(value, field_name=key)
         else:
-            normalized[key] = value
+            normalized[key] = parse_optional_string(value)
 
     _require_nonempty_string(normalized.get("dataset_id"), "dataset_id")
     _require_positive_int(normalized.get("version"), "version")
@@ -190,16 +209,15 @@ def normalize_membership_row(
 
     return normalized
 
-def build_dataset_membership_sql(
-    *,
-    iceberg_database_name: str,
-    dataset_membership_table_name: str,
-    canonical_imagery_table_name: str,
-    dataset_id: str,
-    version: int,
-    label_type: DatasetLabelType,
-    mode: MembershipMode,
-) -> str:
+def build_dataset_membership_sql(*,
+                                iceberg_database_name: str,
+                                dataset_membership_table_name: str,
+                                canonical_imagery_table_name: str,
+                                dataset_id: str,
+                                version: int,
+                                label_type: DatasetLabelType,
+                                mode: MembershipMode) -> str:
+
     dataset_id_sql = _sql_quote(dataset_id)
     membership_field = LABEL_TYPE_TO_MEMBERSHIP_FIELD[label_type]
     include_classes_present = label_type in _LABEL_TYPES_WITH_CLASSES_PRESENT
@@ -265,31 +283,6 @@ WHERE m.dataset_id = {dataset_id_sql}
   AND m.version = {version}
 ORDER BY m.image_id
 """.strip()
-
-def _normalize_array_field(value: Any) -> list[str]:
-    if value is None:
-        return []
-
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-
-    text = str(value).strip()
-    if not text:
-        return []
-
-    if text.startswith("[") and text.endswith("]"):
-        inner = text[1:-1].strip()
-        if not inner:
-            return []
-        parts = [p.strip() for p in inner.split(",")]
-        cleaned: list[str] = []
-        for p in parts:
-            p = p.strip().strip('"').strip("'")
-            if p:
-                cleaned.append(p)
-        return cleaned
-
-    return [text]
 
 def _require_membership_payload(
     *,

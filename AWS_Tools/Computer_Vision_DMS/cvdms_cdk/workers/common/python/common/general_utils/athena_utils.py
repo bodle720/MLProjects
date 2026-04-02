@@ -107,34 +107,6 @@ def run_athena(sql: str,
 
     return qid, wait_res
 
-def athena_count_job_rows(job_id: str,
-                           task_name: str,
-                           db_name: str,
-                           table_name: str,
-                           athena_output_s3: str,
-                           athena_workgroup: str = "primary",
-                           poll: Union[int, float] = 2.0,
-                           timeout: Union[int, float] = 600) -> int:
-    """COUNT(*) from upload_staging WHERE job_id='<job_id>'."""
-
-    if '"' in db_name or '"' in table_name:
-        raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
-
-    safe_job_id = job_id.replace("'", "''")
-    sql = (
-        f"SELECT count(*) as cnt FROM \"{db_name}\".\"{table_name}\" "
-        f"WHERE job_id = '{safe_job_id}'"
-    )
-    qid, _ = run_athena(sql,
-                       task_name + " COUNT JOB ROWS",
-                       athena_output_s3,
-                       athena_workgroup,
-                       poll,
-                       timeout)
-
-    count = athena_get_int_scalar(qid, task_name)  # row 1 col 0
-    return count
-
 def drop_table_if_exists(db_name: str,
                            table_name: str,
                            task_name: str,
@@ -145,7 +117,7 @@ def drop_table_if_exists(db_name: str,
     if '"' in db_name or '"' in table_name:
         raise ValueError(f"{task_name} db_name/table_name must not contain quotes")
 
-    sql = f"DROP TABLE IF EXISTS {db_name}.{table_name}" # # sql = f'DROP TABLE IF EXISTS "{db_name}"."{table_name}"'
+    sql = f"DROP TABLE IF EXISTS {db_name}.{table_name}"
 
     qid, _ = run_athena(sql,
                        task_name,
@@ -231,3 +203,99 @@ def athena_fetch_all_rows(qid: str) -> List[Dict[str, Optional[str]]]:
             break
 
     return rows_out
+
+def athena_row_to_dict(
+    *,
+    column_names: list[str],
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Convert a single Athena row to a Python dict keyed by column name.
+    Missing values become None.
+    """
+    data = row.get("Data", [])
+    out: dict[str, Any] = {}
+
+    for idx, col_name in enumerate(column_names):
+        if idx >= len(data):
+            out[col_name] = None
+            continue
+
+        cell = data[idx]
+        out[col_name] = cell.get("VarCharValue")
+
+    return out
+
+def parse_athena_array_string(value: Any, *, field_name: str) -> list[str]:
+    """
+    Parse Athena's string representation of an array<string> into a Python list[str].
+
+    Examples:
+    - "[deer, fox]" -> ["deer", "fox"]
+    - "[deer]" -> ["deer"]
+    - "[]" -> []
+    - None -> []
+
+    Notes:
+    - Athena GetQueryResults commonly returns arrays as bracketed strings.
+    - This assumes simple string arrays with no embedded commas.
+    - Order is preserved, and duplicates are removed.
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        cleaned = [str(v).strip() for v in value if str(v).strip()]
+        return list(dict.fromkeys(cleaned))
+
+    if not isinstance(value, str):
+        raise TypeError(
+            f"Expected {field_name} to be str | list | None, got {type(value).__name__}"
+        )
+
+    text = value.strip()
+
+    if text == "" or text == "[]":
+        return []
+
+    if not (text.startswith("[") and text.endswith("]")):
+        raise ValueError(f"Unexpected Athena array format for {field_name}: {value!r}")
+
+    inner = text[1:-1].strip()
+    if not inner:
+        return []
+
+    parts = [part.strip() for part in inner.split(",")]
+    cleaned = [p for p in parts if p]
+    return list(dict.fromkeys(cleaned))
+
+def parse_optional_string(value: Any) -> str | None:
+    """
+    Normalize Athena scalar string cells:
+    - None stays None
+    - blank strings become None
+    - non-strings are stringified
+    """
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    return text or None
+
+def parse_optional_int(value: Any, *, field_name: str) -> int | None:
+    if value is None or value == "":
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid integer for {field_name}: {value!r}") from e
+
+def parse_optional_float(value: Any, *, field_name: str) -> float | None:
+    if value is None or value == "":
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid float for {field_name}: {value!r}") from e

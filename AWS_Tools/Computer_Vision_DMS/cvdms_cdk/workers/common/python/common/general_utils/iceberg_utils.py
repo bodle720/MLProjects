@@ -2,16 +2,17 @@ import re
 import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Union, Optional, Iterable
+from typing import Union, Optional, Iterable, Any
 from collections.abc import Iterable as AbcIterable
 
-from common.table_schemas import TABLES, TableSchema
-from common.athena_utils import run_athena
+from common.general_utils.athena_utils import run_athena
+from common.general_utils.table_schemas import TABLES, TableSchema
 
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
-def qident(x: str) -> str:
-    return '"' + x.replace('"','""') + '"'
+#################################################################################
+# Perform chunked insert via WHERE NOT EXISTS clause.
+#################################################################################
 
 def build_insert_where_not_exists_sql(batch: list[dict],
                                     full_table: str,
@@ -152,123 +153,9 @@ def chunked_insert_where_not_exists(rows: Iterable[dict],
 
     return True, ""
 
-def validate_timestamp_str(s: str, task_name: str) -> None:
-    # fast format check
-    if not _TS_RE.match(s):
-        raise ValueError(f"{task_name} Invalid timestamp format (expected YYYY-MM-DD HH:MM:SS): {s!r}")
-
-    try:
-        datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-    except ValueError as e:
-        raise ValueError(f"{task_name} Invalid timestamp value: {s!r}") from e
-
-def escape_sql_string(s: str) -> str:
-    return s.replace("'", "''")
-
-def coerce_int(v: Union[int, float, Decimal, str, None]) -> Optional[int]:
-    if v is None or isinstance(v, bool):
-        return None
-
-    if isinstance(v, int):
-        return v
-
-    if isinstance(v, float):
-        return int(v) if math.isfinite(v) and v.is_integer() else None
-
-    if isinstance(v, Decimal):
-        try:
-            f = float(v)
-        except (OverflowError, ValueError):
-            return None
-        return int(f) if math.isfinite(f) and f.is_integer() else None
-
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        try:
-            f = float(s)
-        except ValueError:
-            return None
-        return int(f) if math.isfinite(f) and f.is_integer() else None
-
-    return None
-
-def coerce_float(v: Union[int, float, Decimal, str, None]) -> Optional[float]:
-    if v is None or isinstance(v, bool):
-        return None
-
-    if isinstance(v, (int, float, Decimal)):
-        try:
-            f = float(v)
-        except (OverflowError, ValueError):
-            return None
-        return f if math.isfinite(f) else None
-
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return None
-        try:
-            f = float(s)
-        except ValueError:
-            return None
-        return f if math.isfinite(f) else None
-
-    return None
-
-def to_sql_value(schema,
-                 r: dict,
-                 col: str,
-                 task_name: str) -> str:
-    t = schema.types[col]
-    v = r.get(col)
-
-    if v is None or isinstance(v, bool):
-        return "NULL"
-
-    if t == "string":
-        return "'" + escape_sql_string(str(v)) + "'"
-
-    if t == "int":
-        iv = coerce_int(v)
-        return "NULL" if iv is None else str(iv)
-
-    if t == "float":
-        fv = coerce_float(v)
-        return "NULL" if fv is None else str(fv)
-
-    if t == "timestamp":
-        if not isinstance(v, str) or not v.strip():
-            return "NULL"
-        s = v.strip()
-        validate_timestamp_str(s, task_name)   # raises if bad
-        return f"TIMESTAMP '{escape_sql_string(s)}'"
-
-    if t == "array_string":
-        if not isinstance(v, list):
-            raise ValueError(
-                f"{task_name} Column {col} expected array<string>, got {type(v).__name__}: {v!r}"
-            )
-        if len(v) == 0:
-            return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
-
-        if any(x is None for x in v):
-            raise ValueError(
-                f"{task_name} List {v} contains a None value."
-            )
-
-        # Optional: filter/normalize elements
-        items = []
-        for x in v:
-            items.append("'" + escape_sql_string(str(x)) + "'")
-
-        if not items:
-            return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
-
-        return "ARRAY[" + ", ".join(items) + "]"
-
-    raise ValueError(f"{task_name} Unhandled SqlType {t} for col {col}")
+#################################################################################
+# Perform chunked insert, simple insert call
+#################################################################################
 
 def build_insert_sql(batch: list[dict],
                      full_table: str,
@@ -286,9 +173,9 @@ def build_insert_sql(batch: list[dict],
     return f"INSERT INTO {full_table} ({col_list}) VALUES " + ", ".join(values_clause)
 
 def build_delete_sql_by_keys(batch: list[dict],
-                             table: str,
-                             task_name: str,
-                             key_cols: list[str]) -> str:
+                                             table: str,
+                                             task_name: str,
+                                             key_cols: list[str]) -> str:
     if not batch:
         raise ValueError(f"{task_name} batch is empty")
     if not key_cols:
@@ -298,7 +185,7 @@ def build_delete_sql_by_keys(batch: list[dict],
     if set(key_cols) == {"job_id", "image_id"}:
         job_id = batch[0].get("job_id")
         if not isinstance(job_id, str) or not job_id.strip():
-            raise RuntimeError(f"{task_name} delete(upload_staging): missing/invalid job_id in batch[0]")
+            raise RuntimeError(f"{task_name} build delete sql: missing/invalid job_id in batch[0]")
 
         safe_job_id = escape_sql_string(job_id.strip())
 
@@ -306,11 +193,11 @@ def build_delete_sql_by_keys(batch: list[dict],
         uniq_ids: list[str] = []
         for r in batch:
             if r.get("job_id") != job_id:
-                raise RuntimeError(f"{task_name} delete(upload_staging): mixed job_id in batch")
+                raise RuntimeError(f"{task_name} build delete sql: mixed job_id in batch")
 
             iid = r.get("image_id")
             if not isinstance(iid, str) or not iid.strip():
-                raise RuntimeError(f"{task_name} delete(upload_staging): missing/invalid image_id")
+                raise RuntimeError(f"{task_name} build delete sql: missing/invalid image_id")
 
             iid_s = iid.strip()
             if iid_s not in seen:
@@ -465,41 +352,12 @@ def chunked_insert(rows: Iterable[dict],
 
     return True, ""
 
-def delete_job_rows_from_table(job_id: str,
-                                task_name: str,
-                                iceberg_db_name: str,
-                                table_name: str,
-                                athena_output_s3: str,
-                                athena_workgroup: str,
-                                poll_interval: Union[int,float] = 5,
-                                timeout_seconds: Union[int,float] = 1800) -> dict:
-    """
-    Delete all rows for a given job_id from an Iceberg table and optionally compact.
-    Returns a dict with query ids and final states for DELETE and OPTIMIZE.
-    """
-    # Escape single quotes in job_id for SQL literal safety
-    safe_job_id = job_id.replace("'", "''")
-    full_table = f"\"{iceberg_db_name}\".\"{table_name}\""
+#################################################################################
+# Miscellaneous helpers.
+#################################################################################
 
-    # 1) DELETE statement (Iceberg positional delete files)
-    delete_sql = f"DELETE FROM {full_table} WHERE job_id = '{safe_job_id}'"
-    delete_qid, delete_result = run_athena(delete_sql,
-                                           f"{task_name} DELETE JOB ROWS",
-                                           athena_output_s3,
-                                           athena_workgroup,
-                                           poll_interval,
-                                           timeout_seconds)
-
-    if delete_result["state"] != "SUCCEEDED":
-        raise RuntimeError(f"{task_name} DELETE failed: {delete_result}")
-
-    result = {
-        "delete_query_id": delete_qid,
-        "delete_state": delete_result["state"],
-        "delete_resp": delete_result["response"]
-    }
-
-    return result
+def qident(x: str) -> str:
+    return '"' + x.replace('"','""') + '"'
 
 def row_type_summary(row: dict, cols: list[str]) -> str:
     parts = []
@@ -507,3 +365,152 @@ def row_type_summary(row: dict, cols: list[str]) -> str:
         v = row.get(c)
         parts.append(f"{c}, value type={type(v).__name__}")
     return ", ".join(parts)
+
+def validate_timestamp_str(s: str, task_name: str) -> None:
+    # fast format check
+    if not _TS_RE.match(s):
+        raise ValueError(f"{task_name} Invalid timestamp format (expected YYYY-MM-DD HH:MM:SS): {s!r}")
+
+    try:
+        datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError as e:
+        raise ValueError(f"{task_name} Invalid timestamp value: {s!r}") from e
+
+def escape_sql_string(s: str) -> str:
+    return s.replace("'", "''")
+
+def coerce_int(v: Union[int, float, Decimal, str, None]) -> Optional[int]:
+    if v is None or isinstance(v, bool):
+        return None
+
+    if isinstance(v, int):
+        return v
+
+    if isinstance(v, float):
+        return int(v) if math.isfinite(v) and v.is_integer() else None
+
+    if isinstance(v, Decimal):
+        try:
+            f = float(v)
+        except (OverflowError, ValueError):
+            return None
+        return int(f) if math.isfinite(f) and f.is_integer() else None
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return int(f) if math.isfinite(f) and f.is_integer() else None
+
+    return None
+
+def coerce_float(v: Union[int, float, Decimal, str, None]) -> Optional[float]:
+    if v is None or isinstance(v, bool):
+        return None
+
+    if isinstance(v, (int, float, Decimal)):
+        try:
+            f = float(v)
+        except (OverflowError, ValueError):
+            return None
+        return f if math.isfinite(f) else None
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return f if math.isfinite(f) else None
+
+    return None
+
+def to_sql_value(schema,
+                 r: dict,
+                 col: str,
+                 task_name: str) -> str:
+    t = schema.types[col]
+    v = r.get(col)
+
+    if v is None or isinstance(v, bool):
+        return "NULL"
+
+    if t == "string":
+        return "'" + escape_sql_string(str(v)) + "'"
+
+    if t == "int":
+        iv = coerce_int(v)
+        return "NULL" if iv is None else str(iv)
+
+    if t == "float":
+        fv = coerce_float(v)
+        return "NULL" if fv is None else str(fv)
+
+    if t == "timestamp":
+        if not isinstance(v, str) or not v.strip():
+            return "NULL"
+        s = v.strip()
+        validate_timestamp_str(s, task_name)   # raises if bad
+        return f"TIMESTAMP '{escape_sql_string(s)}'"
+
+    if t == "array_string":
+        if not isinstance(v, list):
+            raise ValueError(
+                f"{task_name} Column {col} expected array<string>, got {type(v).__name__}: {v!r}"
+            )
+        if len(v) == 0:
+            return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
+
+        if any(x is None for x in v):
+            raise ValueError(
+                f"{task_name} List {v} contains a None value."
+            )
+
+        # Optional: filter/normalize elements
+        items = []
+        for x in v:
+            items.append("'" + escape_sql_string(str(x)) + "'")
+
+        if not items:
+            return "CAST(ARRAY[] AS ARRAY(VARCHAR))"
+
+        return "ARRAY[" + ", ".join(items) + "]"
+
+    raise ValueError(f"{task_name} Unhandled SqlType {t} for col {col}")
+
+def normalize_string_array(
+    value: Any,
+    *,
+    field_name: str,
+    require_nonempty: bool,
+) -> list[str]:
+    if value is None:
+        values: list[str] = []
+    elif isinstance(value, list):
+        values = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        raise TypeError(f"{field_name} must be list[str] | None, got {type(value).__name__}")
+
+    # dedupe + deterministic sort
+    values = sorted(set(values))
+
+    if require_nonempty and not values:
+        raise ValueError(f"{field_name} must be non-empty")
+
+    return values
+
+def require_nonempty_string(value: Any, *, field_name: str) -> str:
+    if value is None:
+        raise ValueError(f"{field_name} cannot be None")
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{field_name} cannot be empty")
+
+    return text

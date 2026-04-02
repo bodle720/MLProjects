@@ -1,7 +1,3 @@
-'''
-COPIED FROM THE UPLOAD FLOW
-'''
-
 import os
 
 from common.logging_utils import log
