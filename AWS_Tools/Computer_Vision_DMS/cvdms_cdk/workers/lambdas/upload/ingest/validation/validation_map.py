@@ -2,10 +2,10 @@
 import os
 import json
 
-from common.logging_utils import log
-from common.iceberg_utils import chunked_insert
-from common.s3_utils import s3_read_jsonl_list
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.iceberg_utils import chunked_insert
+from common.general_utils.s3_utils import s3_read_jsonl_list
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]

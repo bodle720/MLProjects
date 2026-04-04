@@ -3,11 +3,11 @@ import os
 import json
 from typing import Dict, List
 
-from common.logging_utils import log
-from common.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
-from common.athena_utils import athena_count_job_rows
-from common.iceberg_utils import delete_job_rows_from_table
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.upload_utils.upload_athena_utils import athena_count_job_rows
+from common.upload_utils.upload_iceberg_utils import delete_job_rows_from_table
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]

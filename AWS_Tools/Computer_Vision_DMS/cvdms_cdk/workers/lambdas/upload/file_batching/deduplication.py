@@ -4,10 +4,11 @@ import math
 
 import boto3
 
-from common.logging_utils import log
-from common.s3_utils import delete_s3_prefix
-from common.athena_utils import run_athena, athena_get_int_scalar, athena_count_job_rows, drop_table_if_exists
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import delete_s3_prefix
+from common.general_utils.athena_utils import run_athena, athena_get_int_scalar, drop_table_if_exists
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.upload_utils.upload_athena_utils import athena_count_job_rows
 
 # Environment variables provided by BatchingStage
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]

@@ -4,17 +4,17 @@ import json
 from typing import Dict, List, Tuple, Iterable, Set
 import boto3
 
-from common.logging_utils import log
-from common.s3_utils import s3_read_jsonl_list, s3_list_keys
-from common.athena_utils import run_athena
-from common.iceberg_utils import chunked_insert, chunked_insert_where_not_exists
-from common.table_schemas import (
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_read_jsonl_list, s3_list_keys
+from common.general_utils.athena_utils import run_athena
+from common.general_utils.iceberg_utils import chunked_insert, chunked_insert_where_not_exists
+from common.general_utils.table_schemas import (
     UPLOAD_STAGING_TABLE_NAME,
     CANONICAL_IMAGERY_TABLE_NAME,
     IMAGE_LABELS_TABLE_NAME,
     CANONICAL_BBOX_TABLE_NAME,
     CANONICAL_SEMANTIC_TABLE_NAME,
-    CANONICAL_INSTANCE_TABLE_NAME,
+    CANONICAL_INSTANCE_TABLE_NAME
 )
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]

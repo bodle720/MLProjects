@@ -3,8 +3,8 @@ import os
 import json
 from typing import Dict, List
 
-from common.logging_utils import log
-from common.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]

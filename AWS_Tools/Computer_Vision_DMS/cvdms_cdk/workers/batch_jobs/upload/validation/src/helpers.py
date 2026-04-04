@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-from common.s3_utils import write_s3_obj, parse_s3_uri, read_obj_with_retry
+from common.general_utils.s3_utils import write_s3_obj, parse_s3_uri, read_obj_with_retry
 
 TASK_NAME = "[VAL_JOB_DEF_HELPER]"
 

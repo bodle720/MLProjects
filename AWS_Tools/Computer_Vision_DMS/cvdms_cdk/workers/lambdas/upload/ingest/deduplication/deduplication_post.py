@@ -2,9 +2,10 @@
 import os
 import json
 
-from common.logging_utils import log
-from common.athena_utils import athena_count_job_rows, drop_table_if_exists
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.athena_utils import drop_table_if_exists
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.upload_utils.upload_athena_utils import athena_count_job_rows
 
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]

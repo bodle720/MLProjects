@@ -3,10 +3,10 @@ import json
 import math
 import boto3
 
-from common.logging_utils import log
-from common.athena_utils import drop_table_if_exists, run_athena, athena_get_int_scalar
-from common.s3_utils import delete_s3_prefix
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.athena_utils import drop_table_if_exists, run_athena, athena_get_int_scalar
+from common.general_utils.s3_utils import delete_s3_prefix
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]

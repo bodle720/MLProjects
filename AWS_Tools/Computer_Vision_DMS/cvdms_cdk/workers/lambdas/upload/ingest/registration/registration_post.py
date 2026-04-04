@@ -3,8 +3,8 @@ import os
 import json
 from typing import Any, Dict
 
-from common.logging_utils import log
-from common.athena_utils import drop_table_if_exists
+from common.general_utils.logging_utils import log
+from common.general_utils.athena_utils import drop_table_if_exists
 
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]

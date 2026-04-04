@@ -9,7 +9,7 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 
-TASK_NAME = "[CLEANUP_DATASET]"
+TASK_NAME = "[DATASET_CLEANUP]"
 
 def handler(event, context):
     try:

@@ -29,7 +29,7 @@ ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 
-TASK_NAME = "[DLQ_PROCESSOR_DATASET]"
+TASK_NAME = "[DATASET_DLQ_PROCESSOR]"
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")

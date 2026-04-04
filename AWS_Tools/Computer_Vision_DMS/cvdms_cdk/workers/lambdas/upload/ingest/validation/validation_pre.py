@@ -5,10 +5,10 @@ from typing import Dict, List
 
 import boto3
 
-from common.logging_utils import log
-from common.iceberg_utils import delete_job_rows_from_table
-from common.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json, read_obj_with_retry
-from common.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json, read_obj_with_retry
+from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
+from common.upload_utils.upload_iceberg_utils import delete_job_rows_from_table
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]

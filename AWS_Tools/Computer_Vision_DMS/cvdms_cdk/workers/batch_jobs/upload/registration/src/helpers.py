@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 import hashlib
 
-from common.s3_utils import (
+from common.general_utils.s3_utils import (
     make_s3_uri,
     parse_s3_uri,
     get_key_basename,

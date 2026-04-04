@@ -7,13 +7,13 @@ from typing import Any, Dict, List, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
-from common.logging_utils import log
-from common.s3_utils import (
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import (
     write_s3_obj,
     parse_s3_uri,
     s3_read_json
 )
-from common.s3fs_utils import (
+from common.general_utils.s3fs_utils import (
     read_parquet_rows_from_s3_uris,
     jsonl_stream_to_s3
 )

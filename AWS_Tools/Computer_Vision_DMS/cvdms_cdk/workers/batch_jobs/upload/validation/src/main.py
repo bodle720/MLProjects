@@ -16,8 +16,9 @@ import boto3
 from PIL import Image
 from botocore.exceptions import ClientError
 
-from common.logging_utils import log
-from common.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import parse_s3_uri, write_s3_obj, read_obj_with_retry
+
 from helpers import infer_dtype, create_and_save_labels, stable_uuid5, parse_json_object_line
 from quality_helpers import compute_image_quality_features
 

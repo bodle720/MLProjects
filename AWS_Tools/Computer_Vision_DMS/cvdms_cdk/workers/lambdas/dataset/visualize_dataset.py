@@ -14,7 +14,7 @@ from common.general_utils.s3_utils import write_s3_obj
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-TASK_NAME = "[VISUALIZATION_DATASET]"
+TASK_NAME = "[DATASET_VISUALIZE]"
 
 s3 = boto3.client("s3")
 

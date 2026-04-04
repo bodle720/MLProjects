@@ -19,7 +19,7 @@ ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
-TASK_NAME = "[DELETE_DATASET]"
+TASK_NAME = "[DATASET_DELETE]"
 
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""

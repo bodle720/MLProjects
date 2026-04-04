@@ -22,7 +22,6 @@ from aws_cdk import (
 from config import CONFIG
 from config_models import LambdaConfig
 
-
 class DatasetStack(Stack):
     def __init__(self,
                  scope: Construct,

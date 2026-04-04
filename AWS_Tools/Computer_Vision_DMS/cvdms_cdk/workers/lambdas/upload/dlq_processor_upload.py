@@ -33,7 +33,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 
-TASK_NAME = "[DLQ_PROCESSOR_UPLOAD]"
+TASK_NAME = "[UPLOAD_DLQ_PROCESSOR]"
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")

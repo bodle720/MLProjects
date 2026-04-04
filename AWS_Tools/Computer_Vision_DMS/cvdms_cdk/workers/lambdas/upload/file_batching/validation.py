@@ -1,7 +1,7 @@
 import os
 
-from common.logging_utils import log
-from common.s3_utils import delete_s3_prefix, parse_s3_uri, write_s3_obj, read_obj_with_retry
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import delete_s3_prefix, parse_s3_uri, write_s3_obj, read_obj_with_retry
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]

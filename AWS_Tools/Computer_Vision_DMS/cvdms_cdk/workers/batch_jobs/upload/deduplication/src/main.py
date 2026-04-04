@@ -7,10 +7,10 @@ from typing import Any
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from common.logging_utils import log
-from common.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj
-from common.ddb_utils import batch_get_dynamodb_items
-from common.s3fs_utils import (
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj
+from common.upload_utils.upload_ddb_utils import batch_get_dynamodb_items
+from common.general_utils.s3fs_utils import (
     read_parquet_rows_from_s3_uris,
     jsonl_stream_to_s3
 )
