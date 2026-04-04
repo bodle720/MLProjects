@@ -18,16 +18,10 @@ from common.general_utils.s3fs_utils import (
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
 JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
-LABEL_TYPE = os.environ["LABEL_TYPE"]
-DATA_SOURCE = os.environ["DATA_SOURCE"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
-ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
-ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
-ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
-REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
 TASK_NAME = "[DEDUP_JOB_DEF]"
 

@@ -10,7 +10,6 @@ from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import s3_read_json
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
-JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]
 DATASET_STATE_MACHINE_ARN = os.environ["DATASET_STATE_MACHINE_ARN"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
