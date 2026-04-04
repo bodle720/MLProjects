@@ -5,17 +5,17 @@ from typing import Dict, List, Iterable, Tuple, Optional
 import boto3
 from botocore.exceptions import ClientError
 
-from common.logging_utils import log
-from common.s3_utils import (
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import (
     delete_s3_prefix,
     parse_s3_uri,
     s3_list_keys,
     s3_read_jsonl_list,
 )
-from common.ddb_utils import update_job_status, release_lock
-from common.iceberg_utils import escape_sql_string
-from common.athena_utils import run_athena, athena_fetch_all_rows
-from common.table_schemas import (
+from common.general_utils.ddb_utils import update_job_status, release_lock
+from common.general_utils.iceberg_utils import escape_sql_string
+from common.general_utils.athena_utils import run_athena, athena_fetch_all_rows
+from common.general_utils.table_schemas import (
     TABLES,
     CANONICAL_IMAGERY_TABLE_NAME,
     IMAGE_LABELS_TABLE_NAME,
@@ -33,7 +33,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 
-TASK_NAME = "[DLQ_PROCESSOR]"
+TASK_NAME = "[DLQ_PROCESSOR_UPLOAD]"
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
@@ -267,7 +267,7 @@ def _is_label_id_referenced(label_type: str, label_id: str) -> bool:
     """
     qid, _ = run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=300)
     rows = athena_fetch_all_rows(qid)
-    # athena_fetch_all_rows in your codebase returns list[dict] with keys matching select aliases
+    # athena_fetch_all_rows in the codebase returns list[dict] with keys matching select aliases
     # Be defensive:
     for r in rows:
         v = r.get("c") or r.get("_col0") or r.get("count") or r.get("count(*)")

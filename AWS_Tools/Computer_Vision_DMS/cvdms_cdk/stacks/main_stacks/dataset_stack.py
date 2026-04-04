@@ -103,7 +103,7 @@ class DatasetStack(Stack):
             sfn.Choice(self, "RouteDatasetTaskType")
             .when(
                 sfn.Condition.string_equals("$.task_type", "create_dataset"),
-                create_task.next(visualization_task).next(cleanup_task)
+                    create_task.next(visualization_task).next(cleanup_task)
             )
             .when(
                 sfn.Condition.string_equals("$.task_type", "update_dataset"),
@@ -390,8 +390,9 @@ class DatasetStack(Stack):
                 "user.$": "$.user",
                 "event_type.$": "$.event_type",
                 "task_type.$": "$.task_type",
-                "request.$": "$.request",
                 "submission_s3_uri.$": "$.submission_s3_uri",
+                "dataset_context.$": "$.dataset_context",
+                "request.$": "$.request"
             }),
             payload_response_only=True
         )
@@ -437,6 +438,7 @@ class DatasetStack(Stack):
                 "event_type.$": "$.event_type",
                 "task_type.$": "$.task_type",
                 "request.$": "$.request",
+                "dataset_context.$": "$.dataset_context",
                 "submission_s3_uri.$": "$.submission_s3_uri",
             }),
             payload_response_only=True

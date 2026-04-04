@@ -1,8 +1,8 @@
 import os
 
-from common.logging_utils import log
-from common.s3_utils import delete_s3_prefix
-from common.ddb_utils import update_job_status, release_lock
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import delete_s3_prefix
+from common.general_utils.ddb_utils import update_job_status, release_lock
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -23,23 +23,17 @@ def handler(event, context):
         f"{TASK_NAME} Starting cleanup lambda for job {job_id}")
 
     # ---------------------------------------------------------
-    # 1. Mark job as COMPLETED
+    # 1. Delete S3 temp files (safe final cleanup)
     # ---------------------------------------------------------
-    update_success, update_msg = update_job_status(
-        job_id,
-        "COMPLETED",
-        JOB_TABLE_NAME,
-        LOG_FIREHOSE_STREAM_NAME,
-        user=user,
-        event_type=event_type,
-        error_msg=None
-    )
+    prefix = f"temp/image-upload/{job_id}/"
+
+    delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Job status update to COMPLETED finished. Success={update_success}, msg={update_msg}")
+        f"{TASK_NAME} Deleted S3 temp files under prefix {prefix}")
 
-    if not update_success:
-        raise RuntimeError(f"{TASK_NAME} Failed to update job status: {update_msg}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Cleanup completed successfully for job {job_id}")
 
     # ---------------------------------------------------------
     # 2. Release infrastructure lock
@@ -64,17 +58,23 @@ def handler(event, context):
             raise RuntimeError(f"{TASK_NAME} Failed to release lock: {release_msg}")
 
     # ---------------------------------------------------------
-    # 3. Delete S3 temp files (safe final cleanup)
+    # 3. Mark job as COMPLETED
     # ---------------------------------------------------------
-    prefix = f"temp/image-upload/{job_id}/"
-
-    delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
+    update_success, update_msg = update_job_status(
+        job_id,
+        "COMPLETED",
+        JOB_TABLE_NAME,
+        LOG_FIREHOSE_STREAM_NAME,
+        user=user,
+        event_type=event_type,
+        error_msg=None
+    )
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Deleted S3 temp files under prefix {prefix}")
+        f"{TASK_NAME} Job status update to COMPLETED finished. Success={update_success}, msg={update_msg}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Cleanup completed successfully for job {job_id}")
+    if not update_success:
+        raise RuntimeError(f"{TASK_NAME} Failed to update job status: {update_msg}")
 
     return {
         "job_id": job_id,

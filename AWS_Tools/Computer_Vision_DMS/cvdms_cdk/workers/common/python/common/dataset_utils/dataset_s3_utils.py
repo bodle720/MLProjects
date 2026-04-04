@@ -4,11 +4,14 @@ import json
 from collections import Counter
 from typing import Any
 
+import boto3
+
 _VALID_SPLITS = ("train", "val", "test")
+
+s3_client = boto3.client("s3")
 
 def write_s3_artifacts(
     *,
-    s3_client: Any,
     dataset_bucket_name: str,
     dataset_id: str,
     version: int,
@@ -32,7 +35,6 @@ def write_s3_artifacts(
     )
 
     metadata_uris = write_selection_and_metadata_inputs(
-        s3_client=s3_client,
         dataset_bucket_name=dataset_bucket_name,
         base_prefix=base_prefix,
         selection_sql=selection_sql,
@@ -40,7 +42,6 @@ def write_s3_artifacts(
     )
 
     manifest_uris = write_manifest_artifacts(
-        s3_client=s3_client,
         dataset_bucket_name=dataset_bucket_name,
         base_prefix=base_prefix,
         label_type=label_type,
@@ -48,14 +49,12 @@ def write_s3_artifacts(
     )
 
     membership_enriched_csv_uri = write_membership_enriched_csv(
-        s3_client=s3_client,
         dataset_bucket_name=dataset_bucket_name,
         base_prefix=base_prefix,
         split_rows=split_rows,
     )
 
     metadata_json_uri = write_metadata_json(
-        s3_client=s3_client,
         dataset_bucket_name=dataset_bucket_name,
         base_prefix=base_prefix,
         dataset_id=dataset_id,
@@ -87,7 +86,6 @@ def build_dataset_version_prefix(*, dataset_id: str, version: int) -> str:
 
 def write_selection_and_metadata_inputs(
     *,
-    s3_client: Any,
     dataset_bucket_name: str,
     base_prefix: str,
     selection_sql: str,
@@ -97,7 +95,6 @@ def write_selection_and_metadata_inputs(
     selection_config_key = f"{base_prefix}/metadata/selection_config.json"
 
     _put_s3_text(
-        s3_client=s3_client,
         bucket=dataset_bucket_name,
         key=selection_sql_key,
         body=selection_sql.rstrip() + "\n",
@@ -105,7 +102,6 @@ def write_selection_and_metadata_inputs(
     )
 
     _put_s3_text(
-        s3_client=s3_client,
         bucket=dataset_bucket_name,
         key=selection_config_key,
         body=json.dumps(selection_config, indent=2, sort_keys=True) + "\n",
@@ -119,7 +115,6 @@ def write_selection_and_metadata_inputs(
 
 def write_manifest_artifacts(
     *,
-    s3_client: Any,
     dataset_bucket_name: str,
     base_prefix: str,
     label_type: str,
@@ -157,7 +152,6 @@ def write_manifest_artifacts(
     for split_name, payload in manifest_payloads.items():
         key = f"{base_prefix}/manifests/{split_name}.jsonl"
         _put_s3_text(
-            s3_client=s3_client,
             bucket=dataset_bucket_name,
             key=key,
             body=payload,
@@ -169,7 +163,6 @@ def write_manifest_artifacts(
 
 def write_membership_enriched_csv(
     *,
-    s3_client: Any,
     dataset_bucket_name: str,
     base_prefix: str,
     split_rows: list[dict[str, Any]],
@@ -190,7 +183,6 @@ def write_membership_enriched_csv(
         writer.writerow(_csv_safe_row(row=row, fieldnames=fieldnames))
 
     _put_s3_text(
-        s3_client=s3_client,
         bucket=dataset_bucket_name,
         key=key,
         body=buffer.getvalue(),
@@ -201,7 +193,6 @@ def write_membership_enriched_csv(
 
 def write_metadata_json(
     *,
-    s3_client: Any,
     dataset_bucket_name: str,
     base_prefix: str,
     dataset_id: str,
@@ -235,7 +226,6 @@ def write_metadata_json(
     }
 
     _put_s3_text(
-        s3_client=s3_client,
         bucket=dataset_bucket_name,
         key=key,
         body=json.dumps(metadata, indent=2, sort_keys=True) + "\n",
@@ -471,7 +461,6 @@ def _require_valid_split(value: Any) -> str:
 
 def _put_s3_text(
     *,
-    s3_client: Any,
     bucket: str,
     key: str,
     body: str,

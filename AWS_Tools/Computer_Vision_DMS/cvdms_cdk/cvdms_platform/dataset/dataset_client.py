@@ -135,6 +135,7 @@ class DatasetClient:
                     "request": {
                         "dataset_id": dataset_id,
                         "label_type": label_type,
+                        "new_version": 1,
                         "description": description,
                         "selection_config": selection_config,
                         "split_strategy_name": split_strategy_name
@@ -191,6 +192,9 @@ class DatasetClient:
         logging.info("Checking if dataset already exists...")
         try:
             dataset_info = self.get_dataset(dataset_id=dataset_id)
+            label_type = dataset_info["label_type"]
+            current_version = dataset_info["latest_version"]
+            new_version = current_version + 1
         except Exception as e:
             logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
@@ -205,6 +209,8 @@ class DatasetClient:
                     "task_type": "update_dataset",
                     "request": {
                         "dataset_id": dataset_id,
+                        "label_type": label_type,
+                        "new_version": new_version,
                         "operation": operation,
                         "selection_config": selection_config,
                         "split_approach": split_approach,
@@ -240,6 +246,7 @@ class DatasetClient:
         logging.info("Validation done. Now retrieving the dataset metadata...")
         try:
             dataset_record = self.get_dataset(dataset_id=dataset_id)
+            label_type = dataset_record["label_type"]
         except Exception as e:
             logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
@@ -253,7 +260,9 @@ class DatasetClient:
                    "event_type": self.event_type,
                    "task_type": "delete_dataset",
                    "request": {
-                       "dataset_id": dataset_id
+                       "dataset_id": dataset_id,
+                       "label_type": label_type,
+                       "new_version": None
                         }
                    }
 
@@ -425,12 +434,17 @@ class DatasetClient:
             raise RuntimeError(f"Failed to acquire lock: {holder_or_err}")
 
         job_id = holder_or_err  # we used holder as generated job id in acquire lock
+        dataset_id = payload["request"]["dataset_id"]
+        new_version = payload["request"]["new_version"] # None for delete
+        label_type = payload["request"]["label_type"]
+
         logging.info(f"Acquired lock: {job_id}")
+
         payload["job_id"] = job_id
         payload["submission_s3_uri"] = f"s3://{self.file_bucket_name}/temp/dataset-ops/{job_id}/submission.json"
+        payload["dataset_context"] = {"dataset_id": dataset_id, "new_version": new_version, "label_type": label_type}
 
         # create job row
-        dataset_id = payload["request"]["dataset_id"]
         task_type = payload["task_type"]
         job_summary = payload["request"].get("description")
         if not job_summary:

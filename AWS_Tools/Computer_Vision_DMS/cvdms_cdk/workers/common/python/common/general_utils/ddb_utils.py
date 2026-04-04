@@ -4,7 +4,8 @@ from botocore.exceptions import ClientError
 
 from common.general_utils.logging_utils import log
 
-dynamodb = boto3.client("dynamodb")
+dynamodb_client = boto3.client("dynamodb")
+ddb_resource = boto3.resource("dynamodb")
 
 JobStatus = Literal["PENDING", "IN_PROGRESS", "FAILED", "COMPLETED"]
 
@@ -52,7 +53,7 @@ def update_job_status(job_id: str,
         update_expr += " REMOVE " + ", ".join(remove_parts)
 
     try:
-        dynamodb.update_item(
+        dynamodb_client.update_item(
             TableName=job_table_name,
             Key={"job_id": {"S": job_id}},
             UpdateExpression=update_expr,
@@ -87,7 +88,7 @@ def release_lock(job_id: str,
 
     lock_id = "global"
     try:
-        dynamodb.update_item(
+        dynamodb_client.update_item(
             TableName=lock_table_name,
             Key={"lock_id": {"S": lock_id}},
             UpdateExpression="SET locked = :false REMOVE locked_by",
@@ -109,3 +110,10 @@ def release_lock(job_id: str,
         msg = f"Failed releasing lock for job_id={job_id}: {e}"
         log(job_id, user, event_type, stream_name, msg, level="error")
         return False, f"dynamodb_error:{code or 'unknown'}"
+
+def dataset_exists(dataset_id: str,
+                   datasets_table_name) -> bool:
+
+    datasets_table = ddb_resource.Table(datasets_table_name)
+    resp = datasets_table.get_item(Key={"dataset_id": dataset_id}, ConsistentRead=True)
+    return "Item" in resp

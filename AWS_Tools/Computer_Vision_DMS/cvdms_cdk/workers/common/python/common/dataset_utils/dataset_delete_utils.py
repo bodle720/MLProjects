@@ -1,11 +1,11 @@
 from typing import Any
-
+import boto3
 from boto3.dynamodb.conditions import Key
 
-from cvdms_platform.dataset.utils.athena_utils import (
-    start_athena_query,
-    wait_for_athena_query,
-)
+from common.general_utils.athena_utils import run_athena
+
+s3_client = boto3.client("s3")
+dynamodb_resource = boto3.resource("dynamodb")
 
 _MEMBERSHIP_TABLE_BY_LABEL_TYPE: dict[str, str] = {
     "single-label": "single_label",
@@ -15,14 +15,13 @@ _MEMBERSHIP_TABLE_BY_LABEL_TYPE: dict[str, str] = {
     "instance-segmentation": "instance_segmentation",
 }
 
-def delete_iceberg_membership(
-    *,
-    athena_client: Any,
-    iceberg_database_name: str,
-    athena_output_s3_uri: str,
-    dataset_id: str,
-    dataset_label_type: str,
-) -> dict[str, Any]:
+def delete_iceberg_membership(*,
+                            iceberg_database_name: str,
+                            athena_output_s3_uri: str,
+                            athena_workgroup: str,
+                            dataset_id: str,
+                            dataset_label_type: str,
+                            task_name: str) -> dict[str, Any]:
     """
     Delete all dataset membership rows for dataset_id from the single Iceberg
     membership table implied by dataset_label_type.
@@ -33,22 +32,14 @@ def delete_iceberg_membership(
     dataset_id = _require_nonempty_string(dataset_id, field_name="dataset_id")
     table_name = _get_membership_table_name(dataset_label_type=dataset_label_type)
 
-    sql = build_delete_membership_sql(
-        iceberg_database_name=iceberg_database_name,
-        table_name=table_name,
-        dataset_id=dataset_id,
-    )
+    sql = build_delete_membership_sql(iceberg_database_name=iceberg_database_name,
+                                        table_name=table_name,
+                                        dataset_id=dataset_id)
 
-    query_execution_id = start_athena_query(
-        athena_client=athena_client,
-        iceberg_database_name=iceberg_database_name,
-        athena_output_s3_uri=athena_output_s3_uri,
-        selection_sql=sql,
-    )
-    wait_for_athena_query(
-        athena_client=athena_client,
-        query_execution_id=query_execution_id,
-    )
+    query_execution_id, _ = run_athena(sql,
+                                        task_name,
+                                        athena_output_s3_uri,
+                                        athena_workgroup)
 
     return {
         "ok": True,
@@ -74,7 +65,6 @@ WHERE dataset_id = {dataset_id_sql}
 
 def delete_s3_artifacts(
     *,
-    s3_client: Any,
     datasets_bucket_name: str,
     dataset_id: str,
 ) -> dict[str, Any]:
@@ -130,7 +120,6 @@ def build_dataset_delete_prefix(*, dataset_id: str) -> str:
 
 def delete_ddb_rows(
     *,
-    dynamodb_resource: Any,
     datasets_table_name: str,
     dataset_versions_table_name: str,
     dataset_id: str,

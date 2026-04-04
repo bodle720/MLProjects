@@ -8,8 +8,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Lambda layer imports, add to path to avoid pycharm complaining.
-from common.logging_utils import log
-from common.s3_utils import s3_read_json, parse_s3_uri
+from common.general_utils.logging_utils import log
+from common.general_utils.s3_utils import s3_read_json, parse_s3_uri
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOCK_TABLE_NAME = os.environ["LOCK_TABLE_NAME"]

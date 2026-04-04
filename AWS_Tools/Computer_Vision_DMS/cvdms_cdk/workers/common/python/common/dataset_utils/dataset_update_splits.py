@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from cvdms_platform.dataset.split_strategies.stratified_v1 import stratified_v1
+from common.dataset_utils.split_strategies.stratified_v1 import stratified_v1
 
 Operation = Literal["add", "remove"]
 SplitApproach = Literal["maintain", "rebalance"]

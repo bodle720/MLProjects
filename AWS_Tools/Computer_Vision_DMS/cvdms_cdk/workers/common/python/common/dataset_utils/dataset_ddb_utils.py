@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import boto3
 from botocore.exceptions import ClientError
+
+dynamodb_resource = boto3.resource("dynamodb")
 
 def write_ddb_artifacts(
     *,
     new_dataset: bool,
-    dynamodb_resource: Any,
     datasets_table_name: str,
     dataset_versions_table_name: str,
     dataset_id: str,
@@ -103,7 +105,6 @@ def write_ddb_artifacts(
 
     transact_write_dataset_and_version(
         new_dataset=new_dataset,
-        dynamodb_resource=dynamodb_resource,
         datasets_table_name=datasets_table_name,
         dataset_versions_table_name=dataset_versions_table_name,
         dataset_item=dataset_item,
@@ -133,7 +134,6 @@ def build_split_count_summary(*, split_rows: list[dict[str, Any]]) -> dict[str, 
 def transact_write_dataset_and_version(
     *,
     new_dataset: bool,
-    dynamodb_resource: Any,
     datasets_table_name: str,
     dataset_versions_table_name: str,
     dataset_item: dict[str, Any],
