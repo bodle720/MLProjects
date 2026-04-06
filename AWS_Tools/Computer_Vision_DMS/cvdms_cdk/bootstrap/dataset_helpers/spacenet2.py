@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 from .common import BootstrapConfig, BootstrapResult, DatasetBootstrapper
-
 
 class SpaceNet2Bootstrapper(DatasetBootstrapper):
     dataset_name = "spacenet2"

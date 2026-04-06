@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import csv
 import json
 import mimetypes
@@ -12,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 MANIFEST_SCHEMA = "cvdms.manifest.v1"
 
 TASK_CHOICES = (
@@ -22,7 +19,6 @@ TASK_CHOICES = (
     "semantic-segmentation",
     "instance-segmentation",
 )
-
 
 @dataclass(frozen=True)
 class BootstrapConfig:
@@ -38,20 +34,17 @@ class BootstrapConfig:
     keep_work_dir: bool = False
     overwrite_existing: bool = False
 
-
 @dataclass
 class BootstrapFailure:
     dataset_item_id: str
     reason: str
     context: dict[str, Any] = field(default_factory=dict)
 
-
 @dataclass
 class BootstrapResult:
     manifest_rows: list[dict[str, Any]]
     failures: list[BootstrapFailure] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
-
 
 class DatasetBootstrapper(ABC):
     dataset_name: str
@@ -69,23 +62,18 @@ class DatasetBootstrapper(ABC):
     def bootstrap(self, config: BootstrapConfig, s3_client: Any) -> BootstrapResult:
         raise NotImplementedError
 
-
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
-
 def task_slug(task: str) -> str:
     return task.replace("-", "_")
-
 
 def build_run_dir_name(dataset: str, task: str, dt: datetime) -> str:
     stamp = dt.strftime("%Y%m%d_%H%M")
     return f"{dataset}_{task_slug(task)}_{stamp}"
 
-
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
 
 def write_jsonl_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -93,14 +81,12 @@ def write_jsonl_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False))
             handle.write("\n")
 
-
 def _csv_cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, (str, int, float, bool)):
         return str(value)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
 
 def write_csv_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
     preferred_order = [
@@ -130,20 +116,16 @@ def write_csv_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             writer.writerow({k: _csv_cell(row.get(k)) for k in ordered_keys})
 
-
 def write_failures_json(path: Path, failures: list[BootstrapFailure]) -> None:
     payload = [asdict(item) for item in failures]
     write_json(path, payload)
-
 
 def s3_key_join(*parts: str) -> str:
     cleaned = [part.strip("/") for part in parts if part and part.strip("/")]
     return "/".join(cleaned)
 
-
 def s3_uri(bucket: str, key: str) -> str:
     return f"s3://{bucket}/{key}"
-
 
 def upload_file_to_s3(
     s3_client: Any,
@@ -163,7 +145,6 @@ def upload_file_to_s3(
 
     return s3_uri(bucket, key)
 
-
 def upload_bytes_to_s3(
     s3_client: Any,
     payload: bytes,
@@ -177,14 +158,12 @@ def upload_bytes_to_s3(
     s3_client.put_object(Bucket=bucket, Key=key, Body=payload, **extra_args)
     return s3_uri(bucket, key)
 
-
 def deterministic_sample[T](items: list[T], max_items: int | None, seed: int) -> list[T]:
     if max_items is None or len(items) <= max_items:
         return items
     rng = random.Random(seed)
     sampled = rng.sample(items, max_items)
     return list(sampled)
-
 
 def download_http_file(url: str, destination: Path) -> Path:
     ensure_dir(destination.parent)
@@ -207,13 +186,11 @@ def download_http_file(url: str, destination: Path) -> Path:
 
     return destination
 
-
 def extract_zip(zip_path: Path, destination_dir: Path) -> Path:
     ensure_dir(destination_dir)
     with zipfile.ZipFile(zip_path, "r") as archive:
         archive.extractall(destination_dir)
     return destination_dir
-
 
 def make_single_label_row(source_ref: str, label: str) -> dict[str, Any]:
     return {
@@ -223,7 +200,6 @@ def make_single_label_row(source_ref: str, label: str) -> dict[str, Any]:
         "labels": [label],
     }
 
-
 def make_multi_label_row(source_ref: str, labels: list[str]) -> dict[str, Any]:
     return {
         "schema": MANIFEST_SCHEMA,
@@ -231,7 +207,6 @@ def make_multi_label_row(source_ref: str, labels: list[str]) -> dict[str, Any]:
         "source_ref": source_ref,
         "labels": labels,
     }
-
 
 def make_object_detection_row(
     source_ref: str,
@@ -243,7 +218,6 @@ def make_object_detection_row(
         "source_ref": source_ref,
         "labels": annotations,
     }
-
 
 def make_semantic_segmentation_row(
     source_ref: str,
@@ -257,7 +231,6 @@ def make_semantic_segmentation_row(
         "mask_ref": mask_ref,
         "color_map": color_map,
     }
-
 
 def make_instance_segmentation_row(
     source_ref: str,

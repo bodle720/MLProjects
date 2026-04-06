@@ -8,6 +8,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 
 import boto3
 
@@ -30,7 +31,6 @@ ALL_TASKS = (
     "semantic-segmentation",
     "instance-segmentation",
 )
-
 
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
@@ -94,7 +94,6 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite S3 objects if they already exist.",
     )
     return parser.parse_args()
-
 
 def main() -> int:
     args = parse_args()
@@ -166,7 +165,6 @@ def main() -> int:
     write_json(summary_path, summary)
 
     if not args.keep_work_dir and work_dir.exists():
-        import shutil
         shutil.rmtree(work_dir, ignore_errors=True)
 
     print(f"[OK] dataset={args.dataset} task={args.task}")
@@ -176,7 +174,6 @@ def main() -> int:
     print(f"[OK] summary.json   -> {summary_path}")
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

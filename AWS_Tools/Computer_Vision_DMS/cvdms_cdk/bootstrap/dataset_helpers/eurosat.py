@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from .common import (
@@ -15,7 +13,6 @@ from .common import (
     s3_key_join,
     upload_file_to_s3,
 )
-
 
 class EuroSATBootstrapper(DatasetBootstrapper):
     dataset_name = "eurosat"
