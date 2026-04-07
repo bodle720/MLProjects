@@ -55,6 +55,20 @@ The sample CSV and JSONL files in the `samples/` folder may contain
 image label pairs with no labels or duplicate entries, simply for testing 
 the capability of the code to detect such cases.
 
+## Data Sources
+
+This repository uses multiple datasets for bootstrap / demonstration purposes.
+
+### **EuroSAT** remote sensing dataset
+- **Citation**  
+Helber, P., Bischke, B., Dengel, A., & Borth, D. (2018). *EuroSAT: A Novel Dataset and Deep Learning Benchmark for Land Use and Land Cover Classification* (Version v2) [Dataset]. Zenodo. https://doi.org/10.5281/zenodo.7711810
+
+- **License**  
+The Zenodo dataset record lists the dataset under the MIT License.  
+Please also review the Copernicus Sentinel Data Terms and Conditions noted by the dataset authors.
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7711810.svg)](https://doi.org/10.5281/zenodo.7711810)
+
+
 ## Documentation
 
 - **Infrastructure Stacks** – architecture and AWS resources  
