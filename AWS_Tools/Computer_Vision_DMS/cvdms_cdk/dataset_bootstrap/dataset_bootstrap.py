@@ -25,8 +25,8 @@
 # args = TestingConfig()
 # --------------------------------------------------------
 #Example CLI call:
-#
-# python dataset_bootstrap.py --dataset eurosat --task single-label --output-root "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 5000#
+# cd cvdms_cdk
+# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750
 # --------------------------------------------------------
 #
 # '''
@@ -39,8 +39,8 @@ import shutil
 
 import boto3
 
-from dataset_helpers import DATASET_HELPERS
-from dataset_helpers.common import (
+from dataset_bootstrap.dataset_helpers import DATASET_HELPERS
+from dataset_bootstrap.dataset_helpers.common import (
     TASK_CHOICES,
     BootstrapConfig,
     build_run_dir_name,
@@ -133,9 +133,9 @@ def main() -> int:
     ensure_dir(output_dir)
     ensure_dir(work_dir)
 
-    print("output_dir", output_dir)
-    print("work_dir", work_dir)
-    print("output_root", output_root)
+    print("output_dir = ", output_dir)
+    print("work_dir = ", work_dir)
+    print("output_root = ", output_root)
 
     config = BootstrapConfig(
         dataset=args.dataset,
@@ -168,8 +168,9 @@ def main() -> int:
     summary_path = output_dir / "summary.json"
     failures_path = output_dir / "failures.json"
 
-    write_jsonl_manifest(manifest_jsonl_path, result.manifest_rows)
-    write_csv_manifest(manifest_csv_path, result.manifest_rows)
+    write_jsonl_manifest(manifest_jsonl_path, args.task, result.manifest_rows)
+    write_csv_manifest(manifest_csv_path, args.task, result.manifest_rows)
+
     write_failures_json(failures_path, result.failures)
 
     finished_at = datetime.now(timezone.utc)

@@ -1,4 +1,4 @@
-from .common import BootstrapConfig, BootstrapResult, DatasetBootstrapper
+from dataset_bootstrap.dataset_helpers.common import BootstrapConfig, BootstrapResult, DatasetBootstrapper
 
 
 class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
