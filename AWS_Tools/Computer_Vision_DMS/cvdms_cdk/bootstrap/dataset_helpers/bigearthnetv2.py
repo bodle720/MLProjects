@@ -3,6 +3,7 @@ from .common import BootstrapConfig, BootstrapResult, DatasetBootstrapper
 
 class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
     dataset_name = "bigearthnet-v2"
+    supported_exts = [".jpg", ".jpeg", ".png"]
     supported_tasks = {"multi-label"}
 
     BIGEARTHNET_S2_URL = "https://zenodo.org/records/10891137/files/BigEarthNet-S2.tar.zst?download=1"

@@ -2,6 +2,7 @@ from .common import BootstrapConfig, BootstrapResult, DatasetBootstrapper
 
 class SpaceNet2Bootstrapper(DatasetBootstrapper):
     dataset_name = "spacenet2"
+    supported_exts = [".jpg", ".jpeg", ".png"]
     supported_tasks = {
         "object-detection",
         "semantic-segmentation",

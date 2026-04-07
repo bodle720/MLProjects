@@ -1,19 +1,47 @@
-'''
-EuroSAT → single-label classification
-BigEarthNet v2.0 → multi-label classification
-SpaceNet 2 → object detection, semantic segmentation, instance segmentation via polygon conversion
-'''
+# '''
+# EuroSAT → single-label classification
+# BigEarthNet v2.0 → multi-label classification
+# SpaceNet 2 → object detection, semantic segmentation, instance segmentation via polygon conversion
+#
+# Testing
+# --------------------------------------------------------
+#
+# import os
+# os.chdir("bootstrap")
+#
+# class TestingConfig:
+#     dataset = "eurosat"
+#     task ="single-label"
+#     output_root = "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper"
+#     bucket = "cv-imagery-for-ml"
+#     aws_profile = "developers_admin"
+#     aws_region = "us-east-1"
+#     s3_prefix = "seed-datasets"
+#     max_items = None
+#     sample_seed = 42
+#     keep_work_dir = True
+#     overwrite_existing = True
+#
+# args = TestingConfig()
+# --------------------------------------------------------
+#Example CLI call:
+#
+# python dataset_bootstrap.py --dataset eurosat --task single-label --output-root "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 5000#
+# --------------------------------------------------------
+#
+# '''
 
 import argparse
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+from datetime import datetime, timezone
 import shutil
 
 import boto3
 
 from dataset_helpers import DATASET_HELPERS
 from dataset_helpers.common import (
+    TASK_CHOICES,
     BootstrapConfig,
     build_run_dir_name,
     ensure_dir,
@@ -24,16 +52,7 @@ from dataset_helpers.common import (
     write_jsonl_manifest,
 )
 
-ALL_TASKS = (
-    "single-label",
-    "multi-label",
-    "object-detection",
-    "semantic-segmentation",
-    "instance-segmentation",
-)
-
 def parse_args() -> argparse.Namespace:
-    script_dir = Path(__file__).resolve().parent
 
     parser = argparse.ArgumentParser(
         description="Download a supported public dataset, copy it into your private S3 bucket, and emit CVDMS-ready manifests."
@@ -47,8 +66,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task",
         required=True,
-        choices=ALL_TASKS,
+        choices=TASK_CHOICES,
         help="Target CVDMS task. Must be valid for the selected dataset.",
+    )
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        help="Local output root. A timestamped run folder will be created inside it.",
     )
     parser.add_argument(
         "--bucket",
@@ -56,8 +80,13 @@ def parse_args() -> argparse.Namespace:
         help="Target private S3 bucket created by the CVDMS storage stack.",
     )
     parser.add_argument(
+        "--aws-profile",
+        required=True,
+        help="Name of AWS config profile for permissions.",
+    )
+    parser.add_argument(
         "--aws-region",
-        default=None,
+        default="us-east-1",
         help="Optional AWS region for boto3 session.",
     )
     parser.add_argument(
@@ -78,12 +107,6 @@ def parse_args() -> argparse.Namespace:
         help="Seed for deterministic sampling when --max-items is used.",
     )
     parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=script_dir / "outputs",
-        help="Local output root. A timestamped run folder will be created inside it.",
-    )
-    parser.add_argument(
         "--keep-work-dir",
         action="store_true",
         help="Keep intermediate downloaded/extracted files for debugging.",
@@ -101,13 +124,18 @@ def main() -> int:
     helper = DATASET_HELPERS[args.dataset]
     helper.validate_task(args.task)
 
+    output_root = Path(args.output_root)
     started_at = datetime.now(timezone.utc)
-    output_dir = args.output_root / build_run_dir_name(args.dataset, args.task, started_at)
+    output_dir = output_root / build_run_dir_name(args.dataset, args.task, started_at)
     work_dir = output_dir / "_work"
 
-    ensure_dir(args.output_root)
+    ensure_dir(output_root)
     ensure_dir(output_dir)
     ensure_dir(work_dir)
+
+    print("output_dir", output_dir)
+    print("work_dir", work_dir)
+    print("output_root", output_root)
 
     config = BootstrapConfig(
         dataset=args.dataset,
@@ -123,7 +151,7 @@ def main() -> int:
         overwrite_existing=args.overwrite_existing,
     )
 
-    session = boto3.session.Session(region_name=args.aws_region)
+    session = boto3.session.Session(region_name=args.aws_region, profile_name=args.aws_profile)
     s3_client = session.client("s3")
 
     try:
@@ -162,6 +190,7 @@ def main() -> int:
         "failures_path": str(failures_path),
         "stats": result.stats,
     }
+
     write_json(summary_path, summary)
 
     if not args.keep_work_dir and work_dir.exists():

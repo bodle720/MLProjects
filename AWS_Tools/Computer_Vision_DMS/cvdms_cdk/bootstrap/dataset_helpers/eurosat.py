@@ -17,6 +17,7 @@ from .common import (
 class EuroSATBootstrapper(DatasetBootstrapper):
     dataset_name = "eurosat"
     supported_tasks = {"single-label"}
+    supported_exts = [".jpg", ".jpeg", ".png"]
 
     EUROSAT_RGB_ZIP_URL = "https://zenodo.org/records/7711810/files/EuroSAT_RGB.zip?download=1"
 
@@ -29,9 +30,11 @@ class EuroSATBootstrapper(DatasetBootstrapper):
         ensure_dir(download_dir)
         ensure_dir(extract_dir)
 
+        url = self.EUROSAT_RGB_ZIP_URL
+        destination = download_dir / "EuroSAT_RGB.zip"
         zip_path = download_http_file(
-            self.EUROSAT_RGB_ZIP_URL,
-            download_dir / "EuroSAT_RGB.zip",
+            url,
+            destination,
         )
         extract_zip(zip_path, extract_dir)
 
@@ -42,7 +45,12 @@ class EuroSATBootstrapper(DatasetBootstrapper):
         manifest_rows = []
         failures: list[BootstrapFailure] = []
 
+        total = len(selected_items)
+        idx = 0
         for image_path, class_name in selected_items:
+            idx += 1
+            if idx % 100 == 0 or idx == 1:
+                print(f"On {idx} out of {total}. class_name = {class_name}")
             try:
                 s3_key = s3_key_join(
                     config.s3_prefix,
@@ -87,8 +95,6 @@ class EuroSATBootstrapper(DatasetBootstrapper):
         Finds the first directory whose direct children look like class folders
         containing image files.
         """
-        image_suffixes = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-
         for candidate in [extracted_root] + [p for p in extracted_root.rglob("*") if p.is_dir()]:
             child_dirs = [p for p in candidate.iterdir() if p.is_dir()]
             if not child_dirs:
@@ -97,7 +103,7 @@ class EuroSATBootstrapper(DatasetBootstrapper):
             valid_class_dirs = 0
             for child in child_dirs:
                 has_images = any(
-                    grandchild.is_file() and grandchild.suffix.lower() in image_suffixes
+                    grandchild.is_file() and grandchild.suffix.lower() in self.supported_exts
                     for grandchild in child.iterdir()
                 )
                 if has_images:
@@ -111,13 +117,12 @@ class EuroSATBootstrapper(DatasetBootstrapper):
         )
 
     def _collect_items(self, class_root: Path) -> list[tuple[Path, str]]:
-        image_suffixes = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
         items: list[tuple[Path, str]] = []
 
         for class_dir in sorted(p for p in class_root.iterdir() if p.is_dir()):
             class_name = class_dir.name
             for image_path in sorted(class_dir.iterdir()):
-                if image_path.is_file() and image_path.suffix.lower() in image_suffixes:
+                if image_path.is_file() and image_path.suffix.lower() in self.supported_exts:
                     items.append((image_path, class_name))
 
         if not items:
