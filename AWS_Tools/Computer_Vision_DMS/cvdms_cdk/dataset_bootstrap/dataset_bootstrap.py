@@ -6,18 +6,19 @@
 # Testing
 # --------------------------------------------------------
 #
-# import os
-# os.chdir("bootstrap")
 #
 # class TestingConfig:
-#     dataset = "eurosat"
-#     task ="single-label"
-#     output_root = "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper"
+#     dataset = "bigearthnet-v2"
+#     # dataset = "eurosat"
+#     task ="multi-label"
+#     # task ="single-label"
+#     output_root = r"C:\cvdms_tmp"
 #     bucket = "cv-imagery-for-ml"
 #     aws_profile = "developers_admin"
 #     aws_region = "us-east-1"
 #     s3_prefix = "seed-datasets"
-#     max_items = None
+#     reuse_from_run_dir = None
+#     max_items = 1500
 #     sample_seed = 42
 #     keep_work_dir = True
 #     overwrite_existing = True
@@ -26,7 +27,7 @@
 # --------------------------------------------------------
 #Example CLI call:
 # cd cvdms_cdk
-# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\Users\brian\Desktop\Doc Local\tests\testing_bootstrapper" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750
+# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750 --keep-work-dir
 # --------------------------------------------------------
 #
 # '''
@@ -95,6 +96,15 @@ def parse_args() -> argparse.Namespace:
         help="Root key prefix under the target S3 bucket.",
     )
     parser.add_argument(
+        "--reuse-from-run-dir",
+        type=str,
+        default=None,
+        help=(
+            "For --dataset bigearthnet-v2 only. Path to a previous run directory "
+            "(not the _work subdirectory). Its _work/downloads and _work/extracted "
+            "artifacts may be reused to skip re-download and re-extraction.")
+        )
+    parser.add_argument(
         "--max-items",
         type=int,
         default=None,
@@ -124,6 +134,27 @@ def main() -> int:
     helper = DATASET_HELPERS[args.dataset]
     helper.validate_task(args.task)
 
+    reuse_from_run_dir = None
+    if args.dataset == "bigearthnet-v2":
+        print(
+            "WARNING: bigearthnet-v2 is a very large download and may require tens of gigabytes "
+            "of disk space and a long download time.",
+            file=sys.stderr,
+        )
+
+        if args.reuse_from_run_dir:
+            reuse_from_run_dir = Path(args.reuse_from_run_dir)
+            if not reuse_from_run_dir.exists():
+                print(f"[ERROR] reuse_from_run_dir does not exist: {reuse_from_run_dir}", file=sys.stderr)
+                return 2
+            if not reuse_from_run_dir.is_dir():
+                print(f"[ERROR] reuse_from_run_dir is not a directory: {reuse_from_run_dir}", file=sys.stderr)
+                return 2
+            print(f"[INFO] reusing prior BigEarthNet source artifacts from: {reuse_from_run_dir}")
+    elif args.reuse_from_run_dir:
+        print(f"[ERROR] reuse_from_run_dir only supported for dataset=bigearthnet-v2", file=sys.stderr)
+        return 2
+
     output_root = Path(args.output_root)
     started_at = datetime.now(timezone.utc)
     output_dir = output_root / build_run_dir_name(args.dataset, args.task, started_at)
@@ -133,16 +164,13 @@ def main() -> int:
     ensure_dir(output_dir)
     ensure_dir(work_dir)
 
-    print("output_dir = ", output_dir)
-    print("work_dir = ", work_dir)
-    print("output_root = ", output_root)
-
     config = BootstrapConfig(
         dataset=args.dataset,
         task=args.task,
         bucket=args.bucket,
         s3_prefix=args.s3_prefix,
         aws_region=args.aws_region,
+        reuse_from_run_dir=reuse_from_run_dir,
         max_items=args.max_items,
         sample_seed=args.sample_seed,
         output_dir=output_dir,
@@ -190,6 +218,7 @@ def main() -> int:
         "manifest_csv_path": str(manifest_csv_path),
         "failures_path": str(failures_path),
         "stats": result.stats,
+        "reuse_from_run_dir": str(reuse_from_run_dir) if reuse_from_run_dir else None
     }
 
     write_json(summary_path, summary)

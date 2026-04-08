@@ -1,15 +1,20 @@
+import os
+import socket
+import time
+import urllib.error
+import urllib.request
 import csv
 import json
 import math
 import mimetypes
 import random
-import urllib.request
 import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 TASK_CHOICES = (
     "single-label",
@@ -29,6 +34,7 @@ class BootstrapConfig:
     bucket: str
     s3_prefix: str
     aws_region: str | None
+    reuse_from_run_dir: Path | None
     max_items: int | None
     sample_seed: int
     output_dir: Path
@@ -71,7 +77,7 @@ def task_slug(task: str) -> str:
     return task.replace("-", "_")
 
 def build_run_dir_name(dataset: str, task: str, dt: datetime) -> str:
-    stamp = dt.strftime("%Y%m%d_%H%M")
+    stamp = dt.strftime("%Y%m%d_%H%M%S")
     return f"{dataset}_{task_slug(task)}_{stamp}"
 
 def write_json(path: Path, payload: Any) -> None:
@@ -223,30 +229,226 @@ def upload_bytes_to_s3(
 def deterministic_sample(items: list, max_items: int | None, seed: int) -> list:
     if max_items is None or len(items) <= max_items:
         return items
+
     rng = random.Random(seed)
-    sampled = rng.sample(items, max_items)
-    return list(sampled)
+    chosen_indices = sorted(rng.sample(range(len(items)), max_items))
+    return [items[i] for i in chosen_indices]
 
-def download_http_file(url: str, destination: Path) -> Path:
+def download_http_file(
+    url: str,
+    destination: Path,
+    *,
+    chunk_size: int = 1024 * 1024,
+    request_timeout_sec: int = 60,
+    max_attempts: int = 5,
+    progress_every_sec: float = 5.0,
+) -> Path:
+    """
+    Download a remote file robustly.
+
+    Behavior:
+    - downloads to <destination>.part first
+    - prints periodic progress
+    - retries on timeout/stall/network interruption
+    - attempts same-run resume via HTTP Range if possible
+    - validates final size against Content-Length when available
+    - only returns the final destination path after atomic rename
+
+    Important:
+    - stale .part files from prior runs are deleted at the start, so each run is isolated
+    - this does NOT support cross-run resume by design
+    """
     ensure_dir(destination.parent)
+
+    temp_path = destination.with_name(destination.name + ".part")
+
+    if temp_path.exists():
+        print(f"[download] removing stale partial file: {temp_path}")
+        temp_path.unlink()
+
+    remote_size = _get_remote_content_length(url, timeout=request_timeout_sec)
+
     if destination.exists():
-        return destination
+        local_size = destination.stat().st_size
+        if remote_size is not None and local_size == remote_size:
+            print(
+                f"[download] reusing existing complete file: {destination} "
+                f"({format_bytes(local_size)})"
+            )
+            return destination
 
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "cvdms-dataset-bootstrap/1.0",
-        },
-    )
+        print(
+            f"[download] existing destination does not look complete; removing and redownloading: "
+            f"{destination}"
+        )
+        destination.unlink()
 
-    with urllib.request.urlopen(request) as response, destination.open("wb") as out:
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            start_offset = temp_path.stat().st_size if temp_path.exists() else 0
+            use_range = start_offset > 0
+
+            print(
+                f"[download] attempt {attempt}/{max_attempts} -> {destination.name}"
+                + (
+                    f" (resuming at {format_bytes(start_offset)})"
+                    if use_range
+                    else ""
+                )
+            )
+
+            request = _build_download_request(url, start_offset if use_range else None)
+
+            with urllib.request.urlopen(request, timeout=request_timeout_sec) as response:
+                status = getattr(response, "status", response.getcode())
+
+                if use_range and status != 206:
+                    print("[download] server did not honor Range request; restarting this attempt from zero")
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    start_offset = 0
+                else:
+                    _stream_response_to_temp(
+                        response=response,
+                        temp_path=temp_path,
+                        mode="ab" if start_offset > 0 else "wb",
+                        chunk_size=chunk_size,
+                        progress_every_sec=progress_every_sec,
+                        remote_size=remote_size,
+                        start_offset=start_offset,
+                    )
+                    os.replace(temp_path, destination)
+                    print(f"[download] completed: {destination} ({format_bytes(destination.stat().st_size)})")
+                    return destination
+
+            # Only reached when we tried Range resume and server ignored it.
+            request = _build_download_request(url, None)
+
+            with urllib.request.urlopen(request, timeout=request_timeout_sec) as response:
+                _stream_response_to_temp(
+                    response=response,
+                    temp_path=temp_path,
+                    mode="wb",
+                    chunk_size=chunk_size,
+                    progress_every_sec=progress_every_sec,
+                    remote_size=remote_size,
+                    start_offset=0,
+                )
+
+            os.replace(temp_path, destination)
+            print(f"[download] completed: {destination} ({format_bytes(destination.stat().st_size)})")
+            return destination
+
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError, IOError) as exc:
+            last_error = exc
+            print(f"[download] attempt {attempt}/{max_attempts} failed: {exc}")
+
+            if attempt == max_attempts:
+                break
+
+            sleep_sec = min(2 ** attempt, 15)
+            print(f"[download] waiting {sleep_sec}s before retry...")
+            time.sleep(sleep_sec)
+
+    if temp_path.exists():
+        temp_path.unlink()
+
+    raise RuntimeError(f"Failed downloading {url} after {max_attempts} attempts: {last_error}")
+
+def _build_download_request(url: str, start_offset: int | None) -> urllib.request.Request:
+    headers = {
+        "User-Agent": "cvdms-dataset-bootstrap/1.0",
+    }
+    if start_offset is not None and start_offset > 0:
+        headers["Range"] = f"bytes={start_offset}-"
+    return urllib.request.Request(url, headers=headers)
+
+def _stream_response_to_temp(
+    *,
+    response: Any,
+    temp_path: Path,
+    mode: str,
+    chunk_size: int,
+    progress_every_sec: float,
+    remote_size: int | None,
+    start_offset: int,
+) -> None:
+    total_size = remote_size
+    if total_size is None:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                content_length_int = int(content_length)
+                total_size = content_length_int + start_offset if start_offset > 0 else content_length_int
+            except ValueError:
+                total_size = None
+
+    last_print_time = time.time()
+
+    with temp_path.open(mode) as out:
         while True:
-            chunk = response.read(1024 * 1024)
+            chunk = response.read(chunk_size)
             if not chunk:
                 break
+
             out.write(chunk)
 
-    return destination
+            now = time.time()
+            if now - last_print_time >= progress_every_sec:
+                current_size = temp_path.stat().st_size
+                _print_download_progress(current_size, total_size)
+                last_print_time = now
+
+    current_size = temp_path.stat().st_size
+    _print_download_progress(current_size, total_size)
+
+    if total_size is not None and current_size != total_size:
+        raise IOError(
+            f"download incomplete: expected {format_bytes(total_size)}, "
+            f"got {format_bytes(current_size)}"
+        )
+
+def _get_remote_content_length(url: str, *, timeout: int) -> int | None:
+    """
+    Best-effort HEAD probe for Content-Length.
+    Returns None if unavailable.
+    """
+    headers = {
+        "User-Agent": "cvdms-dataset-bootstrap/1.0",
+    }
+
+    try:
+        request = urllib.request.Request(url, headers=headers, method="HEAD")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content_length = response.headers.get("Content-Length")
+            if not content_length:
+                return None
+            return int(content_length)
+    except Exception:
+        return None
+
+def _print_download_progress(current_size: int, total_size: int | None) -> None:
+    if total_size and total_size > 0:
+        pct = (current_size / total_size) * 100.0
+        print(
+            f"[download] {format_bytes(current_size)} / {format_bytes(total_size)} "
+            f"({pct:.1f}%)"
+        )
+    else:
+        print(f"[download] {format_bytes(current_size)} downloaded")
+
+def format_bytes(num_bytes: int) -> str:
+    value = float(num_bytes)
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    unit_idx = 0
+
+    while value >= 1024.0 and unit_idx < len(units) - 1:
+        value /= 1024.0
+        unit_idx += 1
+
+    return f"{value:.1f} {units[unit_idx]}"
 
 def extract_zip(zip_path: Path, destination_dir: Path) -> Path:
     ensure_dir(destination_dir)
@@ -563,12 +765,27 @@ def _ordered_semantic_color_map(color_map: dict[str, list[str]]) -> dict[str, li
 
     return out
 
-def _number_to_csv_cell(value: int | float) -> str:
-    if isinstance(value, int):
-        return str(value)
-    if float(value).is_integer():
-        return str(int(value))
-    return str(value)
+def _number_to_csv_cell(value: int | float | str) -> str:
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"bad numeric: {value}")
+
+    if not d.is_finite():
+        raise ValueError("non-finite number")
+
+    d = d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    if d == 0:
+        d = Decimal("0.0000")
+
+    s = format(d, "f")
+    if "." not in s:
+        s += ".0000"
+    else:
+        whole, frac = s.split(".", 1)
+        s = whole + "." + (frac + "0000")[:4]
+
+    return s
 
 def normalize_class_name_for_bootstrap(value: Any) -> str:
     if not isinstance(value, str):
