@@ -9,7 +9,6 @@ from dataset_bootstrap.dataset_helpers.common import (
     BootstrapConfig,
     BootstrapFailure,
     BootstrapResult,
-    canonicalize_class_name,
     deterministic_sample,
     make_semantic_segmentation_row,
     s3_key_join,
@@ -25,6 +24,8 @@ from dataset_bootstrap.dataset_helpers.coco.common import (
     color_for_index,
     rgb_to_hex
 )
+
+from cvdms_platform.class_normalizer import canonicalize_class_name
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png"}
 

@@ -11,7 +11,6 @@ from dataset_bootstrap.dataset_helpers.common import (
     BootstrapConfig,
     BootstrapFailure,
     BootstrapResult,
-    canonicalize_class_name,
     deterministic_sample,
     make_instance_segmentation_row,
     s3_key_join,
@@ -26,6 +25,8 @@ from dataset_bootstrap.dataset_helpers.coco.common import (
     resolve_train_images_dir,
     rgb_to_hex,
 )
+
+from cvdms_platform.class_normalizer import canonicalize_class_name
 
 def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> BootstrapResult:
     reuse_stats: dict[str, Any] = {

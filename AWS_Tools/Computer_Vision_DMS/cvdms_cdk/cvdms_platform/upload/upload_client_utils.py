@@ -53,6 +53,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+from cvdms_platform.class_normalizer import canonicalize_class_name
+
 _V1_SCHEMA = "cvdms.manifest.v1"
 _ALLOWED_EXTS_LC = {".jsonl", ".ndjson", ".manifest", ".csv"}
 _ALLOWED_IMAGE_EXTS_LC = {".jpg", ".jpeg", ".png"}
@@ -224,16 +226,13 @@ def _csv_to_gt_single_label(csv_file: Path, out_tmp: Path) -> None:
 
         for i, row in enumerate(reader, start=2):
             src = (row.get("source-ref") or "").strip()
-            cn_normed = (row.get("class-name") or "").strip().lower()
+            cn_normed = canonicalize_class_name(row.get("class-name"), field_name="class-name", allow_background=False)
 
-            if not cn_normed or not src:
+            if not src:
                 raise ValueError(f"CSV line {i}: class name and source-ref cannot be empty")
 
             if not _is_valid_s3_uri(src):
                 raise ValueError(f"CSV line {i}: source-ref must be a valid S3 URI")
-
-            if cn_normed in _RESERVED_CLASS_NAMES_LC:
-                raise ValueError(f"CSV line {i}: Reserved class name used: {cn_normed}")
 
             obj = {
                 "source-ref": src,
@@ -256,14 +255,10 @@ def _csv_to_gt_multi_label(csv_file: Path, out_tmp: Path) -> None:
             if not _is_valid_s3_uri(src):
                 raise ValueError(f"CSV line {i}: source-ref must be a valid S3 URI")
 
-            labels_normed = [x.strip().lower() for x in labels_raw.split(",") if x.strip()]
+            labels_normed = [canonicalize_class_name(x, field_name="class-name", allow_background=False) for x in labels_raw.split(",") if x.strip()]
 
             if not labels_normed:
                 raise ValueError(f"CSV line {i}: labels field cannot be empty")
-
-            for lab in labels_normed:
-                if lab in _RESERVED_CLASS_NAMES_LC:
-                    raise ValueError(f"CSV line {i}: Reserved class name used: {lab}")
 
             # stable ids: sort labels for determinism
             labels_normed = sorted(set(labels_normed))
@@ -308,14 +303,12 @@ def _csv_to_gt_object_detection(csv_file: Path, out_tmp: Path) -> None:
 
         for i, row in enumerate(reader, start=2):
             src = (row.get("source-ref") or "").strip()
-            cn_normed = (row.get("class-name") or "").strip().lower()
+            cn_normed = canonicalize_class_name(row.get("class-name"), field_name="class-name", allow_background=False)
 
-            if not cn_normed or not src:
+            if not src:
                 raise ValueError(f"CSV line {i}: object-detection class-name and source-ref cannot be empty")
             if not _is_valid_s3_uri(src):
                 raise ValueError(f"CSV line {i}: source-ref must be a valid S3 URI")
-            if cn_normed in _RESERVED_CLASS_NAMES_LC:
-                raise ValueError(f"Reserved class name used: {cn_normed}, line = {i}")
 
             top = _parse_number_like(row.get("top"), i, "top")
             left = _parse_number_like(row.get("left"), i, "left")
@@ -384,17 +377,13 @@ def _csv_to_gt_semantic_seg(csv_file: Path, out_tmp: Path) -> None:
             if canon_cm_str is None:
                 canon_cm_str = canon
 
-                present_reserved_keys = [
-                    str(k).strip().lower()
+                normalized_keys = [
+                    canonicalize_class_name(k, field_name="class-name", allow_background=True)
                     for k in cm.keys()
-                    if str(k).strip().lower() in _RESERVED_CLASS_NAMES_LC
                 ]
 
-                present_bg_keys = [
-                    str(k).strip().lower()
-                    for k in cm.keys()
-                    if str(k).strip().lower() in ['bg', 'background']
-                ]
+                present_reserved_keys = [k for k in normalized_keys if k in _RESERVED_CLASS_NAMES_LC]
+                present_bg_keys = [k for k in normalized_keys if k in {"bg", "background"}]
 
                 # must have exactly one bg-ish key
                 if len(present_bg_keys) != 1:
@@ -407,10 +396,7 @@ def _csv_to_gt_semantic_seg(csv_file: Path, out_tmp: Path) -> None:
                 # build internal-color-map GT shape with numeric keys
                 k = 0
                 for class_name, colors_list in cm.items():
-                    class_name_normed = str(class_name).strip().lower()
-
-                    if not class_name_normed:
-                        raise ValueError(f"CSV line {i}: class name keys cannot be empty.")
+                    class_name_normed = canonicalize_class_name(class_name, field_name="class-name", allow_background=True)
 
                     if not isinstance(colors_list, list):
                         raise ValueError(f"CSV line {i}: color_map[{class_name}] must be of type list")
@@ -472,12 +458,13 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
         if not isinstance(meta, dict):
             return False, None, f"Line {lineno}: missing or invalid 'single-label-metadata' (must be a dict)."
 
-        cn_normed = meta.get("class-name", "").strip().lower()
-        if not cn_normed:
+        if not meta.get("class-name", "").strip().lower():
             return True, None, ""  # skip empty
 
-        if cn_normed in _RESERVED_CLASS_NAMES_LC:
-            return False, None, f"Line {lineno}: 'single-label-metadata.class-name' is a reserved class name: {cn_normed}"
+        try:
+            cn_normed = canonicalize_class_name(meta.get("class-name", ""), field_name="class-name", allow_background=False)
+        except Exception as e:
+            return False, None, f"Line {lineno}: 'single-label-metadata.class-name' is a reserved class name or invalid: {str(e)}"
 
         v1 = dict(v1_base)
         v1["labels"] = [cn_normed]
@@ -499,15 +486,10 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
         # Validate class-map values strings
         labels: List[str] = []
         for k, v in class_map.items():
-            if not isinstance(v, str):
-                return False, None, f"Line {lineno}: 'multi-label-metadata.class-map' values must be strings"
-
-            cn_normed = v.strip().lower()
-            if not cn_normed:
-                return False, None, f"Line {lineno}: 'multi-label-metadata.class-map' values must be non-empty strings"
-
-            if cn_normed in _RESERVED_CLASS_NAMES_LC:
-                return False, None, f"Line {lineno}: 'multi-label-metadata.class-map' contains a reserved class name: {cn_normed}"
+            try:
+                cn_normed = canonicalize_class_name(v, field_name="class-name", allow_background=False)
+            except Exception as e:
+                return False, None, f"Line {lineno}: 'multi-label-metadata.class-map' error: {str(e)}"
 
             labels.append(cn_normed)
 
@@ -583,7 +565,11 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
             if cid_key not in class_map:
                 return False, None, f"Line {lineno}: annotation[{i}] class_id {cid} missing from object-detection-metadata.class-map."
 
-            cn_normed = class_map[cid_key].strip().lower() # already verified not in reserved set
+            try:
+                cn_normed = canonicalize_class_name(class_map[cid_key], field_name=f"class_map[{cid_key}]", allow_background=False)
+            except Exception as e:
+                return False, None, f"Line {lineno}: class_map[cid_key] must be a valid class: {str(e)}"
+
             boxes.append({
                 "class_name": cn_normed,
                 "top": ann["top"], # floats
@@ -623,13 +609,13 @@ def _gt_row_to_v1(*, obj: Dict[str, Any], label_type: str, lineno: int) -> Tuple
             if not isinstance(v, dict):
                 return False, None, f"Line {lineno}: internal-color-map['{k}'] must be an object."
 
-            cn_normed = v.get("class-name", "").strip().lower()
+            try:
+                cn_normed = canonicalize_class_name(v.get("class-name", ""), field_name="class-name", allow_background=True)
+            except Exception as e:
+                return False, None, f"Line {lineno}:class-name must be a valid class name: {str(e)}."
 
             if cn_normed in seen_cn:
                 return False, None, f"Line {lineno}: semantic internal-color-map repeats class-name {cn_normed}"
-
-            if not cn_normed:
-                return False, None, f"Line {lineno}: internal-color-map['{k}'].class-name must be a non-empty string."
 
             hc = v.get("hex-color", "")
 

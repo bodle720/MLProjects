@@ -19,7 +19,7 @@ Label-type specifics:
   Required keys:
     - "single-label-metadata": { "class-name": <string> }
   Rules:
-    - class-name is normalized: strip().lower()
+    - class-name is normalized (see canonicalize_class_name in class_normalizer.py)
     - class-name MUST be non-empty to keep the row
     - class-name MUST NOT be in _RESERVED_CLASS_NAMES_LC (currently {"bg","background"})
 
@@ -31,7 +31,7 @@ Label-type specifics:
     - The GT "multi-label": [...] field is treated as redundant/ignored.
   Rules:
     - class-map values MUST be non-empty strings
-    - values normalized: strip().lower()
+    - values normalized:
     - values MUST NOT be in _RESERVED_CLASS_NAMES_LC
     - v1 labels = sorted(set(values)) for determinism
     - skip if class-map is {}
@@ -46,7 +46,7 @@ Label-type specifics:
     - top/left/height/width accept int/float/numeric-string; must be finite (no NaN/Infinity)
     - top,left >= 0; height,width > 0
     - class_id must be integer-like and must exist in class-map
-    - class-map values normalized: strip().lower(); must be non-empty and not reserved
+    - class-map values normalized: must be non-empty and not reserved
 
 4) semantic-segmentation
   Required keys:
@@ -61,7 +61,7 @@ Label-type specifics:
       (case-insensitive). v1 output EXCLUDES that background entry.
   Rules:
     - mask ref must end with .png (case-insensitive)
-    - each class-name must be non-empty after strip().lower()
+    - each class-name must be non-empty
     - class-name must be unique (case-insensitive) across entries
     - hex-color must be valid "#RRGGBB"
     - no skip permitted
@@ -382,6 +382,6 @@ class UploadClient:
             return {"error": f"Failed upload step: {msg}"}
 
         logging.info("Done uploading manifest and job.json to S3.")
-        self._update_job_status(job_id, "IN_PROGRESS", error_msg=msg)
+        self._update_job_status(job_id, "IN_PROGRESS")
 
         return {"submission_status": "success", "job_id": job_id}

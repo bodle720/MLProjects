@@ -11,9 +11,10 @@ from dataset_bootstrap.dataset_helpers.common import (
     extract_zip,
     make_single_label_row,
     s3_key_join,
-    upload_file_to_s3,
-    canonicalize_class_name
+    upload_file_to_s3
 )
+
+from cvdms_platform.class_normalizer import canonicalize_class_name
 
 class EuroSATBootstrapper(DatasetBootstrapper):
     dataset_name = "eurosat"
