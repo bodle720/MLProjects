@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import re
+import unicodedata
 
 TASK_CHOICES = (
     "single-label",
@@ -26,6 +28,7 @@ TASK_CHOICES = (
 
 _RESERVED_CLASS_NAMES_LC = {"bg", "background"}
 _BACKGROUND_NAMES_LC = {"bg", "background"}
+_CLASS_NAME_MAX_LEN = 50
 
 @dataclass(frozen=True)
 class BootstrapConfig:
@@ -39,8 +42,6 @@ class BootstrapConfig:
     sample_seed: int
     output_dir: Path
     work_dir: Path
-    keep_work_dir: bool = False
-    overwrite_existing: bool = False
 
 @dataclass
 class BootstrapFailure:
@@ -80,6 +81,43 @@ def build_run_dir_name(dataset: str, task: str, dt: datetime) -> str:
     stamp = dt.strftime("%Y%m%d_%H%M%S")
     return f"{dataset}_{task_slug(task)}_{stamp}"
 
+def canonicalize_class_name(
+    value: Any,
+    *,
+    field_name: str,
+    allow_background: bool = False,
+    max_length: int = _CLASS_NAME_MAX_LEN,
+) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string, got {type(value).__name__}")
+
+    s = value.strip().lower()
+    if s == "":
+        raise ValueError(f"{field_name} cannot be empty after stripping")
+
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+
+    # remove apostrophes so "animal's" -> "animals"
+    s = re.sub(r"[\'’`]+", "", s)
+
+    # any run of non-alphanumeric chars becomes one underscore
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+
+    s = re.sub(r"_+", "_", s).strip("_")
+
+    if s == "":
+        raise ValueError(f"{field_name} became empty after normalization")
+
+    s = s[:max_length].rstrip("_")
+    if s == "":
+        raise ValueError(f"{field_name} became empty after length truncation")
+
+    if not allow_background and s in _RESERVED_CLASS_NAMES_LC:
+        raise ValueError(f"{field_name} uses reserved class name: {s}")
+
+    return s
+
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -107,7 +145,7 @@ def write_csv_manifest(path: Path, task: str, rows: list[dict[str, Any]]) -> Non
                 writer.writerow(
                     {
                         "source-ref": _require_nonempty_string(row.get("source_ref"), "source_ref"),
-                        "class-name": _normalize_class_name(row.get("label"), field_name="label"),
+                        "class-name": canonicalize_class_name(row.get("label"), field_name="label"),
                     }
                 )
             return
@@ -137,7 +175,7 @@ def write_csv_manifest(path: Path, task: str, rows: list[dict[str, Any]]) -> Non
                     writer.writerow(
                         {
                             "source-ref": source_ref,
-                            "class-name": ann["class_name"],
+                            "class-name": canonicalize_class_name(ann["class_name"], field_name="class_name"),
                             "top": _number_to_csv_cell(ann["top"]),
                             "left": _number_to_csv_cell(ann["left"]),
                             "height": _number_to_csv_cell(ann["height"]),
@@ -464,7 +502,7 @@ def extract_zip(zip_path: Path, destination_dir: Path) -> Path:
 def make_single_label_row(source_ref: str, label: str) -> dict[str, Any]:
     return {
         "source_ref": _require_nonempty_string(source_ref, "source_ref"),
-        "label": _normalize_class_name(label, field_name="label"),
+        "label": canonicalize_class_name(label, field_name="label"),
     }
 
 def make_multi_label_row(source_ref: str, labels: list[str]) -> dict[str, Any]:
@@ -513,7 +551,7 @@ def _manifest_row_to_minimal_gt_json(task: str, row: dict[str, Any]) -> dict[str
         return {
             "source-ref": _require_nonempty_string(row.get("source_ref"), "source_ref"),
             "single-label-metadata": {
-                "class-name": _normalize_class_name(row.get("label"), field_name="label"),
+                "class-name": canonicalize_class_name(row.get("label"), field_name="label"),
             },
         }
 
@@ -602,14 +640,6 @@ def _require_nonempty_string(value: Any, field_name: str) -> str:
         raise ValueError(f"{field_name} cannot be empty")
     return out
 
-def _normalize_class_name(value: Any, *, field_name: str, allow_background: bool = False) -> str:
-    out = _require_nonempty_string(value, field_name).strip().lower()
-    if out == "":
-        raise ValueError(f"{field_name} cannot be empty after stripping")
-    if not allow_background and out in _RESERVED_CLASS_NAMES_LC:
-        raise ValueError(f"{field_name} uses reserved class name: {out}")
-    return out
-
 def _normalize_label_list(values: Any, *, allow_background: bool, field_name: str) -> list[str]:
     if not isinstance(values, list):
         raise TypeError(f"{field_name} must be a list[str], got {type(values).__name__}")
@@ -617,7 +647,7 @@ def _normalize_label_list(values: Any, *, allow_background: bool, field_name: st
     normalized = []
     seen = set()
     for idx, value in enumerate(values):
-        item = _normalize_class_name(
+        item = canonicalize_class_name(
             value,
             field_name=f"{field_name}[{idx}]",
             allow_background=allow_background,
@@ -663,10 +693,9 @@ def _normalize_object_detection_annotations(annotations: Any) -> list[dict[str, 
         if not isinstance(ann, dict):
             raise TypeError(f"annotations[{idx}] must be a dict, got {type(ann).__name__}")
 
-        class_name = _normalize_class_name(
+        class_name = canonicalize_class_name(
             ann.get("class_name"),
-            field_name=f"annotations[{idx}].class_name",
-            allow_background=False,
+            field_name=f"annotations[{idx}].class_name"
         )
         top = _normalize_numeric(ann.get("top"), field_name=f"annotations[{idx}].top")
         left = _normalize_numeric(ann.get("left"), field_name=f"annotations[{idx}].left")
@@ -704,7 +733,8 @@ def _normalize_semantic_color_map(color_map: Any) -> dict[str, list[str]]:
     saw_background = False
 
     for raw_class_name, raw_colors in color_map.items():
-        class_name = _normalize_class_name(
+
+        class_name = canonicalize_class_name(
             raw_class_name,
             field_name="color_map class name",
             allow_background=True,
@@ -786,11 +816,3 @@ def _number_to_csv_cell(value: int | float | str) -> str:
         s = whole + "." + (frac + "0000")[:4]
 
     return s
-
-def normalize_class_name_for_bootstrap(value: Any) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"class name must be a string, got {type(value).__name__}")
-    out = value.strip().lower()
-    if out == "":
-        raise ValueError("class name cannot be empty after stripping")
-    return out

@@ -1,12 +1,9 @@
 # '''
 # EuroSAT → single-label classification
 # BigEarthNet v2.0 → multi-label classification
-# SpaceNet 2 → object detection, semantic segmentation, instance segmentation via polygon conversion
 #
 # Testing
 # --------------------------------------------------------
-#
-#
 # class TestingConfig:
 #     dataset = "bigearthnet-v2"
 #     # dataset = "eurosat"
@@ -20,23 +17,20 @@
 #     reuse_from_run_dir = None
 #     max_items = 1500
 #     sample_seed = 42
-#     keep_work_dir = True
-#     overwrite_existing = True
 #
 # args = TestingConfig()
 # --------------------------------------------------------
 #Example CLI call:
 # cd cvdms_cdk
-# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750 --keep-work-dir
+# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750
+# python -m dataset_bootstrap.dataset_bootstrap --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\bigearthnet-v2_multi_label_20260408_011409"
 # --------------------------------------------------------
-#
 # '''
 
 import argparse
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-import shutil
 
 import boto3
 
@@ -116,16 +110,7 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Seed for deterministic sampling when --max-items is used.",
     )
-    parser.add_argument(
-        "--keep-work-dir",
-        action="store_true",
-        help="Keep intermediate downloaded/extracted files for debugging.",
-    )
-    parser.add_argument(
-        "--overwrite-existing",
-        action="store_true",
-        help="Overwrite S3 objects if they already exist.",
-    )
+
     return parser.parse_args()
 
 def main() -> int:
@@ -174,9 +159,7 @@ def main() -> int:
         max_items=args.max_items,
         sample_seed=args.sample_seed,
         output_dir=output_dir,
-        work_dir=work_dir,
-        keep_work_dir=args.keep_work_dir,
-        overwrite_existing=args.overwrite_existing,
+        work_dir=work_dir
     )
 
     session = boto3.session.Session(region_name=args.aws_region, profile_name=args.aws_profile)
@@ -222,9 +205,6 @@ def main() -> int:
     }
 
     write_json(summary_path, summary)
-
-    if not args.keep_work_dir and work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
 
     print(f"[OK] dataset={args.dataset} task={args.task}")
     print(f"[OK] rows={len(result.manifest_rows)} failures={len(result.failures)}")

@@ -12,7 +12,7 @@ from dataset_bootstrap.dataset_helpers.common import (
     make_single_label_row,
     s3_key_join,
     upload_file_to_s3,
-    normalize_class_name_for_bootstrap
+    canonicalize_class_name
 )
 
 class EuroSATBootstrapper(DatasetBootstrapper):
@@ -121,7 +121,7 @@ class EuroSATBootstrapper(DatasetBootstrapper):
         items: list[tuple[Path, str]] = []
 
         for class_dir in sorted(p for p in class_root.iterdir() if p.is_dir()):
-            class_name = normalize_class_name_for_bootstrap(class_dir.name)
+            class_name = canonicalize_class_name(class_dir.name, field_name="class_dir.name")
             for image_path in sorted(class_dir.iterdir()):
                 if image_path.is_file() and image_path.suffix.lower() in self.supported_exts:
                     items.append((image_path, class_name))
