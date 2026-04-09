@@ -47,6 +47,8 @@ from dataset_bootstrap.dataset_helpers.common import (
     write_jsonl_manifest,
 )
 
+REUSE_SUPPORTED_DATASETS = {"bigearthnet-v2", "coco"}
+
 def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
@@ -94,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "For --dataset bigearthnet-v2 only. Path to a previous run directory "
+            "For --dataset bigearthnet-v2 or coco only. Path to a previous run directory "
             "(not the _work subdirectory). Its _work/downloads and _work/extracted "
             "artifacts may be reused to skip re-download and re-extraction.")
         )
@@ -120,6 +122,7 @@ def main() -> int:
     helper.validate_task(args.task)
 
     reuse_from_run_dir = None
+
     if args.dataset == "bigearthnet-v2":
         print(
             "WARNING: bigearthnet-v2 is a very large download and may require tens of gigabytes "
@@ -127,18 +130,23 @@ def main() -> int:
             file=sys.stderr,
         )
 
-        if args.reuse_from_run_dir:
-            reuse_from_run_dir = Path(args.reuse_from_run_dir)
-            if not reuse_from_run_dir.exists():
-                print(f"[ERROR] reuse_from_run_dir does not exist: {reuse_from_run_dir}", file=sys.stderr)
-                return 2
-            if not reuse_from_run_dir.is_dir():
-                print(f"[ERROR] reuse_from_run_dir is not a directory: {reuse_from_run_dir}", file=sys.stderr)
-                return 2
-            print(f"[INFO] reusing prior BigEarthNet source artifacts from: {reuse_from_run_dir}")
-    elif args.reuse_from_run_dir:
-        print(f"[ERROR] reuse_from_run_dir only supported for dataset=bigearthnet-v2", file=sys.stderr)
-        return 2
+    if args.reuse_from_run_dir:
+        if args.dataset not in REUSE_SUPPORTED_DATASETS:
+            print(
+                f"[ERROR] reuse_from_run_dir is not supported for dataset={args.dataset}",
+                file=sys.stderr,
+            )
+            return 2
+
+        reuse_from_run_dir = Path(args.reuse_from_run_dir)
+        if not reuse_from_run_dir.exists():
+            print(f"[ERROR] reuse_from_run_dir does not exist: {reuse_from_run_dir}", file=sys.stderr)
+            return 2
+        if not reuse_from_run_dir.is_dir():
+            print(f"[ERROR] reuse_from_run_dir is not a directory: {reuse_from_run_dir}", file=sys.stderr)
+            return 2
+
+        print(f"[INFO] reusing prior source artifacts from: {reuse_from_run_dir}")
 
     output_root = Path(args.output_root)
     started_at = datetime.now(timezone.utc)
