@@ -7,7 +7,7 @@ _SPLITS: tuple[str, ...] = ("train", "val", "test")
 _SPLIT_RATIOS: dict[str, float] = {
     "train": 0.70,
     "val": 0.15,
-    "test": 0.15,
+    "test": 0.15
 }
 
 # Objective weights, in priority order.

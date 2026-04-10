@@ -55,11 +55,17 @@ class DatasetClient:
         Return dataset information for the latest version.
 
         Returns:
-            {"exists": False}
+            {
+                "dataset_info": {"exists": False},
+                "latest_version_info": None,
+            }
         if the dataset does not exist.
 
-        Otherwise, returns a dict with dataset-level metadata, latest version
-        metadata, split counts, and artifact pointers.
+        Otherwise, returns:
+            {
+                "dataset_info": {... dataset-level immutable/current fields ...},
+                "latest_version_info": {... latest version metadata ...},
+            }
         """
 
         try:
@@ -71,6 +77,7 @@ class DatasetClient:
 
         logging.info(f"Validated dataset_id successfully: {dataset_id}. Starting retrieval...")
 
+        # Returns the latest versions info plus dataset wide immutable fields
         return get_dataset_info(
             datasets_table=self.datasets_table,
             dataset_versions_table=self.dataset_versions_table,
@@ -81,7 +88,7 @@ class DatasetClient:
                                 *,
                                 dataset_id: str,
                                 label_type: str,
-                                description: str,
+                                description: str | None,
                                 selection_config: dict,
                                 split_strategy_name: str) -> dict:
         """
@@ -124,7 +131,7 @@ class DatasetClient:
             logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
 
-        if dataset_info["exists"]:
+        if dataset_info["dataset_info"]["exists"]:
             logging.error(f"Dataset '{dataset_id}' already exists, choose a different name.")
             raise ValueError(f"Dataset '{dataset_id}' already exists, choose a different name.")
 
@@ -192,16 +199,27 @@ class DatasetClient:
         logging.info("Checking if dataset already exists...")
         try:
             dataset_info = self.get_dataset(dataset_id=dataset_id)
-            label_type = dataset_info["label_type"]
-            current_version = dataset_info["latest_version"]
-            new_version = current_version + 1
         except Exception as e:
             logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
 
-        if not dataset_info["exists"]:
+        if not dataset_info["dataset_info"]["exists"]:
             logging.error(f"Dataset '{dataset_id}' does not exist.")
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
+
+        label_type = dataset_info["dataset_info"]["label_type"]
+        current_version = dataset_info["dataset_info"]["latest_version"]
+        new_version = current_version + 1
+
+        # We must check that the selection config's allowed_classes is a subset of the dataset wide allowed_classes
+        requested_allowed = set(selection_config["allowed_classes"])
+        dataset_allowed = set(dataset_info["dataset_info"]["allowed_classes"])
+
+        if not requested_allowed.issubset(dataset_allowed):
+            raise ValueError(
+                f"Requested update classes {sorted(requested_allowed)} must be a subset of "
+                f"{sorted(dataset_allowed)}. To add classes, make a new dataset."
+            )
 
         # 3. Submit task to S3
         payload = {"user": self.user,
@@ -246,14 +264,15 @@ class DatasetClient:
         logging.info("Validation done. Now retrieving the dataset metadata...")
         try:
             dataset_record = self.get_dataset(dataset_id=dataset_id)
-            label_type = dataset_record["label_type"]
         except Exception as e:
             logging.error(f"Failed loading dataset metadata for '{dataset_id}': {str(e)}")
             raise
 
-        if not dataset_record["exists"]:
+        if not dataset_record["dataset_info"]["exists"]:
             logging.error(f"Dataset '{dataset_id}' does not exist.")
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
+
+        label_type = dataset_record["dataset_info"]["label_type"]
 
         # 3. Submit task to S3
         payload = {"user": self.user,

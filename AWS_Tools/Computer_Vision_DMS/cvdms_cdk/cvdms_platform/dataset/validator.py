@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any, Literal
 
+from common.general_utils.class_normalizer import canonicalize_class_name
+
 _ALLOWED_LABEL_TYPES = {
     "single-label",
     "multi-label",
@@ -132,6 +134,11 @@ def validate_description(description: str) -> str:
 def validate_optional_description(description: str | None) -> str | None:
     if description is None:
         return None
+    if not isinstance(description, str):
+        raise TypeError("description must be a string or None.")
+    description = description.strip()
+    if not description:
+        return None
     return validate_description(description)
 
 def validate_split_strategy_name(split_strategy_name: str) -> str:
@@ -214,26 +221,6 @@ def _validate_nonempty_string_list(
 
     return cleaned
 
-def _validate_enum_string_list(
-    *,
-    name: str,
-    value: Any,
-    allowed_values: set[str],
-) -> list[str]:
-    cleaned = _validate_nonempty_string_list(
-        name=name,
-        value=value,
-        normalize=False,
-    )
-
-    invalid = [item for item in cleaned if item not in allowed_values]
-    if invalid:
-        raise ValueError(
-            f"{name} contains invalid values {invalid}. Allowed values: {sorted(allowed_values)}"
-        )
-
-    return cleaned
-
 def _validate_date_range(*, name: str, value: Any) -> list[str]:
     if not isinstance(value, list):
         raise TypeError(f"{name} must be a 2-element list of ISO date strings.")
@@ -290,6 +277,26 @@ def _validate_int_range(
 
     return [low, high]
 
+def _validate_enum_string_list(
+    *,
+    name: str,
+    value: Any,
+    allowed_values: set[str],
+) -> list[str]:
+    cleaned = _validate_nonempty_string_list(
+        name=name,
+        value=value,
+        normalize=True,
+    )
+
+    invalid = [item for item in cleaned if item not in allowed_values]
+    if invalid:
+        raise ValueError(
+            f"{name} contains invalid values {invalid}. Allowed values: {sorted(allowed_values)}"
+        )
+
+    return cleaned
+
 def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any]:
     """
     Validate selection_config for dataset create/update selection.
@@ -321,11 +328,29 @@ def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any
 
     validated: dict[str, Any] = {}
 
-    validated["allowed_classes"] = _validate_nonempty_string_list(
+    allowed_classes_ls = _validate_nonempty_string_list(
         name="allowed_classes",
         value=selection_config["allowed_classes"],
         normalize=True,
     )
+
+    canon_allowed: list[str] = []
+    seen_canon: set[str] = set()
+
+    for raw in allowed_classes_ls:
+        canon = canonicalize_class_name(
+            raw,
+            field_name="class-name",
+            allow_background=False,
+        )
+        if canon in seen_canon:
+            raise ValueError(
+                f"allowed_classes contains duplicate class after canonicalization: {canon}"
+            )
+        seen_canon.add(canon)
+        canon_allowed.append(canon)
+
+    validated["allowed_classes"] = canon_allowed
 
     if "allowed_sources" in selection_config:
         validated["allowed_sources"] = _validate_nonempty_string_list(
@@ -391,7 +416,7 @@ def validate_create_dataset_inputs(
     *,
     dataset_id: str,
     label_type: str,
-    description: str,
+    description: str | None,
     selection_config: dict[str, Any],
     split_strategy_name: str,
 ) -> dict[str, Any]:
@@ -401,7 +426,7 @@ def validate_create_dataset_inputs(
     return {
         "dataset_id": validate_dataset_id(dataset_id),
         "label_type": validate_label_type(label_type),
-        "description": validate_description(description),
+        "description": validate_optional_description(description),
         "selection_config": validate_selection_config(selection_config),
         "split_strategy_name": validate_split_strategy_name(split_strategy_name),
     }

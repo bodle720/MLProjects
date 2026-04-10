@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from common.general_utils.s3_utils import write_s3_obj, parse_s3_uri, read_obj_with_retry
+from common.general_utils.class_normalizer import canonicalize_class_name
 
 TASK_NAME = "[VAL_JOB_DEF_HELPER]"
 
@@ -371,9 +372,7 @@ def create_instance_segmentation_label(line: dict, job_id: str, file_bucket_name
             raise ValueError(f"{TASK_NAME} duplicate instance color in worker response: {hc}")
         seen_colors.add(hc)
 
-        lab = lab.strip().lower()
-        if lab in {"bg", "background"}:
-            raise ValueError(f"{TASK_NAME} instance: reserved class name used: {lab}")
+        lab = canonicalize_class_name(lab, field_name="instance.label", allow_background=False)
 
         parsed.append((hc, lab))
 

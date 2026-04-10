@@ -25,7 +25,7 @@ from dataset_bootstrap.dataset_helpers.coco.common import (
     rgb_to_hex
 )
 
-from cvdms_platform.class_normalizer import canonicalize_class_name
+from common.general_utils.class_normalizer import canonicalize_class_name
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png"}
 

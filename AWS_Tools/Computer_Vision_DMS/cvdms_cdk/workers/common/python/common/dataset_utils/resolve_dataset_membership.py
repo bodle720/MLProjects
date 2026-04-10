@@ -14,7 +14,7 @@ DatasetLabelType = Literal[
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation",
+    "instance-segmentation"
 ]
 
 MembershipMode = Literal["minimal", "enriched"]

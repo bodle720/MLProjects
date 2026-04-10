@@ -1,5 +1,6 @@
 import os
 from typing import Any
+from copy import deepcopy
 
 from common.general_utils.logging_utils import log
 from common.general_utils.ddb_utils import update_job_status
@@ -81,10 +82,9 @@ def _assert_request_shape(
 
     description = request.get("description")
     if description is not None:
-        description = _require_nonempty_string(
-            description,
-            field_name="request.description",
-        )
+        if not isinstance(description, str):
+            raise ValueError("request.description must be a string or null")
+        description = description.strip() or None
 
     return dataset_id, operation, selection_config, split_approach, split_strategy_name, description
 
@@ -132,27 +132,39 @@ def handler(event, context):
         )
 
         # 1) Load existing dataset metadata/invariants
-        dataset_info = get_dataset_info(
+        dataset_state = get_dataset_info(
             datasets_table_name=DATASETS_TABLE_NAME,
             dataset_versions_table_name=DATASET_VERSIONS_TABLE_NAME,
             dataset_id=dataset_id,
         )
 
-        if not dataset_info.get("exists"):
+        if not dataset_state["dataset_info"].get("exists"):
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
-        latest_version = dataset_info["latest_version"]
+        dataset_meta = dataset_state["dataset_info"]
+        latest_meta = dataset_state["latest_version_info"]
+
+        latest_version = dataset_meta["latest_version"]
         new_version = latest_version + 1
-        label_type = dataset_info["label_type"]
+        label_type = dataset_meta["label_type"]
+        dataset_allowed_classes = set(dataset_meta["allowed_classes"])
+        requested_allowed_classes = set(selection_config["allowed_classes"])
+
+        if not requested_allowed_classes.issubset(dataset_allowed_classes):
+            raise ValueError(
+                f"Requested update classes {sorted(requested_allowed_classes)} must be a subset of "
+                f"{sorted(dataset_allowed_classes)}. To add classes, create a new dataset."
+            )
 
         if label_type not in VALID_LABEL_TYPES:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
 
         if split_approach == "maintain":
-            effective_split_strategy_name = dataset_info.get("latest_version_split_strategy")
+            effective_split_strategy_name = latest_meta["split_strategy"]
+
             if not effective_split_strategy_name:
                 raise ValueError(
-                    f"{TASK_NAME} existing dataset missing latest_version_split_strategy "
+                    f"{TASK_NAME} existing latest_version_info missing split_strategy "
                     f"for maintain update on dataset_id={dataset_id}"
                 )
         else:
@@ -162,29 +174,30 @@ def handler(event, context):
                 )
             effective_split_strategy_name = split_strategy_name
 
-        effective_description = (
-            description
-            if description is not None
-            else dataset_info.get("latest_version_description")
-        )
-        if not effective_description:
-            raise ValueError(
-                f"{TASK_NAME} could not determine effective description for dataset_id={dataset_id}"
-            )
+        effective_version_description = description
 
         dataset_membership_table_name = LABEL_TYPE_TO_MEMBERSHIP_TABLE.get(label_type)
         if dataset_membership_table_name is None:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
 
         # 2) Resolve selected imagery rows for add/remove operation
+
+        # For single label updates, we must utilize the dataset wide allowed_classes for the resolve sql, then filter out
+        # undesired classes for this update later.
+        single_label_update_sc = deepcopy(selection_config)
+        single_label_update_sc["allowed_classes"] = dataset_meta["allowed_classes"]
+
         selection_sql_for_update, selected_imagery_rows = resolve_candidate_imagery(
             iceberg_database_name=ICEBERG_DATABASE_NAME,
             label_type=label_type,
-            selection_config=selection_config,
+            selection_config=selection_config if label_type != "single-label" else single_label_update_sc,
             athena_output_s3_uri=ATHENA_OUTPUT_S3,
             athena_workgroup=ATHENA_WORKGROUP,
             task_name=TASK_NAME,
         )
+
+        if label_type == "single-label":
+            selected_imagery_rows = [r for r in selected_imagery_rows if r["label"] in selection_config["allowed_classes"]]
 
         if not selected_imagery_rows:
             raise ValueError(
@@ -284,7 +297,8 @@ def handler(event, context):
             dataset_id=dataset_id,
             new_version=new_version,
             label_type=label_type,
-            description=effective_description,
+            dataset_description=None,
+            version_description=effective_version_description,
             split_strategy_name=effective_split_strategy_name,
             created_by=user,
             operation=operation,
@@ -327,7 +341,7 @@ def handler(event, context):
             "dataset_id": dataset_id,
             "new_version": new_version,
             "label_type": label_type,
-            "description": effective_description,
+            "description": effective_version_description,
             "effective_split_strategy_name": effective_split_strategy_name,
             "operation": operation,
             "split_approach": split_approach,

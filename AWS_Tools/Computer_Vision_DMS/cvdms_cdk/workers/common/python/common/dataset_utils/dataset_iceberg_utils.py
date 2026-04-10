@@ -26,7 +26,6 @@ def write_dataset_membership(
 ) -> dict[str, Any]:
     """
     Build and insert dataset membership rows into the correct Iceberg table.
-
     Returns a small summary dict.
     """
     membership_rows = build_membership_rows(

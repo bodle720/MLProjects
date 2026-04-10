@@ -12,7 +12,7 @@ _MEMBERSHIP_TABLE_BY_LABEL_TYPE: dict[str, str] = {
     "multi-label": "multi_label",
     "object-detection": "object_detection",
     "semantic-segmentation": "semantic_segmentation",
-    "instance-segmentation": "instance_segmentation",
+    "instance-segmentation": "instance_segmentation"
 }
 
 def delete_iceberg_membership(*,

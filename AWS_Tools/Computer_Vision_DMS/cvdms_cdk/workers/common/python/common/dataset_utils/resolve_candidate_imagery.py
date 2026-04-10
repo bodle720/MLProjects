@@ -276,7 +276,7 @@ def build_selection_sql(
         * classes_present: same deduped label array
     - object-detection / semantic-segmentation / instance-segmentation:
         * task-specific *_ids array<string>
-        * classes_present = deduped union of classes across linked artifacts
+        * classes_present = deduped union of classes filtered to allowed_classes (subset)
     """
     query_label_type = _map_dataset_label_type_to_query_label_type(dataset_label_type)
     common_filters = _build_common_filter_clauses(

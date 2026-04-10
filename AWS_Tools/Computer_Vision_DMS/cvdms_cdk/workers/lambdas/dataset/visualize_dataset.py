@@ -34,14 +34,14 @@ _NUMERIC_FIELDS = [
     "contrast_luma_p90_p10",
     "blur_laplacian_var",
     "sat_mean",
-    "colorfulness",
+    "colorfulness"
 ]
 
 _BUCKET_FIELDS = [
     "lighting_bucket",
     "blur_bucket",
     "contrast_bucket",
-    "color_bucket",
+    "color_bucket"
 ]
 
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:

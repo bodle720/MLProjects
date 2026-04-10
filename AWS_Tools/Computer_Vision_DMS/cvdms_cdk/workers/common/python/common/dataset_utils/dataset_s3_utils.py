@@ -19,7 +19,7 @@ def write_s3_artifacts(
     split_strategy_name: str,
     selection_sql: str,
     selection_config: dict[str, Any],
-    split_rows: list[dict[str, Any]],
+    split_rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """
     Write all dataset-version S3 artifacts under:

@@ -17,13 +17,14 @@ _TASK_TYPE_TO_ID_FIELD = {
     "instance-segmentation": "instance_annotation_ids",
 }
 
-def update_dataset_splits(*,
-                            selected_imagery_rows: list[dict[str, Any]],
-                            current_rows: list[dict[str, Any]],
-                            operation: Operation,
-                            split_approach: SplitApproach,
-                            split_strategy_name: str,
-                        ) -> list[dict[str, Any]]:
+def update_dataset_splits(
+    *,
+    selected_imagery_rows: list[dict[str, Any]],
+    current_rows: list[dict[str, Any]],
+    operation: Operation,
+    split_approach: SplitApproach,
+    split_strategy_name: str,
+) -> list[dict[str, Any]]:
     """
     Compute the next dataset-version rows after applying an add/remove operation.
 
@@ -52,6 +53,13 @@ def update_dataset_splits(*,
 
     - split_approach="rebalance":
         recompute splits across the full next-version image universe
+
+    Output contract:
+    - every returned row has a valid split
+    - every returned row has consistent payload fields
+    - single-label rows always include classes_present = [label]
+    - multi-label rows always include classes_present = labels
+    - structured rows always include normalized classes_present and *_ids
     """
     _validate_operation(operation)
     _validate_split_approach(split_approach)
@@ -73,7 +81,10 @@ def update_dataset_splits(*,
 
     if operation == "remove":
         retained_ids = current_ids - selected_ids
-        retained_rows = [dict(current_by_image_id[image_id]) for image_id in sorted(retained_ids)]
+        retained_rows = [
+            dict(current_by_image_id[image_id])
+            for image_id in sorted(retained_ids)
+        ]
         added_rows: list[dict[str, Any]] = []
 
     else:  # add
@@ -134,7 +145,7 @@ def _build_maintained_split_rows(
     )
 
     out = retained_rows + assigned_new_rows
-    return _sort_rows_by_image_id(out)
+    return _finalize_rows_for_output(out)
 
 def _build_rebalanced_split_rows(
     *,
@@ -149,10 +160,11 @@ def _build_rebalanced_split_rows(
     prepared_rows = _prepare_rows_for_rebalance(final_rows)
     _require_rows_have_rebalance_fields(prepared_rows)
 
-    return _assign_splits(
+    assigned_rows = _assign_splits(
         rows=prepared_rows,
         split_strategy_name=split_strategy_name,
     )
+    return _finalize_rows_for_output(assigned_rows)
 
 def _merge_overlapping_rows_for_add(
     *,
@@ -206,8 +218,6 @@ def _merge_overlapping_rows_for_add(
         )
         merged_labels = _merge_string_arrays(current_labels, selected_labels)
         merged["labels"] = merged_labels
-
-        # Helpful for rebalance; harmless if present in maintain output.
         merged["classes_present"] = list(merged_labels)
         return merged
 
@@ -232,7 +242,10 @@ def _merge_overlapping_rows_for_add(
             selected_row.get("classes_present"),
             field_name="classes_present",
         )
-        merged["classes_present"] = _merge_string_arrays(current_classes, selected_classes)
+        merged["classes_present"] = _merge_string_arrays(
+            current_classes,
+            selected_classes,
+        )
         return merged
 
     raise ValueError(f"Unsupported dataset_label_type: {current_label_type!r}")
@@ -307,6 +320,19 @@ def _prepare_rows_for_rebalance(rows: list[dict[str, Any]]) -> list[dict[str, An
 
     return out
 
+def _finalize_rows_for_output(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Normalize all final rows before returning them to downstream writers.
+
+    This guarantees that:
+    - split is present and valid on every output row
+    - single-label and multi-label rows always carry classes_present
+    - structured rows have normalized classes_present and *_ids
+    """
+    prepared = _prepare_rows_for_rebalance(rows)
+    _require_rows_have_existing_split(prepared)
+    return _sort_rows_by_image_id(prepared)
+
 def _index_rows_by_image_id(
     *,
     rows: list[dict[str, Any]],
@@ -366,7 +392,10 @@ def _require_rows_have_rebalance_fields(rows: list[dict[str, Any]]) -> None:
 def _sort_rows_by_image_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         rows,
-        key=lambda row: _require_nonempty_string(row.get("image_id"), field_name="image_id"),
+        key=lambda row: _require_nonempty_string(
+            row.get("image_id"),
+            field_name="image_id",
+        ),
     )
 
 def _merge_string_arrays(left: list[str], right: list[str]) -> list[str]:

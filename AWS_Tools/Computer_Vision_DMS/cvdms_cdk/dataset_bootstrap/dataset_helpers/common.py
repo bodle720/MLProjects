@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-from cvdms_platform.class_normalizer import canonicalize_class_name
+from common.general_utils.class_normalizer import canonicalize_class_name
 
 TASK_CHOICES = (
     "single-label",

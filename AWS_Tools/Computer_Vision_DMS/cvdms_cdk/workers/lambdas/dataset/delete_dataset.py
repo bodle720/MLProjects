@@ -90,18 +90,18 @@ def handler(event, context):
             "deleted_ddb_records": False,
         }
 
-        dataset_info = get_dataset_info(
+        dataset_ref = get_dataset_info(
             datasets_table_name=DATASETS_TABLE_NAME,
             dataset_versions_table_name=DATASET_VERSIONS_TABLE_NAME,
             dataset_id=dataset_id,
         )
 
-        if not dataset_info.get("exists"):
+        if not dataset_ref["dataset_info"].get("exists"):
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
         result["dataset_id_exists"] = True
 
-        dataset_label_type = dataset_info.get("label_type")
+        dataset_label_type = dataset_ref["dataset_info"].get("label_type")
         if not dataset_label_type:
             raise ValueError(
                 f"Dataset '{dataset_id}' exists but is missing required field 'label_type'."

@@ -38,13 +38,22 @@ def handler(event, context):
     # ---------------------------------------------------------
     # 2. Release infrastructure lock
     # ---------------------------------------------------------
-    release_success, release_msg = release_lock(
-        job_id,
-        LOCK_TABLE_NAME,
-        LOG_FIREHOSE_STREAM_NAME,
-        user=user,
-        event_type=event_type
-    )
+    try:
+        release_success, release_msg = release_lock(
+            job_id,
+            LOCK_TABLE_NAME,
+            LOG_FIREHOSE_STREAM_NAME,
+            user=user,
+            event_type=event_type
+        )
+    except Exception as e:
+        release_success = False
+        release_msg = f"exception:{e}"
+        log(
+            job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Lock release threw exception: {e}",
+            level="error"
+        )
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
         f"{TASK_NAME} Lock release attempt complete. Success={release_success}, msg={release_msg}")

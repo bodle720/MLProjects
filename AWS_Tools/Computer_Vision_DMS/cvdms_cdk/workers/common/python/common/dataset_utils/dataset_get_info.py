@@ -16,16 +16,6 @@ def get_dataset_info(
     """
     Return normalized dataset information for the latest version.
 
-    Returns:
-        {"exists": False}
-    if the dataset row does not exist.
-
-    Otherwise, returns:
-        {
-            "exists": True,
-            ...
-        }
-
     This helper is intentionally DDB-only. It relies on the dataset row for
     dataset-level state and the latest dataset_versions row for current version
     metadata, counts, and artifact locations.
@@ -35,8 +25,13 @@ def get_dataset_info(
         datasets_table_name=datasets_table_name,
         dataset_id=dataset_id
     )
+
     if dataset_item is None:
-        return {"exists": False}
+        res = {
+            "dataset_info": {"exists": False},
+            "latest_version_info": None,
+        }
+        return res
 
     latest_version = _coerce_required_int(
         dataset_item.get("latest_version"),
@@ -119,57 +114,38 @@ def build_get_dataset_result(
     dataset_item: dict[str, Any],
     dataset_version_item: dict[str, Any],
 ) -> dict[str, Any]:
+
     result: dict[str, Any] = {
-        "exists": True,
-
-        # Dataset-level fields
-        "dataset_id": dataset_item["dataset_id"],
-        "label_type": dataset_item["label_type"],
-        "created_at": dataset_item.get("created_at"),
-        "created_by": dataset_item.get("created_by"),
-        "latest_version": _coerce_required_int(
-            dataset_item.get("latest_version"),
-            field_name="latest_version",
-        ),
-        "latest_version_created_at": dataset_item.get("latest_version_created_at"),
-        "latest_version_description": dataset_item.get("latest_version_description"),
-        "last_modified_by": dataset_item.get("last_modified_by"),
-
-        # Latest-version fields
-        "version_created_at": dataset_version_item.get("created_at"),
-        "operation": dataset_version_item.get("operation"),
-        "split_approach": dataset_version_item.get("split_approach"),
-        "latest_version_split_strategy": dataset_version_item.get("split_strategy_name"),
-        "version_description": dataset_version_item.get("version_description"),
-
-        # Counts
-        "total_image_count": _coerce_required_int(
-            dataset_version_item.get("total_image_count"),
-            field_name="total_image_count",
-        ),
-        "total_train_count": _coerce_required_int(
-            dataset_version_item.get("total_train_count"),
-            field_name="total_train_count",
-        ),
-        "total_val_count": _coerce_required_int(
-            dataset_version_item.get("total_val_count"),
-            field_name="total_val_count",
-        ),
-        "total_test_count": _coerce_required_int(
-            dataset_version_item.get("total_test_count"),
-            field_name="total_test_count",
-        ),
-
-        # Artifact pointers
-        "version_s3_prefix": dataset_version_item.get("version_s3_prefix"),
-        "selection_sql_uri": dataset_version_item.get("selection_sql_uri"),
-        "selection_config_uri": dataset_version_item.get("selection_config_uri"),
-        "metadata_json_uri": dataset_version_item.get("metadata_json_uri"),
-        "membership_enriched_csv_uri": dataset_version_item.get("membership_enriched_csv_uri"),
-        "manifest_uris": dataset_version_item.get("manifest_uris"),
-
-        # Useful raw metadata that update_dataset will likely want later
-        "selection_config": dataset_version_item.get("selection_config"),
+        "dataset_info": {
+            "exists": True,
+            "dataset_id": dataset_item["dataset_id"],
+            "latest_version": _coerce_required_int(dataset_item.get("latest_version"),field_name="latest_version"),
+            "label_type": dataset_item["label_type"],
+            "allowed_classes": dataset_item["allowed_classes"],
+            "created_at": dataset_item.get("created_at"),
+            "created_by": dataset_item.get("created_by"),
+            "last_modified_by": dataset_item.get("last_modified_by"),
+            "dataset_description": dataset_item.get("dataset_description")
+        },
+         "latest_version_info": {
+            "version": _coerce_required_int(dataset_version_item.get("version"),field_name="version"),
+            "created_at": dataset_version_item.get("created_at"),
+            "description": dataset_version_item.get("description"),
+            "operation": dataset_version_item.get("operation"),
+            "split_approach": dataset_version_item.get("split_approach"),
+            "split_strategy": dataset_version_item.get("split_strategy_name")     ,
+            "total_image_count": _coerce_required_int(dataset_version_item.get("total_image_count"),field_name="total_image_count"),
+            "total_train_count": _coerce_required_int(dataset_version_item.get("total_train_count"),field_name="total_train_count"),
+            "total_val_count": _coerce_required_int(dataset_version_item.get("total_val_count"),field_name="total_val_count"),
+            "total_test_count": _coerce_required_int(dataset_version_item.get("total_test_count"),field_name="total_test_count"),
+            "s3_prefix": dataset_version_item.get("version_s3_prefix"),
+            "selection_sql_uri": dataset_version_item.get("selection_sql_uri"),
+            "selection_config_uri": dataset_version_item.get("selection_config_uri"),
+            "metadata_json_uri": dataset_version_item.get("metadata_json_uri"),
+            "membership_enriched_csv_uri": dataset_version_item.get("membership_enriched_csv_uri"),
+            "manifest_uris": dataset_version_item.get("manifest_uris"),
+            "selection_config": dataset_version_item.get("selection_config")
+         }
     }
 
     return result

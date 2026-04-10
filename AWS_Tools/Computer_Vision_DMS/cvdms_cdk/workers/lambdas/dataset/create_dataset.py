@@ -28,10 +28,17 @@ VALID_LABEL_TYPES = {
     "instance-segmentation",
 }
 
-def _assert_request_shape(request: dict[str, Any]) -> tuple[str, str, str, dict[str, Any], str]:
-    dataset_id = _require_nonempty_string(request.get("dataset_id"), field_name="request.dataset_id")
-    label_type = _require_nonempty_string(request.get("label_type"), field_name="request.label_type")
-    description = _require_nonempty_string(request.get("description"), field_name="request.description")
+def _assert_request_shape(
+    request: dict[str, Any],
+) -> tuple[str, str, str | None, dict[str, Any], str]:
+    dataset_id = _require_nonempty_string(
+        request.get("dataset_id"),
+        field_name="request.dataset_id",
+    )
+    label_type = _require_nonempty_string(
+        request.get("label_type"),
+        field_name="request.label_type",
+    )
     split_strategy_name = _require_nonempty_string(
         request.get("split_strategy_name"),
         field_name="request.split_strategy_name",
@@ -43,6 +50,12 @@ def _assert_request_shape(request: dict[str, Any]) -> tuple[str, str, str, dict[
     selection_config = request.get("selection_config")
     if not isinstance(selection_config, dict):
         raise ValueError("request.selection_config must be an object")
+
+    description = request.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise ValueError("request.description must be a string or null")
+        description = description.strip() or None
 
     return dataset_id, label_type, description, selection_config, split_strategy_name
 
@@ -170,7 +183,8 @@ def handler(event, context):
             dataset_id=dataset_id,
             new_version=1,
             label_type=label_type,
-            description=description,
+            dataset_description=description,
+            version_description=description,
             split_strategy_name=split_strategy_name,
             created_by=user,
             operation="create",

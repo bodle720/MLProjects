@@ -33,7 +33,6 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
       - lock exists
       - locked == True
       - locked_by == job_id
-
     Returns (True, "") if ok, else (False, reason).
     """
     try:

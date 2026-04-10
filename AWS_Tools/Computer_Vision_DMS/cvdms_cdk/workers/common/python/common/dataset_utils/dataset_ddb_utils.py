@@ -16,7 +16,8 @@ def write_ddb_artifacts(
     dataset_id: str,
     new_version: int,
     label_type: str,
-    description: str,
+    dataset_description: str | None,
+    version_description: str | None,
     split_strategy_name: str,
     created_by: str,
     operation: str,
@@ -28,12 +29,37 @@ def write_ddb_artifacts(
     """
     Write the canonical dataset and dataset_version DynamoDB records.
 
+    Contract:
+    - datasets table:
+        * dataset_id
+        * latest_version
+        * label_type
+        * allowed_classes              (immutable after create)
+        * created_at                   (create only)
+        * created_by                   (create only)
+        * last_modified_by
+        * dataset_description          (immutable after create)
+
+    - dataset_versions table:
+        * dataset_id
+        * version
+        * label_type
+        * created_at
+        * operation
+        * split_approach
+        * split_strategy_name
+        * description                  (version-specific)
+        * selection_config             (exact request config for this version)
+        * created_by
+        * split counts
+        * artifact pointers
+
     Behavior:
     - new_dataset=True:
-        create the dataset row and create version row new_version
+        create the dataset row and create version row 1
     - new_dataset=False:
-        update the existing dataset row to point at new_version and create the
-        new version row new_version
+        update ONLY mutable dataset-row fields (latest_version, last_modified_by)
+        and create the new version row
 
     This should only be called after:
     1. membership rows were successfully inserted into Iceberg
@@ -52,20 +78,51 @@ def write_ddb_artifacts(
             "new_dataset=False cannot be used with new_version=1"
         )
 
+    if not isinstance(selection_config, dict):
+        raise TypeError("selection_config must be a dict")
+
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     count_summary = build_split_count_summary(split_rows=split_rows)
+
+    allowed_classes = selection_config.get("allowed_classes")
+    if not isinstance(allowed_classes, list) or not allowed_classes:
+        raise ValueError("selection_config.allowed_classes must be a non-empty list")
+
+    # Immutable dataset-level description: only written on create.
+    if new_dataset:
+        effective_dataset_description = _normalize_optional_string(dataset_description)
+        if effective_dataset_description is None:
+            effective_dataset_description = _default_dataset_description(
+                label_type=label_type,
+                created_at=created_at,
+            )
+    else:
+        effective_dataset_description = None  # must not be written/updated
+
+    # Version-level description: written for every version.
+    effective_version_description = _normalize_optional_string(version_description)
+    if effective_version_description is None:
+        effective_version_description = _default_version_description(
+            new_dataset=new_dataset,
+            label_type=label_type,
+            operation=operation,
+            split_approach=split_approach,
+            version=new_version,
+            created_at=created_at,
+        )
 
     dataset_item: dict[str, Any] = {
         "dataset_id": dataset_id,
         "latest_version": new_version,
         "label_type": label_type,
-        "latest_version_created_at": created_at,
-        "latest_version_description": description,
         "last_modified_by": created_by,
     }
+
     if new_dataset:
+        dataset_item["allowed_classes"] = allowed_classes
         dataset_item["created_at"] = created_at
         dataset_item["created_by"] = created_by
+        dataset_item["dataset_description"] = effective_dataset_description
 
     dataset_version_item: dict[str, Any] = {
         "dataset_id": dataset_id,
@@ -75,7 +132,7 @@ def write_ddb_artifacts(
         "operation": operation,
         "split_approach": split_approach,
         "split_strategy_name": split_strategy_name,
-        "version_description": description,
+        "description": effective_version_description,
         "selection_config": selection_config,
         "created_by": created_by,
         "total_image_count": count_summary["total_image_count"],
@@ -170,16 +227,12 @@ def transact_write_dataset_and_version(
                 ),
                 "UpdateExpression": (
                     "SET latest_version = :new_version, "
-                    "latest_version_created_at = :latest_version_created_at, "
-                    "latest_version_description = :latest_version_description, "
                     "last_modified_by = :last_modified_by"
                 ),
                 "ExpressionAttributeValues": to_ddb_item(
                     {
                         ":expected_prev": expected_previous_version,
                         ":new_version": dataset_item["latest_version"],
-                        ":latest_version_created_at": dataset_item["latest_version_created_at"],
-                        ":latest_version_description": dataset_item["latest_version_description"],
                         ":last_modified_by": dataset_item["last_modified_by"],
                     }
                 ),
@@ -259,3 +312,27 @@ def _require_valid_split(value: Any) -> str:
     if split not in {"train", "val", "test"}:
         raise ValueError(f"Invalid split: {value!r}")
     return split
+
+def _normalize_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+def _default_dataset_description(*, label_type: str, created_at: str) -> str:
+    return f"{label_type} dataset created at {created_at}"
+
+def _default_version_description(
+    *,
+    new_dataset: bool,
+    label_type: str,
+    operation: str,
+    split_approach: str,
+    version: int,
+    created_at: str,
+) -> str:
+    if new_dataset:
+        return f"Initial {label_type} dataset version v{version} created at {created_at}"
+    return (
+        f"Dataset update v{version} ({operation}, {split_approach}) created at {created_at}"
+    )
