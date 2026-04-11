@@ -34,9 +34,6 @@ CSV expected structures:
 ------------------------
 For object-detection CSV input, rows must be grouped by source-ref (all boxes for an image contiguous).
 
-For semantic-segmentation CSV input, the color_map field is expected to be identical across images (essentially a dataset-wide mapping, regardless of classes
-present in that particular image itself)
-
 single-label: "source-ref", "class-name"
 multi-label: "source-ref", "labels"
 object-detection: "source-ref", "class-name", "top", "left", "height", "width"
@@ -53,7 +50,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
-from cvdms_platform.class_normalizer import canonicalize_class_name
+from workers.common.python.common.general_utils.class_normalizer import canonicalize_class_name
 
 _V1_SCHEMA = "cvdms.manifest.v1"
 _ALLOWED_EXTS_LC = {".jsonl", ".ndjson", ".manifest", ".csv"}
@@ -186,7 +183,7 @@ def _convert_csv_to_jsonl_input(csv_path: str, *, label_type: str) -> str:
       - single-label-metadata.class-name for single label task
       - multi-label-metadata.class-map for multi-label task (any present values are labels, so map must not be dataset wide; scoped to image only)
       - object-detection.annotations + object-detection-metadata.class-map for bboxes
-      - semantic-segmentation-ref + semantic-segmentation-ref-metadata.internal-color-map (this map contains all classes, same for all images)
+      - semantic-segmentation-ref + semantic-segmentation-ref-metadata.internal-color-map
       - instance-segmentation-metadata.worker-response-ref
 
     This is strict. If required columns are missing or malformed, it raises.
@@ -351,67 +348,91 @@ def _csv_to_gt_semantic_seg(csv_file: Path, out_tmp: Path) -> None:
         reader = csv.DictReader(fin)
         _require_columns(reader, {"source-ref", "semantic-segmentation-ref", "color_map"})
 
-        canon_cm_str = None
-        icm: Dict[str, Dict[str, Any]] = {}
         for i, row in enumerate(reader, start=2):
             src = (row.get("source-ref") or "").strip()
             mask = (row.get("semantic-segmentation-ref") or "").strip()
             cm_raw = (row.get("color_map") or "").strip()
 
             if not cm_raw or not mask or not src:
-                raise ValueError(f"CSV line {i}: color_map, source-ref, and semantic-segmentation-ref is required for semantic-segmentation")
+                raise ValueError(
+                    f"CSV line {i}: color_map, source-ref, and semantic-segmentation-ref are required "
+                    f"for semantic-segmentation"
+                )
 
             if not _is_valid_s3_uri(src) or not _is_valid_s3_uri(mask):
-                raise ValueError(f"CSV line {i}: source-ref and semantic-segmentation-ref must be valid S3 URIs.")
+                raise ValueError(
+                    f"CSV line {i}: source-ref and semantic-segmentation-ref must be valid S3 URIs."
+                )
 
             try:
-                cm = _parse_json_object_line(line = cm_raw)
-                canon = json.dumps(cm, sort_keys=True, separators=(",", ":"))
+                cm = _parse_json_object_line(line=cm_raw)
             except Exception as e:
                 raise ValueError(f"CSV line {i}: color_map is not valid JSON: {e}")
 
             if cm is None or not cm:
                 raise ValueError(f"CSV line {i}: color_map must be a non-empty JSON object")
 
-            # Guarantee every row has identical color_map value, or, for the first row calculate the icm.
-            if canon_cm_str is None:
-                canon_cm_str = canon
+            normalized_keys = [
+                canonicalize_class_name(k, field_name="class-name", allow_background=True)
+                for k in cm.keys()
+            ]
 
-                normalized_keys = [
-                    canonicalize_class_name(k, field_name="class-name", allow_background=True)
-                    for k in cm.keys()
-                ]
+            present_reserved_keys = [k for k in normalized_keys if k in _RESERVED_CLASS_NAMES_LC]
+            present_bg_keys = [k for k in normalized_keys if k in {"bg", "background"}]
 
-                present_reserved_keys = [k for k in normalized_keys if k in _RESERVED_CLASS_NAMES_LC]
-                present_bg_keys = [k for k in normalized_keys if k in {"bg", "background"}]
+            if len(present_bg_keys) != 1:
+                raise ValueError(
+                    f"CSV line {i}: semantic color_map must include exactly one of 'bg' or 'background' class"
+                )
 
-                # must have exactly one bg-ish key
-                if len(present_bg_keys) != 1:
-                    raise ValueError(f"CSV line {i}: semantic color_map must include exactly one of 'bg' or 'background' class")
+            reserved_present_classes = set(present_reserved_keys) - set(present_bg_keys)
+            if reserved_present_classes:
+                raise ValueError(
+                    f"CSV line {i}: semantic color_map contains reserved classes: {reserved_present_classes}"
+                )
 
-                reserved_present_classes = set(present_reserved_keys) - set(present_bg_keys)
-                if reserved_present_classes:
-                    raise ValueError(f"CSV line {i}: semantic color_map contains reserved classes: {reserved_present_classes}")
+            icm: Dict[str, Dict[str, Any]] = {}
+            seen_class_names = set()
+            seen_hex_colors = set()
 
-                # build internal-color-map GT shape with numeric keys
-                k = 0
-                for class_name, colors_list in cm.items():
-                    class_name_normed = canonicalize_class_name(class_name, field_name="class-name", allow_background=True)
+            k = 0
+            for class_name, colors_list in cm.items():
+                class_name_normed = canonicalize_class_name(
+                    class_name,
+                    field_name="class-name",
+                    allow_background=True,
+                )
 
-                    if not isinstance(colors_list, list):
-                        raise ValueError(f"CSV line {i}: color_map[{class_name}] must be of type list")
+                if class_name_normed in seen_class_names:
+                    raise ValueError(
+                        f"CSV line {i}: semantic color_map repeats class after normalization: {class_name_normed}"
+                    )
+                seen_class_names.add(class_name_normed)
 
-                    if len(colors_list) != 1:
-                        raise ValueError(f"CSV line {i}: semantic color_map[{class_name}] must have exactly 1 color (list of length 1)")
+                if not isinstance(colors_list, list):
+                    raise ValueError(f"CSV line {i}: color_map[{class_name}] must be of type list")
 
-                    color = colors_list[0]
-                    _require_hex_rrggbb(color, f"CSV line {i}: hex color: {color}")
+                if len(colors_list) != 1:
+                    raise ValueError(
+                        f"CSV line {i}: semantic color_map[{class_name}] must have exactly 1 color "
+                        f"(list of length 1)"
+                    )
 
-                    icm[str(k)] = {"class-name": class_name_normed, "hex-color": color}
-                    k += 1
-            else:
-                if canon != canon_cm_str:
-                    raise ValueError(f"CSV line {i}: all color_map values expected to be identical.")
+                color = colors_list[0]
+                _require_hex_rrggbb(color, f"CSV line {i}: hex color: {color}")
+
+                color_lc = color.lower()
+                if color_lc in seen_hex_colors:
+                    raise ValueError(
+                        f"CSV line {i}: semantic color_map repeats hex color across classes: {color}"
+                    )
+                seen_hex_colors.add(color_lc)
+
+                icm[str(k)] = {
+                    "class-name": class_name_normed,
+                    "hex-color": color_lc,
+                }
+                k += 1
 
             obj = {
                 "source-ref": src,

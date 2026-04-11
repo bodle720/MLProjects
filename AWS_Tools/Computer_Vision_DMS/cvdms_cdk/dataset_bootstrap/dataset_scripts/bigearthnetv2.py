@@ -26,10 +26,10 @@ from dataset_bootstrap.dataset_helpers.common import (
 class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
     dataset_name = "bigearthnet-v2"
     supported_tasks = {"multi-label"}
+    # Produces PNGs from extracted tiffs
 
     BIGEARTHNET_S2_URL = "https://zenodo.org/records/10891137/files/BigEarthNet-S2.tar.zst?download=1"
     BIGEARTHNET_METADATA_URL = "https://zenodo.org/records/10891137/files/metadata.parquet?download=1"
-    BIGEARTHNET_REFERENCE_MAPS_URL = "https://zenodo.org/records/10891137/files/Reference_Maps.tar.zst?download=1"
 
     def bootstrap(self, config: BootstrapConfig, s3_client) -> BootstrapResult:
         self.validate_task(config.task)

@@ -213,9 +213,10 @@ def create_semantic_segmentation_label(line: dict, job_id: str, file_bucket_name
     class_to_hex: dict[str, str] = {}
     for cn, hc_ls in color_map.items():
         if not isinstance(cn, str) or not cn.strip():
-            continue
+            raise ValueError(f"{TASK_NAME} semantic-segmentation invalid class: {cn}")
+
         if not isinstance(hc_ls, list) or not hc_ls:
-            continue
+            raise ValueError(f"{TASK_NAME} semantic-segmentation invalid hex color list: {hc_ls}")
 
         if len(hc_ls) != 1:
             raise ValueError(f"{TASK_NAME} semantic color map has hex list of len greater than 1")

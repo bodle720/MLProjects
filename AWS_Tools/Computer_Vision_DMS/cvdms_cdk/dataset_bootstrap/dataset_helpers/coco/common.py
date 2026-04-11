@@ -19,6 +19,7 @@ COCO_STUFFTHINGMAPS_URL = (
     "http://calvin.inf.ed.ac.uk/wp-content/uploads/data/cocostuffdataset/"
     "stuffthingmaps_trainval2017.zip"
 )
+
 COCO_STUFF_LABELS_URL = "https://raw.githubusercontent.com/nightrome/cocostuff/master/labels.txt"
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -35,14 +36,23 @@ def find_train_images_dir(root: Path) -> Path | None:
         return None
 
     direct = root / COCO_SPLIT
-    if direct.is_dir():
+    if _looks_like_coco_train_images_dir(direct):
         return direct
 
     for candidate in root.rglob(COCO_SPLIT):
-        if candidate.is_dir():
+        if _looks_like_coco_train_images_dir(candidate):
             return candidate
 
     return None
+
+def _looks_like_coco_train_images_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+
+    return any(
+        child.is_file() and child.suffix.lower() in {".jpg", ".jpeg"}
+        for child in path.iterdir()
+    )
 
 def find_file_named(root: Path, filename: str) -> Path | None:
     if not root.exists():
@@ -86,7 +96,7 @@ def resolve_train_images_dir(
         old_train_zip = old_download_dir / "train2017.zip"
         if old_train_zip.is_file():
             train_zip_path = old_train_zip
-            reuse_stats["reused_train_images"] = True
+            reuse_stats["reused_train_images_zip"] = True
 
     if train_zip_path is None:
         train_zip_path = download_http_file(
@@ -270,8 +280,7 @@ def color_for_index(idx: int) -> tuple[int, int, int]:
         1 if g == 0 else g,
         1 if b == 0 else b,
     )
-    if rgb == (0, 0, 0):
-        return 255, 0, 0
+
     return rgb
 
 def rgb_to_hex(rgb: tuple[int, int, int]) -> str:

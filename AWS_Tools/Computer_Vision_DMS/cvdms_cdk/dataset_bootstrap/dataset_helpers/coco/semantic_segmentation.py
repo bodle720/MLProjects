@@ -33,6 +33,7 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
         "reused_train_images": False,
+        "reused_train_images_zip": False,
         "reused_stuffthingmaps_zip": False,
         "reused_stuffthingmaps_dir": False,
         "reused_stuff_labels": False,
@@ -217,15 +218,22 @@ def _build_semantic_rgb_mask_and_color_map(
     }
 
     unique_ids = sorted(int(x) for x in np.unique(label_map).tolist())
+
+    # bg/void do not count toward foreground class capacity
+    non_background_ids = [label_id for label_id in unique_ids if label_id not in {0, 255}]
+    if len(non_background_ids) > 255:
+        raise ValueError(
+            f"Semantic mask has too many non-background classes for uint8 indexed output: "
+            f"{len(non_background_ids)} > 255 ({mask_path})"
+        )
+
     for label_id in unique_ids:
-        # 0 is unlabeled/background in the COCO-Stuff line-indexed setup;
-        # 255 is the documented void/unlabeled sentinel in stuffthingmaps.
         if label_id in {0, 255}:
             continue
 
         class_name = id_to_name.get(label_id)
         if not class_name:
-            continue
+            raise ValueError(f"Unknown COCO-Stuff label id {label_id} in mask: {mask_path}")
 
         color = color_for_index(label_id)
         hex_color = rgb_to_hex(color)

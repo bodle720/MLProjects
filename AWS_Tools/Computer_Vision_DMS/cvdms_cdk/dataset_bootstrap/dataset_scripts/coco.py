@@ -9,7 +9,7 @@ from dataset_bootstrap.dataset_helpers.coco.instance_segmentation import coco_in
 
 class CocoBootstrapper(DatasetBootstrapper):
     dataset_name = "coco"
-    supported_exts = [".jpg", ".jpeg", ".png"]
+    supported_exts = {".jpg", ".jpeg", ".png"}
     supported_tasks = {
         "object-detection",
         "semantic-segmentation",

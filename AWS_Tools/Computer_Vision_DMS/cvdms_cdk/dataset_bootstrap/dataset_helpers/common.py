@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import shutil
 
 from common.general_utils.class_normalizer import canonicalize_class_name
 
@@ -449,12 +450,6 @@ def format_bytes(num_bytes: int) -> str:
 
     return f"{value:.1f} {units[unit_idx]}"
 
-def extract_zip(zip_path: Path, destination_dir: Path) -> Path:
-    ensure_dir(destination_dir)
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        archive.extractall(destination_dir)
-    return destination_dir
-
 # -------------------------------------------------------------------
 # Internal manifest-row builders
 # These create a small normalized internal representation.
@@ -692,6 +687,7 @@ def _normalize_semantic_color_map(color_map: Any) -> dict[str, list[str]]:
 
     normalized: dict[str, list[str]] = {}
     saw_background = False
+    seen_hex_colors: set[str] = set()
 
     for raw_class_name, raw_colors in color_map.items():
 
@@ -720,6 +716,10 @@ def _normalize_semantic_color_map(color_map: Any) -> dict[str, list[str]]:
 
         raw_hex = raw_colors[0]
         hex_color = _normalize_hex_color(raw_hex, field_name=f"color_map['{raw_class_name}'][0]")
+
+        if hex_color in seen_hex_colors:
+            raise ValueError(f"Duplicate hex color in color_map is not allowed: {hex_color}")
+        seen_hex_colors.add(hex_color)
 
         normalized[class_name] = [hex_color]
 
@@ -777,3 +777,26 @@ def _number_to_csv_cell(value: int | float | str) -> str:
         s = whole + "." + (frac + "0000")[:4]
 
     return s
+
+def extract_zip(zip_path: Path, destination_dir: Path) -> Path:
+    ensure_dir(destination_dir)
+    dest_root = destination_dir.resolve()
+
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        for member in archive.infolist():
+            target = (dest_root / member.filename).resolve()
+
+            try:
+                target.relative_to(dest_root)
+            except ValueError:
+                raise ValueError(f"Unsafe zip member path: {member.filename}")
+
+            if member.is_dir():
+                ensure_dir(target)
+                continue
+
+            ensure_dir(target.parent)
+            with archive.open(member) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+    return destination_dir

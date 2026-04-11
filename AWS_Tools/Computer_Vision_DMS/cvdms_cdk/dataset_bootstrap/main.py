@@ -1,14 +1,18 @@
 # '''
 # EuroSAT → single-label classification
 # BigEarthNet v2.0 → multi-label classification
+# Coco → object-detection, semantic-segmentation and instance-segmentation
+#
+# Note: max_items affects selection/upload/manifest size, not upstream download size
+    # max_items affects selection/upload/manifest size
+    # max_items does not affect the amount of source data downloaded/extracted
+    # reuse dirs are not “shrunk” by a smaller previous max_items value
 #
 # Testing
 # --------------------------------------------------------
 # class TestingConfig:
 #     dataset = "bigearthnet-v2"
-#     # dataset = "eurosat"
 #     task ="multi-label"
-#     # task ="single-label"
 #     output_root = r"C:\cvdms_tmp"
 #     bucket = "cv-imagery-for-ml"
 #     aws_profile = "developers_admin"
@@ -20,17 +24,103 @@
 #
 # args = TestingConfig()
 # --------------------------------------------------------
-#Example CLI call:
+#Example CLI call for each task:
 # cd cvdms_cdk
-# python -m dataset_bootstrap.dataset_bootstrap --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 750
-# python -m dataset_bootstrap.dataset_bootstrap --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\bigearthnet-v2_multi_label_20260408_011409"
-# --------------------------------------------------------
-# '''
+# python -m dataset_bootstrap.main --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500
+# python -m dataset_bootstrap.main --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\bigearthnetv2_multilabel_repo"
+# python -m dataset_bootstrap.main --dataset coco --task object-detection --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500
 
-import argparse
+# --------------------------------------------------------
+
+# Reuse behavior summary
+# -----------------------------------------------------------------------------
+# - Reuse does NOT skip the bootstrap process itself; selected images are still
+#   processed and uploaded to S3 for the new run.
+
+# - Reuse saves time and disk churn by avoiding unnecessary redownloads and
+#   re-extraction of source assets when those files already exist locally.
+
+# EuroSAT (single-label)
+# - No --reuse-from-run-dir support.
+# - The dataset is small enough that keeping reuse logic is not worth the added
+#   complexity or local disk usage.
+#
+# BigEarthNet v2 (multi-label)
+# - Supports --reuse-from-run-dir.
+# - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
+#   "_work" directory itself.
+#   Example:
+#       --reuse-from-run-dir "C:/cvdms_tmp/bigearthnet-v2_multi_label_20260408_011409"
+# - Reuse helps avoid redownloading and/or re-extracting large source assets by
+#   reusing prior "_work/downloads" and "_work/extracted" contents when present.
+# - This is useful because BigEarthNet v2 is large and can take substantial time
+#   and disk space to prepare.
+#
+# COCO (object-detection)
+# - Supports --reuse-from-run-dir.
+# - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
+#   "_work" directory itself.
+#   Example:
+#       --reuse-from-run-dir "C:/cvdms_tmp/coco_object_detection_20260410_230600"
+# - For object-detection, reuse may pull from a previous run's:
+#     * extracted train2017 image directory
+#     * extracted instances_train2017.json
+#     * downloaded train2017.zip
+#     * downloaded annotations_trainval2017.zip
+#
+# COCO (semantic-segmentation)
+# - Supports --reuse-from-run-dir.
+# - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
+#   "_work" directory itself.
+#   Example:
+#       --reuse-from-run-dir "C:/cvdms_tmp/coco_semantic_segmentation_20260410_230600"
+# - For semantic-segmentation, reuse may pull from a previous run's:
+#     * extracted train2017 image directory
+#     * downloaded train2017.zip
+#     * extracted COCO-Stuff stuffthingmaps train2017 directory
+#     * downloaded stuffthingmaps_trainval2017.zip
+#     * downloaded cocostuff_labels.txt
+    # NOTE:
+    # - COCO semantic-segmentation may also point --reuse-from-run-dir at a prior
+    #   COCO object-detection run folder to reuse the shared train2017 images and train2017.zip.
+    # - It will still need COCO-Stuff-specific assets (stuffthingmaps and labels)
+    #   unless those already exist in the referenced run.
+    # - COCO object-detection and semantic-segmentation overlap on the shared
+    #   train2017 images, but semantic-segmentation is NOT a full superset of
+    #   object-detection reuse/downloads.
+    # - Object-detection still needs its own annotation assets
+    #   (instances_train2017.json / annotations_trainval2017.zip), while
+    #   semantic-segmentation needs its own COCO-Stuff assets
+    #   (stuffthingmaps + cocostuff_labels.txt).
+    # - So a prior semantic-segmentation run can help object-detection reuse the
+    #   shared train images, but it may still need to download object-detection-
+    #   specific annotation files, and vice versa.
+    # COCO (instance-segmentation)
+    # - Supports --reuse-from-run-dir.
+    # - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
+    #   "_work" directory itself.
+    #   Example:
+    #       --reuse-from-run-dir "C:/cvdms_tmp/coco_instance_segmentation_20260410_230600"
+    # - For instance-segmentation, reuse may pull from a previous run's:
+    #     * extracted train2017 image directory
+    #     * extracted instances_train2017.json
+    #     * downloaded train2017.zip
+    #     * downloaded annotations_trainval2017.zip
+    # - In the current code, COCO instance-segmentation and object-detection use
+    #   the same upstream COCO image/annotation assets, so either task's prior run
+    #   can serve as a strong reuse source for the other.
+# -----------------------------------------------------------------------------
+# '''
 import sys
-from pathlib import Path
+import argparse
 from datetime import datetime, timezone
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LAYER_PYTHON_ROOT = PROJECT_ROOT / "workers" / "common" / "python"
+
+if str(LAYER_PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(LAYER_PYTHON_ROOT))
 
 import boto3
 
@@ -97,7 +187,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "For --dataset bigearthnet-v2 or coco only. Path to a previous run directory "
-            "(not the _work subdirectory). Its _work/downloads and _work/extracted "
+            "(not the _work subdirectory, but the dir containing  _work folder). Its _work/downloads and _work/extracted "
             "artifacts may be reused to skip re-download and re-extraction.")
         )
     parser.add_argument(
@@ -119,10 +209,8 @@ def main() -> int:
     args = parse_args()
 
     helper = DATASET_HELPERS[args.dataset]
-    helper.validate_task(args.task)
 
     reuse_from_run_dir = None
-
     if args.dataset == "bigearthnet-v2":
         print(
             "WARNING: bigearthnet-v2 is a very large download and may require tens of gigabytes "
@@ -157,6 +245,10 @@ def main() -> int:
     ensure_dir(output_dir)
     ensure_dir(work_dir)
 
+    if args.max_items is not None and args.max_items <= 0:
+        print("max_items, when specified, must be a positive integer.", file=sys.stderr)
+        return 1
+
     config = BootstrapConfig(
         dataset=args.dataset,
         task=args.task,
@@ -170,16 +262,16 @@ def main() -> int:
         work_dir=work_dir
     )
 
-    session = boto3.session.Session(region_name=args.aws_region, profile_name=args.aws_profile)
-    s3_client = session.client("s3")
-
     try:
+        helper.validate_task(args.task)
+        session = boto3.session.Session(region_name=args.aws_region, profile_name=args.aws_profile)
+        s3_client = session.client("s3")
         result = helper.bootstrap(config=config, s3_client=s3_client)
     except NotImplementedError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001
-        print(f"[ERROR] Bootstrap failed: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[ERROR] Initialization or bootstrap failure: {exc}", file=sys.stderr)
         return 1
 
     manifest_jsonl_path = output_dir / "manifest.jsonl"

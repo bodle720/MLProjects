@@ -32,6 +32,7 @@ def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
         "reused_train_images": False,
+        "reused_train_images_zip": False,
         "reused_annotations_zip": False,
         "reused_instances_json": False,
     }
@@ -246,11 +247,18 @@ def _build_instance_worker_response(
     height: int,
     instances: list[dict[str, Any]],
 ) -> dict[str, Any]:
+
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid image size for instance worker response: {width}x{height}")
+
     canvas = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
     # Draw larger objects first so smaller objects remain visible on top.
     sorted_instances = sorted(instances, key=lambda x: x.get("area", 0.0), reverse=True)
+
+    if len(sorted_instances) > 255:
+        raise ValueError("Too many instances for uint8 instance mask; max supported is 255 foreground instances")
 
     worker_instances: list[dict[str, Any]] = []
     for idx, inst in enumerate(sorted_instances, start=1):

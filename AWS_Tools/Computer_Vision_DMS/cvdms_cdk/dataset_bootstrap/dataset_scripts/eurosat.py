@@ -19,7 +19,7 @@ from common.general_utils.class_normalizer import canonicalize_class_name
 class EuroSATBootstrapper(DatasetBootstrapper):
     dataset_name = "eurosat"
     supported_tasks = {"single-label"}
-    supported_exts = [".jpg", ".jpeg", ".png"]
+    supported_exts = {".jpg", ".jpeg", ".png"}
 
     EUROSAT_RGB_ZIP_URL = "https://zenodo.org/records/7711810/files/EuroSAT_RGB.zip?download=1"
 

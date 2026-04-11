@@ -21,6 +21,7 @@ def coco_object_detection(config: BootstrapConfig, s3_client: Any) -> BootstrapR
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
         "reused_train_images": False,
+        "reused_train_images_zip": False,
         "reused_annotations_zip": False,
         "reused_instances_json": False,
     }
