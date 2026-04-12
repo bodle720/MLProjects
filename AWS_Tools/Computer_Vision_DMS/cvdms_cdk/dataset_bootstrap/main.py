@@ -27,8 +27,11 @@
 #Example CLI call for each task:
 # cd cvdms_cdk
 # python -m dataset_bootstrap.main --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500
-# python -m dataset_bootstrap.main --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\bigearthnetv2_multilabel_repo"
-# python -m dataset_bootstrap.main --dataset coco --task object-detection --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500
+# python -m dataset_bootstrap.main --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\bigearthnetv2_multilabel"
+# python -m dataset_bootstrap.main --dataset coco --task object-detection --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
+# python -m dataset_bootstrap.main --dataset coco --task semantic-segmentation --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
+# python -m dataset_bootstrap.main --dataset coco --task instance-segmentation --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
+
 
 # --------------------------------------------------------
 
