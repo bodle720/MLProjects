@@ -3,9 +3,9 @@ from dataset_bootstrap.dataset_helpers.common import (
     BootstrapResult,
     DatasetBootstrapper,
 )
-from dataset_bootstrap.dataset_helpers.coco.object_detection import coco_object_detection
-from dataset_bootstrap.dataset_helpers.coco.semantic_segmentation import coco_semantic_segmentation
-from dataset_bootstrap.dataset_helpers.coco.instance_segmentation import coco_instance_segmentation
+from dataset_bootstrap.dataset_helpers.coco2017.object_detection import coco_object_detection
+from dataset_bootstrap.dataset_helpers.coco2017.semantic_segmentation import coco_semantic_segmentation
+from dataset_bootstrap.dataset_helpers.coco2017.instance_segmentation import coco_instance_segmentation
 
 class CocoBootstrapper(DatasetBootstrapper):
     dataset_name = "coco"

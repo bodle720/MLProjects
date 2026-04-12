@@ -57,7 +57,8 @@ class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
         )
 
         all_items = self._load_metadata_rows(metadata_path)
-        selected_items = deterministic_sample(all_items, config.max_items, config.sample_seed)
+        split_items = self._filter_rows_for_split(all_items, config.split)
+        selected_items = deterministic_sample(split_items, config.max_items, config.sample_seed)
 
         manifest_rows = []
         failures: list[BootstrapFailure] = []
@@ -119,10 +120,12 @@ class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
 
         stats = {
             "upstream_dataset": "BigEarthNet v2.0 Sentinel-2",
+            "requested_split": config.split,
             "metadata_path": str(metadata_path),
             "s2_archive_path": str(s2_archive_path) if s2_archive_path is not None else None,
             "s2_root": str(s2_root),
             "discovered_count": len(all_items),
+            "split_count": len(split_items),
             "selected_count": len(selected_items),
             **reuse_stats,
         }
@@ -219,9 +222,11 @@ class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
                     raise ValueError(f"metadata row {idx}: empty label after stripping for patch_id={patch_id}")
                 normalized_labels.append(lab_norm)
 
-            split_norm = "unknown"
-            if isinstance(split, str) and split.strip():
-                split_norm = split.strip().lower()
+            split_norm = self._normalize_bigearthnet_split(
+                split,
+                row_idx=idx,
+                patch_id=patch_id,
+            )
 
             out.append(
                 {
@@ -416,3 +421,44 @@ class BigEarthNetV2Bootstrapper(DatasetBootstrapper):
                         sample[j] = patch_id
 
         return sample
+
+    def _filter_rows_for_split(
+            self,
+            rows: list[dict[str, Any]],
+            requested_split: str | None) -> list[dict[str, Any]]:
+
+        if requested_split is None:
+            raise ValueError("bigearthnet-v2 requires config.split to be set")
+
+        filtered = [row for row in rows if row.get("split") == requested_split]
+
+        if not filtered:
+            raise ValueError(
+                f"No BigEarthNet rows found for split={requested_split}"
+            )
+
+        return filtered
+
+    def _normalize_bigearthnet_split(self, value: Any, *, row_idx: int, patch_id: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"metadata row {row_idx}: missing split for patch_id={patch_id}")
+
+        raw = value.strip().lower()
+
+        alias_map = {
+            "train": "train",
+            "training": "train",
+            "val": "val",
+            "valid": "val",
+            "validation": "val",
+            "test": "test",
+            "testing": "test",
+        }
+
+        normalized = alias_map.get(raw)
+        if normalized is None:
+            raise ValueError(
+                f"metadata row {row_idx}: unsupported split value for patch_id={patch_id}: {value!r}"
+            )
+
+        return normalized

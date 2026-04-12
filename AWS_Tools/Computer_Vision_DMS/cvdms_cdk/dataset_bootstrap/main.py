@@ -1,119 +1,50 @@
-# '''
-# EuroSAT → single-label classification
-# BigEarthNet v2.0 → multi-label classification
-# Coco → object-detection, semantic-segmentation and instance-segmentation
+# EuroSAT → single-label classification, no --split supported
+# BigEarthNet v2.0 → multi-label classification, supports --split for train, val, or test
+# Coco → object-detection, semantic-segmentation and instance-segmentation, supports --split for train or val
 #
-# Note: max_items affects selection/upload/manifest size, not upstream download size
+# Note: max_items affects selection/upload/manifest size, not upstream download size or amount of data extracted
     # max_items affects selection/upload/manifest size
-    # max_items does not affect the amount of source data downloaded/extracted
-    # reuse dirs are not “shrunk” by a smaller previous max_items value
-#
-# Testing
+
+#Example CLI call:
 # --------------------------------------------------------
-# class TestingConfig:
-#     dataset = "bigearthnet-v2"
-#     task ="multi-label"
-#     output_root = r"C:\cvdms_tmp"
-#     bucket = "cv-imagery-for-ml"
-#     aws_profile = "developers_admin"
-#     aws_region = "us-east-1"
-#     s3_prefix = "seed-datasets"
-#     reuse_from_run_dir = None
-#     max_items = 1500
-#     sample_seed = 42
-#
-# args = TestingConfig()
-# --------------------------------------------------------
-#Example CLI call for each task:
 # cd cvdms_cdk
-# python -m dataset_bootstrap.main --dataset eurosat --task single-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500
-# python -m dataset_bootstrap.main --dataset bigearthnet-v2 --task multi-label --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\bigearthnetv2_multilabel"
-# python -m dataset_bootstrap.main --dataset coco --task object-detection --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
-# python -m dataset_bootstrap.main --dataset coco --task semantic-segmentation --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
-# python -m dataset_bootstrap.main --dataset coco --task instance-segmentation --output-root "C:\cvdms_tmp" --bucket cv-imagery-for-ml --aws-profile developers_admin --max-items 1500 --reuse-from-run-dir "C:\cvdms_tmp\reuse\coco_obj_det_sem_seg_inst_seg"
+# python -m dataset_bootstrap.main --dataset eurosat --task single-label --aws-profile developers_admin --bucket cv-imagery-for-ml --max-items 500
+# python -m dataset_bootstrap.main --dataset bigearthnet-v2 --task multi-label --aws-profile developers_admin --bucket cv-imagery-for-ml --max-items 500 --split train --reuse-from-run-dir "C:\cvdms_files\reuse\bigearthnetv2_multilabel"
+# python -m dataset_bootstrap.main --dataset coco --task object-detection --aws-profile developers_admin --bucket cv-imagery-for-ml --max-items 500 --split train --reuse-from-run-dir "C:\cvdms_files\reuse\coco_obj_det_sem_seg_inst_seg"
 
-
-# --------------------------------------------------------
-
-# Reuse behavior summary
+#Reuse behavior summary
 # -----------------------------------------------------------------------------
-# - Reuse does NOT skip the bootstrap process itself; selected images are still
+# - Reuse does NOT skip the bootstrap process itself; selected items are still
 #   processed and uploaded to S3 for the new run.
-
-# - Reuse saves time and disk churn by avoiding unnecessary redownloads and
-#   re-extraction of source assets when those files already exist locally.
-
-# EuroSAT (single-label)
-# - No --reuse-from-run-dir support.
-# - The dataset is small enough that keeping reuse logic is not worth the added
-#   complexity or local disk usage.
 #
-# BigEarthNet v2 (multi-label)
-# - Supports --reuse-from-run-dir.
+# - Reuse saves time and disk churn by reusing prior "_work/downloads" and
+#   "_work/extracted" assets when they already exist locally.
+#
 # - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
 #   "_work" directory itself.
-#   Example:
-#       --reuse-from-run-dir "C:/cvdms_tmp/bigearthnet-v2_multi_label_20260408_011409"
-# - Reuse helps avoid redownloading and/or re-extracting large source assets by
-#   reusing prior "_work/downloads" and "_work/extracted" contents when present.
-# - This is useful because BigEarthNet v2 is large and can take substantial time
-#   and disk space to prepare.
 #
-# COCO (object-detection)
-# - Supports --reuse-from-run-dir.
-# - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
-#   "_work" directory itself.
-#   Example:
-#       --reuse-from-run-dir "C:/cvdms_tmp/coco_object_detection_20260410_230600"
-# - For object-detection, reuse may pull from a previous run's:
-#     * extracted train2017 image directory
-#     * extracted instances_train2017.json
-#     * downloaded train2017.zip
-#     * downloaded annotations_trainval2017.zip
+# EuroSAT
+# - No --reuse-from-run-dir support. The dataset is small enough that reuse is
+#   not worth the added complexity.
 #
-# COCO (semantic-segmentation)
+# BigEarthNet v2
 # - Supports --reuse-from-run-dir.
-# - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
-#   "_work" directory itself.
-#   Example:
-#       --reuse-from-run-dir "C:/cvdms_tmp/coco_semantic_segmentation_20260410_230600"
-# - For semantic-segmentation, reuse may pull from a previous run's:
-#     * extracted train2017 image directory
-#     * downloaded train2017.zip
-#     * extracted COCO-Stuff stuffthingmaps train2017 directory
-#     * downloaded stuffthingmaps_trainval2017.zip
-#     * downloaded cocostuff_labels.txt
-    # NOTE:
-    # - COCO semantic-segmentation may also point --reuse-from-run-dir at a prior
-    #   COCO object-detection run folder to reuse the shared train2017 images and train2017.zip.
-    # - It will still need COCO-Stuff-specific assets (stuffthingmaps and labels)
-    #   unless those already exist in the referenced run.
-    # - COCO object-detection and semantic-segmentation overlap on the shared
-    #   train2017 images, but semantic-segmentation is NOT a full superset of
-    #   object-detection reuse/downloads.
-    # - Object-detection still needs its own annotation assets
-    #   (instances_train2017.json / annotations_trainval2017.zip), while
-    #   semantic-segmentation needs its own COCO-Stuff assets
-    #   (stuffthingmaps + cocostuff_labels.txt).
-    # - So a prior semantic-segmentation run can help object-detection reuse the
-    #   shared train images, but it may still need to download object-detection-
-    #   specific annotation files, and vice versa.
-    # COCO (instance-segmentation)
-    # - Supports --reuse-from-run-dir.
-    # - Pass the PRIOR RUN FOLDER that contains the "_work" directory, not the
-    #   "_work" directory itself.
-    #   Example:
-    #       --reuse-from-run-dir "C:/cvdms_tmp/coco_instance_segmentation_20260410_230600"
-    # - For instance-segmentation, reuse may pull from a previous run's:
-    #     * extracted train2017 image directory
-    #     * extracted instances_train2017.json
-    #     * downloaded train2017.zip
-    #     * downloaded annotations_trainval2017.zip
-    # - In the current code, COCO instance-segmentation and object-detection use
-    #   the same upstream COCO image/annotation assets, so either task's prior run
-    #   can serve as a strong reuse source for the other.
+# - Reuse is split-friendly: train / val / test all come from the same shared
+#   downloaded assets, and --split only changes which metadata rows are sampled.
+# - A single BigEarthNet reuse folder is ideal.
+#
+# COCO
+# - Supports --reuse-from-run-dir.
+# - Reuse works across tasks and splits, but COCO images are split-specific:
+#   train uses train2017 and val uses val2017.
+# - Shared assets like annotations_trainval2017.zip and
+#   stuffthingmaps_trainval2017.zip can be reused across splits.
+# - If a reuse folder does not yet have the requested split's images
+#   (for example val2017), that split may need to be downloaded once.
+# - In practice, one shared COCO reuse folder is ideal; over time it can
+#   accumulate both train2017 and val2017 assets for future runs.
 # -----------------------------------------------------------------------------
-# '''
+
 import sys
 import argparse
 from datetime import datetime, timezone
@@ -160,9 +91,9 @@ def parse_args() -> argparse.Namespace:
         help="Target CVDMS task. Must be valid for the selected dataset.",
     )
     parser.add_argument(
-        "--output-root",
+        "--aws-profile",
         required=True,
-        help="Local output root. A timestamped run folder will be created inside it.",
+        help="Name of AWS config profile for permissions.",
     )
     parser.add_argument(
         "--bucket",
@@ -170,9 +101,14 @@ def parse_args() -> argparse.Namespace:
         help="Target private S3 bucket created by the CVDMS storage stack.",
     )
     parser.add_argument(
-        "--aws-profile",
-        required=True,
-        help="Name of AWS config profile for permissions.",
+        "--s3-prefix",
+        default="seed-datasets",
+        help="Root key prefix under the target S3 bucket.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=r"C:\cvdms_files\runs",
+        help="Local output root. A timestamped run folder will be created inside it.",
     )
     parser.add_argument(
         "--aws-region",
@@ -180,9 +116,21 @@ def parse_args() -> argparse.Namespace:
         help="Optional AWS region for boto3 session.",
     )
     parser.add_argument(
-        "--s3-prefix",
-        default="seed-datasets",
-        help="Root key prefix under the target S3 bucket.",
+        "--max-items",
+        type=int,
+        default=None,
+        help="Optional maximum number of dataset items to ingest.",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        choices=["train", "val", "test"],
+        default=None,
+        help=(
+            "Official upstream dataset split to bootstrap when applicable. "
+            "Required for split-aware datasets like bigearthnet-v2 and coco; "
+            "omit for datasets like eurosat."
+        ),
     )
     parser.add_argument(
         "--reuse-from-run-dir",
@@ -194,12 +142,6 @@ def parse_args() -> argparse.Namespace:
             "artifacts may be reused to skip re-download and re-extraction.")
         )
     parser.add_argument(
-        "--max-items",
-        type=int,
-        default=None,
-        help="Optional maximum number of dataset items to ingest.",
-    )
-    parser.add_argument(
         "--sample-seed",
         type=int,
         default=42,
@@ -208,10 +150,44 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+def validate_split(dataset: str, split: str | None) -> str | None:
+    if split is not None:
+        split = split.strip().lower()
+
+    if dataset == "eurosat":
+        if split is not None:
+            raise ValueError("eurosat does not support --split; omit it.")
+        return None
+
+    if dataset == "bigearthnet-v2":
+        if split not in {"train", "val", "test"}:
+            raise ValueError(
+                "bigearthnet-v2 requires --split with one of: train, val, test."
+            )
+        return split
+
+    if dataset == "coco":
+        if split not in {"train", "val"}:
+            raise ValueError(
+                "coco currently requires --split with one of: train, val."
+            )
+        return split
+
+    if split is not None:
+        raise ValueError(f"Unexpected --split for dataset={dataset}.")
+
+    return None
+
 def main() -> int:
     args = parse_args()
 
-    helper = DATASET_HELPERS[args.dataset]
+    try:
+        helper = DATASET_HELPERS[args.dataset]
+        helper.validate_task(args.task)
+        normalized_split = validate_split(args.dataset, args.split)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
 
     reuse_from_run_dir = None
     if args.dataset == "bigearthnet-v2":
@@ -241,7 +217,12 @@ def main() -> int:
 
     output_root = Path(args.output_root)
     started_at = datetime.now(timezone.utc)
-    output_dir = output_root / build_run_dir_name(args.dataset, args.task, started_at)
+
+    run_dir_name = build_run_dir_name(args.dataset, args.task, started_at)
+    if normalized_split:
+        run_dir_name = f"{run_dir_name}_{normalized_split}"
+
+    output_dir = output_root / run_dir_name
     work_dir = output_dir / "_work"
 
     ensure_dir(output_root)
@@ -261,12 +242,12 @@ def main() -> int:
         reuse_from_run_dir=reuse_from_run_dir,
         max_items=args.max_items,
         sample_seed=args.sample_seed,
+        split=normalized_split,
         output_dir=output_dir,
-        work_dir=work_dir
+        work_dir=work_dir,
     )
 
     try:
-        helper.validate_task(args.task)
         session = boto3.session.Session(region_name=args.aws_region, profile_name=args.aws_profile)
         s3_client = session.client("s3")
         result = helper.bootstrap(config=config, s3_client=s3_client)
@@ -274,7 +255,7 @@ def main() -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
-        print(f"[ERROR] Initialization or bootstrap failure: {exc}", file=sys.stderr)
+        print(f"[ERROR] Session or bootstrap failure: {exc}", file=sys.stderr)
         return 1
 
     manifest_jsonl_path = output_dir / "manifest.jsonl"
@@ -291,6 +272,7 @@ def main() -> int:
     summary = {
         "dataset": args.dataset,
         "task": args.task,
+        "split": normalized_split,
         "task_slug": task_slug(args.task),
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": finished_at.isoformat(),
@@ -309,7 +291,7 @@ def main() -> int:
 
     write_json(summary_path, summary)
 
-    print(f"[OK] dataset={args.dataset} task={args.task}")
+    print(f"[OK] dataset={args.dataset} task={args.task} split={normalized_split or 'None'}")
     print(f"[OK] rows={len(result.manifest_rows)} failures={len(result.failures)}")
     print(f"[OK] manifest.jsonl -> {manifest_jsonl_path}")
     print(f"[OK] manifest.csv   -> {manifest_csv_path}")

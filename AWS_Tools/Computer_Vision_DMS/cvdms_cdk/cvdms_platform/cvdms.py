@@ -178,12 +178,14 @@ class CvdmsApp:
                          manifest_path: str,
                          label_type: str,
                          data_source: str,
+                         source_split: str| None,
                          path_prefix: str,
                          job_summary: str) -> Dict:
 
         return self._upload_client.start_upload_job(manifest_path,
                                                     label_type,
                                                     data_source,
+                                                    source_split,
                                                     path_prefix,
                                                     job_summary)
 

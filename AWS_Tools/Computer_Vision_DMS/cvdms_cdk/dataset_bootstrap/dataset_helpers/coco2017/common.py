@@ -9,18 +9,39 @@ from dataset_bootstrap.dataset_helpers.common import (
     extract_zip,
 )
 
-# Object Det vars
-COCO_SPLIT = "train2017"
-COCO_TRAIN2017_URL = "http://images.cocodataset.org/zips/train2017.zip"
-COCO_ANNOTATIONS_TRAINVAL2017_URL = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+COCO_ANNOTATIONS_TRAINVAL2017_URL = (
+    "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+)
 
-# Semantic Seg vars
 COCO_STUFFTHINGMAPS_URL = (
     "http://calvin.inf.ed.ac.uk/wp-content/uploads/data/cocostuffdataset/"
     "stuffthingmaps_trainval2017.zip"
 )
 
-COCO_STUFF_LABELS_URL = "https://raw.githubusercontent.com/nightrome/cocostuff/master/labels.txt"
+COCO_STUFF_LABELS_URL = (
+    "https://raw.githubusercontent.com/nightrome/cocostuff/master/labels.txt"
+)
+
+def require_coco_split(config: BootstrapConfig) -> str:
+    if config.split not in {"train", "val"}:
+        raise ValueError("COCO bootstrap requires config.split to be 'train' or 'val'")
+    return config.split
+
+def coco_split_dirname(split: str) -> str:
+    if split == "train":
+        return "train2017"
+    if split == "val":
+        return "val2017"
+    raise ValueError(f"Unsupported COCO split: {split}")
+
+def coco_images_zip_filename(split: str) -> str:
+    return f"{coco_split_dirname(split)}.zip"
+
+def coco_images_url(split: str) -> str:
+    return f"http://images.cocodataset.org/zips/{coco_split_dirname(split)}.zip"
+
+def coco_instances_filename(split: str) -> str:
+    return f"instances_{coco_split_dirname(split)}.json"
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -31,21 +52,23 @@ def old_dirs_from_run(reuse_from_run_dir: Path | None) -> tuple[Path | None, Pat
     old_work_dir = reuse_from_run_dir / "_work"
     return old_work_dir / "downloads", old_work_dir / "extracted"
 
-def find_train_images_dir(root: Path) -> Path | None:
+def find_images_dir(root: Path, split: str) -> Path | None:
     if not root.exists():
         return None
 
-    direct = root / COCO_SPLIT
-    if _looks_like_coco_train_images_dir(direct):
+    split_dirname = coco_split_dirname(split)
+
+    direct = root / split_dirname
+    if _looks_like_coco_images_dir(direct):
         return direct
 
-    for candidate in root.rglob(COCO_SPLIT):
-        if _looks_like_coco_train_images_dir(candidate):
+    for candidate in root.rglob(split_dirname):
+        if _looks_like_coco_images_dir(candidate):
             return candidate
 
     return None
 
-def _looks_like_coco_train_images_dir(path: Path) -> bool:
+def _looks_like_coco_images_dir(path: Path) -> bool:
     if not path.is_dir():
         return False
 
@@ -68,11 +91,16 @@ def find_file_named(root: Path, filename: str) -> Path | None:
 
     return None
 
-def resolve_train_images_dir(
+def resolve_images_dir(
     *,
     config: BootstrapConfig,
     reuse_stats: dict[str, Any],
 ) -> Path:
+    split = require_coco_split(config)
+    split_dirname = coco_split_dirname(split)
+    zip_name = coco_images_zip_filename(split)
+    url = coco_images_url(split)
+
     download_dir = config.work_dir / "downloads"
     extract_dir = config.work_dir / "extracted"
 
@@ -82,37 +110,39 @@ def resolve_train_images_dir(
     old_download_dir, old_extract_dir = old_dirs_from_run(config.reuse_from_run_dir)
 
     if old_extract_dir is not None:
-        old_images_dir = find_train_images_dir(old_extract_dir)
+        old_images_dir = find_images_dir(old_extract_dir, split)
         if old_images_dir is not None:
-            reuse_stats["reused_train_images"] = True
+            reuse_stats["reused_images"] = True
             return old_images_dir
 
-    current_images_dir = find_train_images_dir(extract_dir)
+    current_images_dir = find_images_dir(extract_dir, split)
     if current_images_dir is not None:
         return current_images_dir
 
-    train_zip_path = None
+    image_zip_path = None
     if old_download_dir is not None:
-        old_train_zip = old_download_dir / "train2017.zip"
-        if old_train_zip.is_file():
-            train_zip_path = old_train_zip
-            reuse_stats["reused_train_images_zip"] = True
+        old_zip = old_download_dir / zip_name
+        if old_zip.is_file():
+            image_zip_path = old_zip
+            reuse_stats["reused_images_zip"] = True
 
-    if train_zip_path is None:
-        train_zip_path = download_http_file(
-            COCO_TRAIN2017_URL,
-            download_dir / "train2017.zip",
+    if image_zip_path is None:
+        image_zip_path = download_http_file(
+            url,
+            download_dir / zip_name,
         )
 
     images_extract_root = extract_dir / "images"
     ensure_dir(images_extract_root)
 
-    if find_train_images_dir(images_extract_root) is None:
-        extract_zip(train_zip_path, images_extract_root)
+    if find_images_dir(images_extract_root, split) is None:
+        extract_zip(image_zip_path, images_extract_root)
 
-    images_dir = find_train_images_dir(images_extract_root)
+    images_dir = find_images_dir(images_extract_root, split)
     if images_dir is None:
-        raise RuntimeError("Could not locate COCO train2017 image directory after extraction")
+        raise RuntimeError(
+            f"Could not locate COCO {split_dirname} image directory after extraction"
+        )
 
     return images_dir
 
@@ -121,6 +151,9 @@ def resolve_instances_json(
     config: BootstrapConfig,
     reuse_stats: dict[str, Any],
 ) -> Path:
+    split = require_coco_split(config)
+    instances_filename = coco_instances_filename(split)
+
     download_dir = config.work_dir / "downloads"
     extract_dir = config.work_dir / "extracted"
 
@@ -130,12 +163,12 @@ def resolve_instances_json(
     old_download_dir, old_extract_dir = old_dirs_from_run(config.reuse_from_run_dir)
 
     if old_extract_dir is not None:
-        old_instances_json = find_file_named(old_extract_dir, "instances_train2017.json")
+        old_instances_json = find_file_named(old_extract_dir, instances_filename)
         if old_instances_json is not None:
             reuse_stats["reused_instances_json"] = True
             return old_instances_json
 
-    current_instances_json = find_file_named(extract_dir, "instances_train2017.json")
+    current_instances_json = find_file_named(extract_dir, instances_filename)
     if current_instances_json is not None:
         return current_instances_json
 
@@ -155,20 +188,22 @@ def resolve_instances_json(
     ann_extract_root = extract_dir / "annotations"
     ensure_dir(ann_extract_root)
 
-    if find_file_named(ann_extract_root, "instances_train2017.json") is None:
+    if find_file_named(ann_extract_root, instances_filename) is None:
         extract_zip(ann_zip_path, ann_extract_root)
 
-    instances_json = find_file_named(ann_extract_root, "instances_train2017.json")
+    instances_json = find_file_named(ann_extract_root, instances_filename)
     if instances_json is None:
-        raise RuntimeError("Could not locate instances_train2017.json after extraction")
+        raise RuntimeError(f"Could not locate {instances_filename} after extraction")
 
     return instances_json
 
-def find_stuffthingmaps_train_dir(root: Path) -> Path | None:
+def find_stuffthingmaps_dir(root: Path, split: str) -> Path | None:
     if not root.exists():
         return None
 
-    direct = root / COCO_SPLIT
+    split_dirname = coco_split_dirname(split)
+
+    direct = root / split_dirname
     if (
         direct.is_dir()
         and "stuffthingmaps" in str(direct).lower()
@@ -176,7 +211,7 @@ def find_stuffthingmaps_train_dir(root: Path) -> Path | None:
     ):
         return direct
 
-    for candidate in root.rglob(COCO_SPLIT):
+    for candidate in root.rglob(split_dirname):
         if not candidate.is_dir():
             continue
         if "stuffthingmaps" not in str(candidate).lower():
@@ -186,11 +221,14 @@ def find_stuffthingmaps_train_dir(root: Path) -> Path | None:
 
     return None
 
-def resolve_stuffthingmaps_train_dir(
+def resolve_stuffthingmaps_dir(
     *,
     config: BootstrapConfig,
     reuse_stats: dict[str, Any],
 ) -> Path:
+    split = require_coco_split(config)
+    split_dirname = coco_split_dirname(split)
+
     download_dir = config.work_dir / "downloads"
     extract_dir = config.work_dir / "extracted"
 
@@ -200,14 +238,14 @@ def resolve_stuffthingmaps_train_dir(
     old_download_dir, old_extract_dir = old_dirs_from_run(config.reuse_from_run_dir)
 
     if old_extract_dir is not None:
-        old_stuffthingmaps_train_dir = find_stuffthingmaps_train_dir(old_extract_dir)
-        if old_stuffthingmaps_train_dir is not None:
+        old_stuffthingmaps_dir = find_stuffthingmaps_dir(old_extract_dir, split)
+        if old_stuffthingmaps_dir is not None:
             reuse_stats["reused_stuffthingmaps_dir"] = True
-            return old_stuffthingmaps_train_dir
+            return old_stuffthingmaps_dir
 
-    current_stuffthingmaps_train_dir = find_stuffthingmaps_train_dir(extract_dir)
-    if current_stuffthingmaps_train_dir is not None:
-        return current_stuffthingmaps_train_dir
+    current_stuffthingmaps_dir = find_stuffthingmaps_dir(extract_dir, split)
+    if current_stuffthingmaps_dir is not None:
+        return current_stuffthingmaps_dir
 
     stuff_zip_path = None
     if old_download_dir is not None:
@@ -225,14 +263,16 @@ def resolve_stuffthingmaps_train_dir(
     stuff_extract_root = extract_dir / "stuffthingmaps"
     ensure_dir(stuff_extract_root)
 
-    if find_stuffthingmaps_train_dir(stuff_extract_root) is None:
+    if find_stuffthingmaps_dir(stuff_extract_root, split) is None:
         extract_zip(stuff_zip_path, stuff_extract_root)
 
-    stuffthingmaps_train_dir = find_stuffthingmaps_train_dir(stuff_extract_root)
-    if stuffthingmaps_train_dir is None:
-        raise RuntimeError("Could not locate COCO-Stuff train2017 masks after extraction")
+    stuffthingmaps_dir = find_stuffthingmaps_dir(stuff_extract_root, split)
+    if stuffthingmaps_dir is None:
+        raise RuntimeError(
+            f"Could not locate COCO-Stuff {split_dirname} masks after extraction"
+        )
 
-    return stuffthingmaps_train_dir
+    return stuffthingmaps_dir
 
 def resolve_cocostuff_labels_path(
     *,
@@ -257,13 +297,13 @@ def resolve_cocostuff_labels_path(
 
 def resolve_stuff_mask_path(
     *,
-    stuffthingmaps_train_dir: Path,
+    stuffthingmaps_dir: Path,
     image_filename: str,
 ) -> Path | None:
     stem = Path(image_filename).stem
     candidates = [
-        stuffthingmaps_train_dir / f"{stem}.png",
-        stuffthingmaps_train_dir / f"{stem}_labelTrainIds.png",
+        stuffthingmaps_dir / f"{stem}.png",
+        stuffthingmaps_dir / f"{stem}_labelTrainIds.png",
     ]
     for candidate in candidates:
         if candidate.is_file():

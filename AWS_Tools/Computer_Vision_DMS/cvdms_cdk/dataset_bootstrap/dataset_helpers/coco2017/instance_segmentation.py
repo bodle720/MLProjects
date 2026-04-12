@@ -17,27 +17,29 @@ from dataset_bootstrap.dataset_helpers.common import (
     upload_bytes_to_s3,
     upload_file_to_s3,
 )
-from dataset_bootstrap.dataset_helpers.coco.common import (
-    COCO_SPLIT,
+from dataset_bootstrap.dataset_helpers.coco2017.common import (
     color_for_index,
     load_json,
+    require_coco_split,
+    resolve_images_dir,
     resolve_instances_json,
-    resolve_train_images_dir,
     rgb_to_hex,
 )
 
 from common.general_utils.class_normalizer import canonicalize_class_name
 
 def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> BootstrapResult:
+    split = require_coco_split(config)
+
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
-        "reused_train_images": False,
-        "reused_train_images_zip": False,
+        "reused_images": False,
+        "reused_images_zip": False,
         "reused_annotations_zip": False,
         "reused_instances_json": False,
     }
 
-    images_dir = resolve_train_images_dir(
+    images_dir = resolve_images_dir(
         config=config,
         reuse_stats=reuse_stats,
     )
@@ -61,15 +63,18 @@ def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
         image_path = record["image_path"]
 
         if idx % 100 == 0 or idx == 1:
-            print(f"On {idx} out of {total}. image_id = {image_id}, file = {image_path.name}")
+            print(
+                f"On {idx} out of {total}. image_id = {image_id}, "
+                f"split = {split}, file = {image_path.name}"
+            )
 
         try:
             image_s3_key = s3_key_join(
                 config.s3_prefix,
-                "coco",
+                "coco2017",
                 "instance-segmentation",
                 "images",
-                COCO_SPLIT,
+                split,
                 image_path.name,
             )
             source_ref = upload_file_to_s3(
@@ -87,15 +92,19 @@ def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
 
             worker_s3_key = s3_key_join(
                 config.s3_prefix,
-                "coco",
+                "coco2017",
                 "instance-segmentation",
                 "worker-responses",
-                COCO_SPLIT,
+                split,
                 f"{image_path.stem}.json",
             )
             worker_response_ref = upload_bytes_to_s3(
                 s3_client=s3_client,
-                payload=json.dumps(worker_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                payload=json.dumps(
+                    worker_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
                 bucket=config.bucket,
                 key=worker_s3_key,
                 content_type="application/json",
@@ -114,6 +123,7 @@ def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
                     dataset_item_id=str(image_id),
                     reason=str(exc),
                     context={
+                        "split": split,
                         "image_path": str(image_path),
                     },
                 )
@@ -122,7 +132,7 @@ def coco_instance_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
     stats = {
         "upstream_dataset": "COCO 2017",
         "task": "instance-segmentation",
-        "split": COCO_SPLIT,
+        "split": split,
         "instances_json_path": str(instances_json_path),
         "images_dir": str(images_dir),
         "discovered_count": len(candidates),
@@ -164,8 +174,18 @@ def _build_instance_candidates(
     candidates: list[dict[str, Any]] = []
 
     for image_id, image_info in image_id_to_image.items():
-        image_path = images_dir / image_info["file_name"]
+        file_name = image_info.get("file_name")
+        if not isinstance(file_name, str) or not file_name.strip():
+            continue
+
+        image_path = images_dir / file_name
         if not image_path.is_file():
+            continue
+
+        try:
+            width = int(image_info["width"])
+            height = int(image_info["height"])
+        except (KeyError, TypeError, ValueError):
             continue
 
         anns = anns_by_image_id.get(image_id, [])
@@ -180,8 +200,8 @@ def _build_instance_candidates(
             {
                 "image_id": image_id,
                 "image_path": image_path,
-                "width": int(image_info["width"]),
-                "height": int(image_info["height"]),
+                "width": width,
+                "height": height,
                 "instances": normalized_instances,
             }
         )
@@ -196,7 +216,6 @@ def _normalize_coco_instance_annotations(
     out: list[dict[str, Any]] = []
 
     for ann in anns:
-        # Skip crowd masks / RLE for now; keep this bootstrapper polygon-only.
         if int(ann.get("iscrowd", 0)) == 1:
             continue
 
@@ -221,7 +240,11 @@ def _normalize_coco_instance_annotations(
         if not polygons:
             continue
 
-        category_id = int(ann["category_id"])
+        try:
+            category_id = int(ann["category_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
         class_name = category_id_to_name.get(category_id)
         if not class_name:
             continue
@@ -247,7 +270,6 @@ def _build_instance_worker_response(
     height: int,
     instances: list[dict[str, Any]],
 ) -> dict[str, Any]:
-
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid image size for instance worker response: {width}x{height}")
 

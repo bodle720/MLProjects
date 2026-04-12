@@ -10,23 +10,25 @@ from dataset_bootstrap.dataset_helpers.common import (
     s3_key_join,
     upload_file_to_s3,
 )
-from dataset_bootstrap.dataset_helpers.coco.common import (
-    COCO_SPLIT,
+from dataset_bootstrap.dataset_helpers.coco2017.common import (
     load_json,
+    require_coco_split,
+    resolve_images_dir,
     resolve_instances_json,
-    resolve_train_images_dir,
 )
 
 def coco_object_detection(config: BootstrapConfig, s3_client: Any) -> BootstrapResult:
+    split = require_coco_split(config)
+
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
-        "reused_train_images": False,
-        "reused_train_images_zip": False,
+        "reused_images": False,
+        "reused_images_zip": False,
         "reused_annotations_zip": False,
         "reused_instances_json": False,
     }
 
-    images_dir = resolve_train_images_dir(
+    images_dir = resolve_images_dir(
         config=config,
         reuse_stats=reuse_stats,
     )
@@ -50,15 +52,15 @@ def coco_object_detection(config: BootstrapConfig, s3_client: Any) -> BootstrapR
         image_path = record["image_path"]
 
         if idx % 100 == 0 or idx == 1:
-            print(f"On {idx} out of {total}. image_id = {image_id}, file = {image_path.name}")
+            print(f"On {idx} out of {total}. image_id = {image_id}, split = {split}, file = {image_path.name}")
 
         try:
             image_s3_key = s3_key_join(
                 config.s3_prefix,
-                "coco",
+                "coco2017",
                 "object-detection",
                 "images",
-                COCO_SPLIT,
+                split,
                 image_path.name,
             )
             source_ref = upload_file_to_s3(
@@ -81,6 +83,7 @@ def coco_object_detection(config: BootstrapConfig, s3_client: Any) -> BootstrapR
                     dataset_item_id=str(image_id),
                     reason=str(exc),
                     context={
+                        "split": split,
                         "image_path": str(image_path),
                     },
                 )
@@ -89,7 +92,7 @@ def coco_object_detection(config: BootstrapConfig, s3_client: Any) -> BootstrapR
     stats = {
         "upstream_dataset": "COCO 2017",
         "task": "object-detection",
-        "split": COCO_SPLIT,
+        "split": split,
         "instances_json_path": str(instances_json_path),
         "images_dir": str(images_dir),
         "discovered_count": len(candidates),
@@ -128,7 +131,11 @@ def _build_object_detection_candidates(
     candidates: list[dict[str, Any]] = []
 
     for image_id, image_info in image_id_to_image.items():
-        image_path = images_dir / image_info["file_name"]
+        file_name = image_info.get("file_name")
+        if not isinstance(file_name, str) or not file_name.strip():
+            continue
+
+        image_path = images_dir / file_name
         if not image_path.is_file():
             continue
 

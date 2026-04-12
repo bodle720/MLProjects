@@ -41,6 +41,7 @@ class BootstrapConfig:
     sample_seed: int
     output_dir: Path
     work_dir: Path
+    split: str | None = None
 
 @dataclass
 class BootstrapFailure:

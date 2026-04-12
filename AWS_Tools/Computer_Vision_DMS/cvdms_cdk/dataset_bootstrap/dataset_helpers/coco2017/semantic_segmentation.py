@@ -15,14 +15,14 @@ from dataset_bootstrap.dataset_helpers.common import (
     upload_bytes_to_s3,
     upload_file_to_s3,
 )
-from dataset_bootstrap.dataset_helpers.coco.common import (
-    COCO_SPLIT,
-    resolve_cocostuff_labels_path,
-    resolve_stuff_mask_path,
-    resolve_stuffthingmaps_train_dir,
-    resolve_train_images_dir,
+from dataset_bootstrap.dataset_helpers.coco2017.common import (
     color_for_index,
-    rgb_to_hex
+    require_coco_split,
+    resolve_cocostuff_labels_path,
+    resolve_images_dir,
+    resolve_stuff_mask_path,
+    resolve_stuffthingmaps_dir,
+    rgb_to_hex,
 )
 
 from common.general_utils.class_normalizer import canonicalize_class_name
@@ -30,20 +30,22 @@ from common.general_utils.class_normalizer import canonicalize_class_name
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png"}
 
 def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> BootstrapResult:
+    split = require_coco_split(config)
+
     reuse_stats: dict[str, Any] = {
         "reuse_from_run_dir": str(config.reuse_from_run_dir) if config.reuse_from_run_dir else None,
-        "reused_train_images": False,
-        "reused_train_images_zip": False,
+        "reused_images": False,
+        "reused_images_zip": False,
         "reused_stuffthingmaps_zip": False,
         "reused_stuffthingmaps_dir": False,
         "reused_stuff_labels": False,
     }
 
-    images_dir = resolve_train_images_dir(
+    images_dir = resolve_images_dir(
         config=config,
         reuse_stats=reuse_stats,
     )
-    stuffthingmaps_train_dir = resolve_stuffthingmaps_train_dir(
+    stuffthingmaps_dir = resolve_stuffthingmaps_dir(
         config=config,
         reuse_stats=reuse_stats,
     )
@@ -56,7 +58,7 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
 
     candidates = _build_semantic_candidates(
         images_dir=images_dir,
-        stuffthingmaps_train_dir=stuffthingmaps_train_dir,
+        stuffthingmaps_dir=stuffthingmaps_dir,
     )
     selected = deterministic_sample(candidates, config.max_items, config.sample_seed)
 
@@ -70,15 +72,18 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
         mask_path = record["mask_path"]
 
         if idx % 100 == 0 or idx == 1:
-            print(f"On {idx} out of {total}. image_id = {image_id}, file = {image_path.name}")
+            print(
+                f"On {idx} out of {total}. image_id = {image_id}, "
+                f"split = {split}, file = {image_path.name}"
+            )
 
         try:
             image_s3_key = s3_key_join(
                 config.s3_prefix,
-                "coco",
+                "coco2017",
                 "semantic-segmentation",
                 "images",
-                COCO_SPLIT,
+                split,
                 image_path.name,
             )
             source_ref = upload_file_to_s3(
@@ -95,10 +100,10 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
 
             mask_s3_key = s3_key_join(
                 config.s3_prefix,
-                "coco",
+                "coco2017",
                 "semantic-segmentation",
                 "masks",
-                COCO_SPLIT,
+                split,
                 f"{image_path.stem}.png",
             )
             mask_ref = upload_bytes_to_s3(
@@ -123,6 +128,7 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
                     dataset_item_id=str(image_id),
                     reason=str(exc),
                     context={
+                        "split": split,
                         "image_path": str(image_path),
                         "mask_path": str(mask_path),
                     },
@@ -132,9 +138,9 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
     stats = {
         "upstream_dataset": "COCO 2017 + COCO-Stuff",
         "task": "semantic-segmentation",
-        "split": COCO_SPLIT,
+        "split": split,
         "images_dir": str(images_dir),
-        "stuffthingmaps_train_dir": str(stuffthingmaps_train_dir),
+        "stuffthingmaps_dir": str(stuffthingmaps_dir),
         "labels_path": str(labels_path),
         "discovered_count": len(candidates),
         "selected_count": len(selected),
@@ -150,7 +156,7 @@ def coco_semantic_segmentation(config: BootstrapConfig, s3_client: Any) -> Boots
 def _build_semantic_candidates(
     *,
     images_dir: Path,
-    stuffthingmaps_train_dir: Path,
+    stuffthingmaps_dir: Path,
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
 
@@ -161,7 +167,7 @@ def _build_semantic_candidates(
             continue
 
         mask_path = resolve_stuff_mask_path(
-            stuffthingmaps_train_dir=stuffthingmaps_train_dir,
+            stuffthingmaps_dir=stuffthingmaps_dir,
             image_filename=image_path.name,
         )
         if mask_path is None or not mask_path.is_file():
@@ -219,7 +225,6 @@ def _build_semantic_rgb_mask_and_color_map(
 
     unique_ids = sorted(int(x) for x in np.unique(label_map).tolist())
 
-    # bg/void do not count toward foreground class capacity
     non_background_ids = [label_id for label_id in unique_ids if label_id not in {0, 255}]
     if len(non_background_ids) > 255:
         raise ValueError(

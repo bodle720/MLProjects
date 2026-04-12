@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.canonical_imagery (
     dtype string,
     file_size_mb double,
     uploaded_at timestamp COMMENT 'UTC upload time in ISO8601',
-    data_source string,
     sha256_hash string COMMENT '64-char hex',
     luma_mean double,
     luma_p10 double,
@@ -91,6 +90,7 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.upload_staging (
     file_size_mb double,
     uploaded_at timestamp,
     data_source string,
+    source_split string,
     sha256_hash string,
     luma_mean double,
     luma_p10 double,
@@ -197,6 +197,18 @@ CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.instance_segmentation (
 )
 PARTITIONED BY (dataset_id, version)
 LOCATION 's3://${ICEBERG_BUCKET_NAME}/instance_segmentation/'
+TBLPROPERTIES (
+  'table_type'='ICEBERG',
+  'format'='parquet'
+);
+
+CREATE TABLE IF NOT EXISTS ${ICEBERG_DATABASE_NAME}.image_source_membership (
+    image_id string,
+    data_source string,
+    source_split string
+)
+PARTITIONED BY (data_source)
+LOCATION 's3://${ICEBERG_BUCKET_NAME}/image_source_membership/'
 TBLPROPERTIES (
   'table_type'='ICEBERG',
   'format'='parquet'
