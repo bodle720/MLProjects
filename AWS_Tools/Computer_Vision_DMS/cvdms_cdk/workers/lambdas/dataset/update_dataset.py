@@ -15,6 +15,7 @@ from common.dataset_utils.dataset_ddb_utils import write_ddb_artifacts
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
+DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
@@ -49,7 +50,7 @@ def _require_nonempty_string(value: Any, *, field_name: str) -> str:
 
 def _assert_request_shape(
     request: dict[str, Any],
-) -> tuple[str, str, dict[str, Any], str, str, str | None]:
+) -> tuple[str, str, dict[str, Any], str, str | None, str | None]:
     dataset_id = _require_nonempty_string(
         request.get("dataset_id"),
         field_name="request.dataset_id",
@@ -86,7 +87,14 @@ def _assert_request_shape(
             raise ValueError("request.description must be a string or null")
         description = description.strip() or None
 
-    return dataset_id, operation, selection_config, split_approach, split_strategy_name, description
+    return (
+        dataset_id,
+        operation,
+        selection_config,
+        split_approach,
+        split_strategy_name,
+        description,
+    )
 
 def handler(event, context):
     job_id = "unknown"
@@ -108,10 +116,18 @@ def handler(event, context):
             raise ValueError("request must be an object")
 
         if task_type != "update_dataset":
-            raise ValueError(f"{TASK_NAME} expected task_type=update_dataset, got {task_type!r}")
+            raise ValueError(
+                f"{TASK_NAME} expected task_type=update_dataset, got {task_type!r}"
+            )
 
-
-        dataset_id, operation, selection_config, split_approach, split_strategy_name, description = _assert_request_shape(request)
+        (
+            dataset_id,
+            operation,
+            selection_config,
+            split_approach,
+            requested_split_strategy_name,
+            description,
+        ) = _assert_request_shape(request)
 
         log(
             job_id,
@@ -131,7 +147,7 @@ def handler(event, context):
             event_type=event_type,
         )
 
-        # 1) Load existing dataset metadata/invariants
+        # 1) Load existing dataset metadata/invariants.
         dataset_state = get_dataset_info(
             datasets_table_name=DATASETS_TABLE_NAME,
             dataset_versions_table_name=DATASET_VERSIONS_TABLE_NAME,
@@ -147,6 +163,8 @@ def handler(event, context):
         latest_version = dataset_meta["latest_version"]
         new_version = latest_version + 1
         label_type = dataset_meta["label_type"]
+        honor_source_splits = dataset_meta["honor_source_splits"]
+
         dataset_allowed_classes = set(dataset_meta["allowed_classes"])
         requested_allowed_classes = set(selection_config["allowed_classes"])
 
@@ -159,20 +177,72 @@ def handler(event, context):
         if label_type not in VALID_LABEL_TYPES:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
 
-        if split_approach == "maintain":
-            effective_split_strategy_name = latest_meta["split_strategy"]
+        # Determine the effective split mode/strategy for this update.
+        latest_split_strategy_name = (
+            latest_meta.get("split_strategy_name")
+            or latest_meta.get("effective_split_mode")
+        )
 
-            if not effective_split_strategy_name:
+        if honor_source_splits:
+            if split_approach == "rebalance":
                 raise ValueError(
-                    f"{TASK_NAME} existing latest_version_info missing split_strategy "
-                    f"for maintain update on dataset_id={dataset_id}"
+                    "split_approach='rebalance' is not allowed when honor_source_splits=True."
                 )
+
+            if requested_split_strategy_name:
+                log(
+                    job_id,
+                    user,
+                    event_type,
+                    LOG_FIREHOSE_STREAM_NAME,
+                    (
+                        f"{TASK_NAME} honor_source_splits=True, so request.split_strategy_name="
+                        f"{requested_split_strategy_name!r} is accepted but ignored for "
+                        f"dataset_id={dataset_id}."
+                    ),
+                    level="info",
+                )
+
+            # Keep the historical value around for metadata continuity if present,
+            # but effective split mode is governed by honor_source_splits.
+            effective_split_strategy_name = latest_meta.get("split_strategy_name")
+            effective_split_mode = "honor_source_splits"
+
         else:
-            if not split_strategy_name:
-                raise ValueError(
-                    "request.split_strategy_name is required when split_approach='rebalance'"
-                )
-            effective_split_strategy_name = split_strategy_name
+            if split_approach == "maintain":
+                effective_split_strategy_name = latest_split_strategy_name
+                if not effective_split_strategy_name or effective_split_strategy_name == "honor_source_splits":
+                    raise ValueError(
+                        f"{TASK_NAME} existing latest_version_info missing a usable "
+                        f"split_strategy_name for maintain update on dataset_id={dataset_id}"
+                    )
+
+                if (
+                    requested_split_strategy_name
+                    and requested_split_strategy_name != effective_split_strategy_name
+                ):
+                    log(
+                        job_id,
+                        user,
+                        event_type,
+                        LOG_FIREHOSE_STREAM_NAME,
+                        (
+                            f"{TASK_NAME} split_approach='maintain' uses the dataset's existing "
+                            f"split strategy {effective_split_strategy_name!r}; "
+                            f"request.split_strategy_name={requested_split_strategy_name!r} "
+                            f"will be ignored for dataset_id={dataset_id}."
+                        ),
+                        level="info",
+                    )
+
+            else:  # rebalance
+                if not requested_split_strategy_name:
+                    raise ValueError(
+                        "request.split_strategy_name is required when split_approach='rebalance'"
+                    )
+                effective_split_strategy_name = requested_split_strategy_name
+
+            effective_split_mode = effective_split_strategy_name
 
         effective_version_description = description
 
@@ -180,10 +250,9 @@ def handler(event, context):
         if dataset_membership_table_name is None:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
 
-        # 2) Resolve selected imagery rows for add/remove operation
-
-        # For single label updates, we must utilize the dataset wide allowed_classes for the resolve sql, then filter out
-        # undesired classes for this update later.
+        # 2) Resolve selected imagery rows for add/remove operation.
+        # For single-label updates, use dataset-wide allowed_classes for the SQL,
+        # then filter back down to the requested subset after resolution.
         single_label_update_sc = deepcopy(selection_config)
         single_label_update_sc["allowed_classes"] = dataset_meta["allowed_classes"]
 
@@ -197,7 +266,11 @@ def handler(event, context):
         )
 
         if label_type == "single-label":
-            selected_imagery_rows = [r for r in selected_imagery_rows if r["label"] in selection_config["allowed_classes"]]
+            selected_imagery_rows = [
+                row
+                for row in selected_imagery_rows
+                if row["label"] in selection_config["allowed_classes"]
+            ]
 
         if not selected_imagery_rows:
             raise ValueError(
@@ -214,8 +287,8 @@ def handler(event, context):
             level="info",
         )
 
-        # 3) Resolve current dataset membership rows
-        membership_mode = "minimal" if split_approach == "maintain" else "enriched"
+        # 3) Resolve current dataset membership rows.
+        membership_mode = "enriched"
 
         membership_sql, current_rows = resolve_dataset_membership(
             iceberg_database_name=ICEBERG_DATABASE_NAME,
@@ -242,13 +315,14 @@ def handler(event, context):
             level="info",
         )
 
-        # 4) Compute next-version rows and assign/preserve splits
-        split_rows = update_dataset_splits(
+        # 4) Compute next-version rows and assign/preserve splits.
+        split_rows, split_summary = update_dataset_splits(
             selected_imagery_rows=selected_imagery_rows,
             current_rows=current_rows,
             operation=operation,
             split_approach=split_approach,
             split_strategy_name=effective_split_strategy_name,
+            honor_source_splits=honor_source_splits,
         )
 
         if not split_rows:
@@ -261,11 +335,16 @@ def handler(event, context):
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Computed {len(split_rows)} final split rows for version={new_version}",
+            (
+                f"{TASK_NAME} Computed {len(split_rows)} final split rows for version={new_version}, "
+                f"effective_split_mode={split_summary['effective_split_mode']}, "
+                f"excluded_unresolved={split_summary.get('excluded_unresolved_count', 0)}, "
+                f"excluded_inconsistent={split_summary.get('excluded_inconsistent_count', 0)}"
+            ),
             level="info",
         )
 
-        # 5) Write new-version Iceberg membership rows
+        # 5) Write new-version Iceberg membership rows.
         membership_result = write_dataset_membership(
             task_name=TASK_NAME,
             iceberg_database_name=ICEBERG_DATABASE_NAME,
@@ -277,19 +356,20 @@ def handler(event, context):
             split_rows=split_rows,
         )
 
-        # 6) Write versioned S3 artifacts
+        # 6) Write versioned S3 artifacts.
         artifact_result = write_s3_artifacts(
-            dataset_bucket_name=os.environ["DATASETS_BUCKET_NAME"],
+            dataset_bucket_name=DATASETS_BUCKET_NAME,
             dataset_id=dataset_id,
             version=new_version,
             label_type=label_type,
             split_strategy_name=effective_split_strategy_name,
+            honor_source_splits=honor_source_splits,
             selection_sql=selection_sql_for_update,
             selection_config=selection_config,
             split_rows=split_rows,
         )
 
-        # 7) Write DDB version metadata and advance dataset latest_version
+        # 7) Write DDB version metadata and advance dataset latest_version.
         ddb_result = write_ddb_artifacts(
             new_dataset=False,
             datasets_table_name=DATASETS_TABLE_NAME,
@@ -300,6 +380,7 @@ def handler(event, context):
             dataset_description=None,
             version_description=effective_version_description,
             split_strategy_name=effective_split_strategy_name,
+            honor_source_splits=honor_source_splits,
             created_by=user,
             operation=operation,
             split_approach=split_approach,
@@ -326,7 +407,8 @@ def handler(event, context):
                 f"{TASK_NAME} Completed update flow for dataset_id={dataset_id}, "
                 f"new_version={new_version}, operation={operation}, "
                 f"selected_count={len(selected_imagery_rows)}, "
-                f"prior_count={len(current_rows)}, final_count={membership_result['row_count']}"
+                f"prior_count={len(current_rows)}, final_count={membership_result['row_count']}, "
+                f"effective_split_mode={effective_split_mode}"
             ),
             level="info",
         )
@@ -342,13 +424,18 @@ def handler(event, context):
             "new_version": new_version,
             "label_type": label_type,
             "description": effective_version_description,
+            "honor_source_splits": honor_source_splits,
             "effective_split_strategy_name": effective_split_strategy_name,
+            "effective_split_mode": effective_split_mode,
             "operation": operation,
             "split_approach": split_approach,
             f"candidate_imagery_count_to_{operation}": len(selected_imagery_rows),
             "preexisting_membership_count": len(current_rows),
             "final_membership_row_count": membership_result["row_count"],
             "membership_table_name": membership_result["table_name"],
+            "excluded_unresolved_count": split_summary.get("excluded_unresolved_count", 0),
+            "excluded_inconsistent_count": split_summary.get("excluded_inconsistent_count", 0),
+            "excluded_count": split_summary.get("excluded_count", 0),
             "artifact_result": artifact_result,
             "ddb_result": ddb_result,
         }

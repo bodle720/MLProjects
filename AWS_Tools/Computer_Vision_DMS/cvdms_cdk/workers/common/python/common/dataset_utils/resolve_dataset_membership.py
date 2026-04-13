@@ -14,7 +14,7 @@ DatasetLabelType = Literal[
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation"
+    "instance-segmentation",
 ]
 
 MembershipMode = Literal["minimal", "enriched"]
@@ -33,12 +33,17 @@ _LABEL_TYPES_WITH_CLASSES_PRESENT: set[DatasetLabelType] = {
     "instance-segmentation",
 }
 
-def resolve_sql(sql: str,
-                task_name: str,
-                athena_output_s3_uri: str,
-                athena_workgroup: str,
-                poll: Union[int, float] = 1.5,
-                timeout: Union[int, float] = 900) -> list[dict[str, Any]]:
+_IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME = "image_source_membership"
+_VALID_SOURCE_SPLITS = {"train", "val", "test"}
+
+def resolve_sql(
+    sql: str,
+    task_name: str,
+    athena_output_s3_uri: str,
+    athena_workgroup: str,
+    poll: Union[int, float] = 1.5,
+    timeout: Union[int, float] = 900,
+) -> list[dict[str, Any]]:
     """
     Execute the selection SQL in Athena and return normalized membership rows.
     """
@@ -48,24 +53,25 @@ def resolve_sql(sql: str,
         athena_output_s3_uri,
         athena_workgroup,
         poll=poll,
-        timeout=timeout
+        timeout=timeout,
     )
 
     raw_rows = athena_fetch_all_rows(query_execution_id)
-
     return raw_rows
 
-def resolve_dataset_membership(*,
-                                iceberg_database_name: str,
-                                dataset_membership_table_name: str,
-                                canonical_imagery_table_name: str,
-                                dataset_id: str,
-                                version: int,
-                                label_type: DatasetLabelType,
-                                mode: MembershipMode,
-                                athena_output_s3_uri: str,
-                                athena_workgroup: str,
-                                task_name: str) -> tuple[str, list[dict[str, Any]]]:
+def resolve_dataset_membership(
+    *,
+    iceberg_database_name: str,
+    dataset_membership_table_name: str,
+    canonical_imagery_table_name: str,
+    dataset_id: str,
+    version: int,
+    label_type: DatasetLabelType,
+    mode: MembershipMode,
+    athena_output_s3_uri: str,
+    athena_workgroup: str,
+    task_name: str,
+) -> tuple[str, list[dict[str, Any]]]:
     """
     Build SQL for current dataset-version membership and return normalized rows.
 
@@ -78,7 +84,13 @@ def resolve_dataset_membership(*,
 
     - enriched:
         returns the same membership payload fields plus canonical imagery
-        features needed for split recomputation / rebalance flows
+        features needed for split recomputation / rebalance flows, and
+        provenance fields derived from image_source_membership:
+            data_sources
+            source_splits_present
+            resolved_source_split
+            source_split_status
+            data_source (compatibility scalar only when exactly one source exists)
     """
     if mode not in {"minimal", "enriched"}:
         raise ValueError(f"Unsupported mode: {mode!r}")
@@ -92,24 +104,28 @@ def resolve_dataset_membership(*,
     if type(version) is not int or version < 1:
         raise ValueError("version must be an integer >= 1.")
 
-    membership_sql = build_dataset_membership_sql(iceberg_database_name=iceberg_database_name,
-                                                    dataset_membership_table_name=dataset_membership_table_name,
-                                                    canonical_imagery_table_name=canonical_imagery_table_name,
-                                                    dataset_id=dataset_id,
-                                                    version=version,
-                                                    label_type=label_type,
-                                                    mode=mode)
+    membership_sql = build_dataset_membership_sql(
+        iceberg_database_name=iceberg_database_name,
+        dataset_membership_table_name=dataset_membership_table_name,
+        canonical_imagery_table_name=canonical_imagery_table_name,
+        dataset_id=dataset_id,
+        version=version,
+        label_type=label_type,
+        mode=mode,
+    )
 
-    raw_rows = resolve_sql(membership_sql,
-                           f"{task_name} RESOLVE DS MEMBERSHIP SQL",
-                           athena_output_s3_uri,
-                           athena_workgroup)
+    raw_rows = resolve_sql(
+        membership_sql,
+        f"{task_name} RESOLVE DS MEMBERSHIP SQL",
+        athena_output_s3_uri,
+        athena_workgroup,
+    )
 
     normalized_rows = [
         normalize_membership_row(
             row=row,
             label_type=label_type,
-            mode=mode
+            mode=mode,
         )
         for row in raw_rows
     ]
@@ -155,6 +171,8 @@ def normalize_membership_row(
         "semantic_mask_ids",
         "instance_annotation_ids",
         "classes_present",
+        "data_sources",
+        "source_splits_present",
     }
 
     normalized: dict[str, Any] = {}
@@ -168,6 +186,39 @@ def normalize_membership_row(
             normalized[key] = parse_athena_array_string(value, field_name=key)
         else:
             normalized[key] = parse_optional_string(value)
+
+    normalized.setdefault("labels", [])
+    normalized.setdefault("bbox_annotation_ids", [])
+    normalized.setdefault("semantic_mask_ids", [])
+    normalized.setdefault("instance_annotation_ids", [])
+    normalized.setdefault("classes_present", [])
+
+    if mode == "enriched":
+        normalized.setdefault("data_sources", [])
+        normalized.setdefault("source_splits_present", [])
+
+        normalized["data_sources"] = _normalize_string_array(
+            normalized.get("data_sources", []),
+        )
+        normalized["source_splits_present"] = _normalize_source_split_array(
+            normalized.get("source_splits_present", []),
+        )
+
+        normalized["data_source"] = (
+            normalized["data_sources"][0]
+            if len(normalized["data_sources"]) == 1
+            else None
+        )
+
+        if len(normalized["source_splits_present"]) == 1:
+            normalized["resolved_source_split"] = normalized["source_splits_present"][0]
+            normalized["source_split_status"] = "resolved"
+        elif len(normalized["source_splits_present"]) == 0:
+            normalized["resolved_source_split"] = None
+            normalized["source_split_status"] = "unresolved"
+        else:
+            normalized["resolved_source_split"] = None
+            normalized["source_split_status"] = "inconsistent"
 
     _require_nonempty_string(normalized.get("dataset_id"), "dataset_id")
     _require_positive_int(normalized.get("version"), "version")
@@ -196,7 +247,6 @@ def normalize_membership_row(
     if mode == "enriched":
         _require_nonempty_string(normalized.get("source_ref"), "source_ref")
         _require_nonempty_string(normalized.get("sha256_hash"), "sha256_hash")
-        _require_nonempty_string(normalized.get("data_source"), "data_source")
         _require_nonempty_string(normalized.get("lighting_bucket"), "lighting_bucket")
         _require_nonempty_string(normalized.get("blur_bucket"), "blur_bucket")
         _require_nonempty_string(normalized.get("contrast_bucket"), "contrast_bucket")
@@ -209,15 +259,16 @@ def normalize_membership_row(
 
     return normalized
 
-def build_dataset_membership_sql(*,
-                                iceberg_database_name: str,
-                                dataset_membership_table_name: str,
-                                canonical_imagery_table_name: str,
-                                dataset_id: str,
-                                version: int,
-                                label_type: DatasetLabelType,
-                                mode: MembershipMode) -> str:
-
+def build_dataset_membership_sql(
+    *,
+    iceberg_database_name: str,
+    dataset_membership_table_name: str,
+    canonical_imagery_table_name: str,
+    dataset_id: str,
+    version: int,
+    label_type: DatasetLabelType,
+    mode: MembershipMode,
+) -> str:
     dataset_id_sql = _sql_quote(dataset_id)
     membership_field = LABEL_TYPE_TO_MEMBERSHIP_FIELD[label_type]
     include_classes_present = label_type in _LABEL_TYPES_WITH_CLASSES_PRESENT
@@ -241,6 +292,26 @@ ORDER BY m.image_id
 """.strip()
 
     return f"""
+WITH source_membership AS (
+    SELECT
+        ism.image_id,
+        ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(ism.data_source))) AS data_sources,
+        ARRAY_SORT(
+            FILTER(
+                ARRAY_DISTINCT(
+                    ARRAY_AGG(
+                        CASE
+                            WHEN TRIM(COALESCE(ism.source_split, '')) = '' THEN NULL
+                            ELSE LOWER(TRIM(ism.source_split))
+                        END
+                    )
+                ),
+                x -> x IS NOT NULL
+            )
+        ) AS source_splits_present
+    FROM "{iceberg_database_name}"."{_IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME}" AS ism
+    GROUP BY ism.image_id
+)
 SELECT
     m.dataset_id,
     m.version,
@@ -257,7 +328,6 @@ SELECT
     ci.dtype,
     ci.file_size_mb,
     ci.uploaded_at,
-    ci.data_source,
     ci.sha256_hash,
 
     ci.luma_mean,
@@ -274,11 +344,16 @@ SELECT
     ci.lighting_bucket,
     ci.blur_bucket,
     ci.contrast_bucket,
-    ci.color_bucket
+    ci.color_bucket,
+
+    COALESCE(sm.data_sources, CAST(ARRAY[] AS ARRAY(VARCHAR))) AS data_sources,
+    COALESCE(sm.source_splits_present, CAST(ARRAY[] AS ARRAY(VARCHAR))) AS source_splits_present
 
 FROM "{iceberg_database_name}"."{dataset_membership_table_name}" AS m
 INNER JOIN "{iceberg_database_name}"."{canonical_imagery_table_name}" AS ci
     ON m.image_id = ci.image_id
+LEFT JOIN source_membership AS sm
+    ON m.image_id = sm.image_id
 WHERE m.dataset_id = {dataset_id_sql}
   AND m.version = {version}
 ORDER BY m.image_id
@@ -315,6 +390,38 @@ def _require_positive_int(value: Any, field_name: str) -> None:
 def _require_valid_split(value: Any) -> None:
     if value not in {"train", "val", "test"}:
         raise ValueError(f"Invalid split value: {value!r}")
+
+def _normalize_string_array(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return sorted(out)
+
+def _normalize_source_split_array(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        if text not in _VALID_SOURCE_SPLITS:
+            raise ValueError(f"Invalid non-empty source split: {text!r}")
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return sorted(out)
 
 def _sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"

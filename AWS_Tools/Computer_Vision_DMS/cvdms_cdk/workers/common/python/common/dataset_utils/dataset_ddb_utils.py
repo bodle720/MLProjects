@@ -18,7 +18,8 @@ def write_ddb_artifacts(
     label_type: str,
     dataset_description: str | None,
     version_description: str | None,
-    split_strategy_name: str,
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
     created_by: str,
     operation: str,
     split_approach: str,
@@ -35,6 +36,7 @@ def write_ddb_artifacts(
         * latest_version
         * label_type
         * allowed_classes              (immutable after create)
+        * honor_source_splits          (immutable after create)
         * created_at                   (create only)
         * created_by                   (create only)
         * last_modified_by
@@ -48,6 +50,8 @@ def write_ddb_artifacts(
         * operation
         * split_approach
         * split_strategy_name
+        * honor_source_splits
+        * effective_split_mode
         * description                  (version-specific)
         * selection_config             (exact request config for this version)
         * created_by
@@ -81,6 +85,22 @@ def write_ddb_artifacts(
     if not isinstance(selection_config, dict):
         raise TypeError("selection_config must be a dict")
 
+    if not isinstance(honor_source_splits, bool):
+        raise TypeError("honor_source_splits must be a bool")
+
+    normalized_split_strategy_name = _normalize_optional_string(split_strategy_name)
+    effective_split_mode = (
+        "honor_source_splits"
+        if honor_source_splits
+        else normalized_split_strategy_name
+    )
+
+    if not effective_split_mode:
+        raise ValueError(
+            "effective split mode cannot be empty; provide split_strategy_name when "
+            "honor_source_splits=False"
+        )
+
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     count_summary = build_split_count_summary(split_rows=split_rows)
 
@@ -94,6 +114,7 @@ def write_ddb_artifacts(
         if effective_dataset_description is None:
             effective_dataset_description = _default_dataset_description(
                 label_type=label_type,
+                honor_source_splits=honor_source_splits,
                 created_at=created_at,
             )
     else:
@@ -108,6 +129,8 @@ def write_ddb_artifacts(
             operation=operation,
             split_approach=split_approach,
             version=new_version,
+            honor_source_splits=honor_source_splits,
+            split_strategy_name=normalized_split_strategy_name,
             created_at=created_at,
         )
 
@@ -120,6 +143,7 @@ def write_ddb_artifacts(
 
     if new_dataset:
         dataset_item["allowed_classes"] = allowed_classes
+        dataset_item["honor_source_splits"] = honor_source_splits
         dataset_item["created_at"] = created_at
         dataset_item["created_by"] = created_by
         dataset_item["dataset_description"] = effective_dataset_description
@@ -131,7 +155,9 @@ def write_ddb_artifacts(
         "created_at": created_at,
         "operation": operation,
         "split_approach": split_approach,
-        "split_strategy_name": split_strategy_name,
+        "split_strategy_name": normalized_split_strategy_name,
+        "honor_source_splits": honor_source_splits,
+        "effective_split_mode": effective_split_mode,
         "description": effective_version_description,
         "selection_config": selection_config,
         "created_by": created_by,
@@ -319,7 +345,14 @@ def _normalize_optional_string(value: Any) -> str | None:
     text = str(value).strip()
     return text or None
 
-def _default_dataset_description(*, label_type: str, created_at: str) -> str:
+def _default_dataset_description(
+    *,
+    label_type: str,
+    honor_source_splits: bool,
+    created_at: str,
+) -> str:
+    if honor_source_splits:
+        return f"{label_type} dataset honoring source splits created at {created_at}"
     return f"{label_type} dataset created at {created_at}"
 
 def _default_version_description(
@@ -329,10 +362,28 @@ def _default_version_description(
     operation: str,
     split_approach: str,
     version: int,
+    honor_source_splits: bool,
+    split_strategy_name: str | None,
     created_at: str,
 ) -> str:
     if new_dataset:
-        return f"Initial {label_type} dataset version v{version} created at {created_at}"
+        if honor_source_splits:
+            return (
+                f"Initial {label_type} dataset version v{version} honoring source splits "
+                f"created at {created_at}"
+            )
+        return (
+            f"Initial {label_type} dataset version v{version} "
+            f"({split_strategy_name}) created at {created_at}"
+        )
+
+    if honor_source_splits:
+        return (
+            f"Dataset update v{version} ({operation}, {split_approach}) honoring "
+            f"source splits created at {created_at}"
+        )
+
     return (
-        f"Dataset update v{version} ({operation}, {split_approach}) created at {created_at}"
+        f"Dataset update v{version} ({operation}, {split_approach}, {split_strategy_name}) "
+        f"created at {created_at}"
     )

@@ -16,10 +16,11 @@ def write_s3_artifacts(
     dataset_id: str,
     version: int,
     label_type: str,
-    split_strategy_name: str,
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
     selection_sql: str,
     selection_config: dict[str, Any],
-    split_rows: list[dict[str, Any]]
+    split_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
     Write all dataset-version S3 artifacts under:
@@ -61,6 +62,7 @@ def write_s3_artifacts(
         version=version,
         label_type=label_type,
         split_strategy_name=split_strategy_name,
+        honor_source_splits=honor_source_splits,
         split_rows=split_rows,
         manifest_uris=manifest_uris,
         membership_enriched_csv_uri=membership_enriched_csv_uri,
@@ -198,7 +200,8 @@ def write_metadata_json(
     dataset_id: str,
     version: int,
     label_type: str,
-    split_strategy_name: str,
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
     split_rows: list[dict[str, Any]],
     manifest_uris: dict[str, str],
     membership_enriched_csv_uri: str,
@@ -212,6 +215,7 @@ def write_metadata_json(
         version=version,
         label_type=label_type,
         split_strategy_name=split_strategy_name,
+        honor_source_splits=honor_source_splits,
         split_rows=split_rows,
     )
 
@@ -239,7 +243,8 @@ def build_dataset_metadata_summary(
     dataset_id: str,
     version: int,
     label_type: str,
-    split_strategy_name: str,
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
     split_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     split_counts = Counter()
@@ -249,14 +254,15 @@ def build_dataset_metadata_summary(
     blur_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
     contrast_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
     color_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
+    source_split_status_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
+    resolved_source_split_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
 
     for row in split_rows:
         split = _require_valid_split(row.get("split"))
         split_counts[split] += 1
 
-        data_source = _optional_string(row.get("data_source"))
-        if data_source:
-            source_counts_by_split[split][data_source] += 1
+        for source_name in _extract_row_sources(row):
+            source_counts_by_split[split][source_name] += 1
 
         for class_name in _normalize_string_array(row.get("classes_present")):
             class_counts_by_split[split][class_name] += 1
@@ -277,11 +283,27 @@ def build_dataset_metadata_summary(
         if color_bucket:
             color_counts_by_split[split][color_bucket] += 1
 
+        source_split_status = _optional_string(row.get("source_split_status"))
+        if source_split_status:
+            source_split_status_counts_by_split[split][source_split_status] += 1
+
+        resolved_source_split = _optional_string(row.get("resolved_source_split"))
+        if resolved_source_split:
+            resolved_source_split_counts_by_split[split][resolved_source_split] += 1
+
+    effective_split_mode = (
+        "honor_source_splits"
+        if honor_source_splits
+        else _optional_string(split_strategy_name)
+    )
+
     return {
         "dataset_id": dataset_id,
         "version": version,
         "label_type": label_type,
+        "honor_source_splits": honor_source_splits,
         "split_strategy_name": split_strategy_name,
+        "effective_split_mode": effective_split_mode,
         "row_count": len(split_rows),
         "split_counts": {split: split_counts.get(split, 0) for split in _VALID_SPLITS},
         "class_counts_by_split": {
@@ -306,6 +328,14 @@ def build_dataset_metadata_summary(
         },
         "color_counts_by_split": {
             split: dict(sorted(color_counts_by_split[split].items()))
+            for split in _VALID_SPLITS
+        },
+        "source_split_status_counts_by_split": {
+            split: dict(sorted(source_split_status_counts_by_split[split].items()))
+            for split in _VALID_SPLITS
+        },
+        "resolved_source_split_counts_by_split": {
+            split: dict(sorted(resolved_source_split_counts_by_split[split].items()))
             for split in _VALID_SPLITS
         },
     }
@@ -366,7 +396,11 @@ def _infer_csv_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "instance_annotation_ids",
         "classes_present",
         "sha256_hash",
+        "data_sources",
         "data_source",
+        "source_splits_present",
+        "resolved_source_split",
+        "source_split_status",
         "uploaded_at",
         "img_type",
         "img_height",
@@ -439,6 +473,17 @@ def _normalize_string_array(value: Any, *, require_nonempty: bool = False) -> li
         raise ValueError("Expected non-empty string array")
 
     return values
+
+def _extract_row_sources(row: dict[str, Any]) -> list[str]:
+    data_sources = row.get("data_sources")
+    if isinstance(data_sources, list):
+        return _normalize_string_array(data_sources)
+
+    data_source = _optional_string(row.get("data_source"))
+    if data_source:
+        return [data_source]
+
+    return []
 
 def _optional_string(value: Any) -> str | None:
     if value is None:

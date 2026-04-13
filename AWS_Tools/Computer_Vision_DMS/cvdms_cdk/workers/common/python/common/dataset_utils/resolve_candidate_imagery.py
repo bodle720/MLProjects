@@ -6,17 +6,19 @@ from common.general_utils.athena_utils import (
     parse_optional_string,
     parse_optional_float,
     parse_optional_int,
-    parse_athena_array_string
+    parse_athena_array_string,
 )
 
-def resolve_sql(sql: str,
-                task_name: str,
-                athena_output_s3_uri: str,
-                athena_workgroup: str,
-                poll: Union[int, float] = 1.5,
-                timeout: Union[int, float] = 900) -> list[dict[str, Any]]:
+def resolve_sql(
+    sql: str,
+    task_name: str,
+    athena_output_s3_uri: str,
+    athena_workgroup: str,
+    poll: Union[int, float] = 1.5,
+    timeout: Union[int, float] = 900,
+) -> list[dict[str, Any]]:
     """
-    Execute the selection SQL in Athena and return normalized candidate rows.
+    Execute the selection SQL in Athena and return raw result rows.
     """
     query_execution_id, _ = run_athena(
         sql,
@@ -24,41 +26,55 @@ def resolve_sql(sql: str,
         athena_output_s3_uri,
         athena_workgroup,
         poll=poll,
-        timeout=timeout
+        timeout=timeout,
     )
 
     raw_rows = athena_fetch_all_rows(query_execution_id)
-
     return raw_rows
 
 ######################################################################################
-# The main function utilizing helpers below to return candidates from the
-# database given a SQL config. First, it is converted to SQL, then it is
-# ran and the results are normalized and returned.
+# Main entrypoint
 ######################################################################################
+def resolve_candidate_imagery(
+    *,
+    iceberg_database_name: str,
+    label_type: str,
+    selection_config: dict[str, Any],
+    athena_output_s3_uri: str,
+    athena_workgroup: str,
+    task_name: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Resolve normalized candidate rows for dataset creation/update.
 
-def resolve_candidate_imagery(*,
-                               iceberg_database_name: str,
-                               label_type: str,
-                               selection_config: dict[str, Any],
-                               athena_output_s3_uri: str,
-                               athena_workgroup: str,
-                               task_name: str) -> tuple[str, list[dict[str, Any]]]:
+    Important provenance behavior:
+    - source provenance now comes from image_source_membership, not canonical_imagery
+    - source filtering is applied against image_source_membership.data_source using
+      selection_config["allowed_sources"]
+    - each candidate row includes:
+        * data_sources: list[str]
+        * source_splits_present: list[str] of distinct non-empty train/val/test values
+        * resolved_source_split: str | None
+        * source_split_status: "resolved" | "unresolved" | "inconsistent"
+    """
+    sql = build_selection_sql(
+        iceberg_database_name=iceberg_database_name,
+        dataset_label_type=label_type,
+        selection_config=selection_config,
+    )
 
-    sql = build_selection_sql(iceberg_database_name=iceberg_database_name,
-                              dataset_label_type=label_type,
-                              selection_config=selection_config)
-
-    raw_rows = resolve_sql(sql,
-                           f"{task_name} RESOLVE CAND IMG SQL",
-                           athena_output_s3_uri,
-                           athena_workgroup)
+    raw_rows = resolve_sql(
+        sql,
+        f"{task_name} RESOLVE CAND IMG SQL",
+        athena_output_s3_uri,
+        athena_workgroup,
+    )
 
     allowed_classes = selection_config["allowed_classes"]
     candidates = [
         normalize_candidate_row(
             row,
-            allowed_classes=allowed_classes
+            allowed_classes=allowed_classes,
         )
         for row in raw_rows
     ]
@@ -66,10 +82,13 @@ def resolve_candidate_imagery(*,
     return sql, candidates
 
 ######################################################################################
-# Helpers to normalize candidate rows from Iceberg tables
+# Candidate normalization
 ######################################################################################
-
-def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) -> dict[str, Any]:
+def normalize_candidate_row(
+    row: dict[str, Any],
+    *,
+    allowed_classes: list[str],
+) -> dict[str, Any]:
     """
     Normalize Athena result cells into expected Python types for dataset candidates.
 
@@ -88,6 +107,11 @@ def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) 
         instance_annotation_ids: list[str]
     - classes_present:
         list[str] across all task types
+    - provenance:
+        data_sources: list[str]
+        source_splits_present: list[str] of non-empty train/val/test
+        resolved_source_split: str | None
+        source_split_status: "resolved" | "unresolved" | "inconsistent"
     """
     int_fields = {
         "img_height",
@@ -115,6 +139,8 @@ def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) 
         "bbox_annotation_ids",
         "semantic_mask_ids",
         "instance_annotation_ids",
+        "data_sources",
+        "source_splits_present",
     }
 
     string_fields = {
@@ -124,7 +150,6 @@ def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) 
         "img_type",
         "dtype",
         "uploaded_at",
-        "data_source",
         "lighting_bucket",
         "blur_bucket",
         "contrast_bucket",
@@ -166,17 +191,44 @@ def normalize_candidate_row(row: dict[str, Any], *, allowed_classes: list[str]) 
     normalized.setdefault("bbox_annotation_ids", [])
     normalized.setdefault("semantic_mask_ids", [])
     normalized.setdefault("instance_annotation_ids", [])
+    normalized.setdefault("data_sources", [])
+    normalized.setdefault("source_splits_present", [])
+
+    normalized["data_sources"] = _normalize_string_array(
+        normalized.get("data_sources", []),
+    )
+    normalized["source_splits_present"] = _normalize_source_split_array(
+        normalized.get("source_splits_present", []),
+    )
+
+    # Compatibility shim for downstream code that still expects a scalar data_source.
+    # Only set it when there is exactly one relevant source in scope.
+    normalized["data_source"] = (
+        normalized["data_sources"][0]
+        if len(normalized["data_sources"]) == 1
+        else None
+    )
+
+    if len(normalized["source_splits_present"]) == 1:
+        normalized["resolved_source_split"] = normalized["source_splits_present"][0]
+        normalized["source_split_status"] = "resolved"
+    elif len(normalized["source_splits_present"]) == 0:
+        normalized["resolved_source_split"] = None
+        normalized["source_split_status"] = "unresolved"
+    else:
+        normalized["resolved_source_split"] = None
+        normalized["source_split_status"] = "inconsistent"
 
     dataset_label_type = normalized.get("dataset_label_type")
 
     if dataset_label_type in {
         "object-detection",
         "semantic-segmentation",
-        "instance-segmentation"
+        "instance-segmentation",
     }:
         normalized["classes_present"] = _filter_classes_present_to_allowed(
             normalized.get("classes_present", []),
-            allowed_classes
+            allowed_classes,
         )
 
         if len(normalized["classes_present"]) < 1:
@@ -233,7 +285,6 @@ def _filter_classes_present_to_allowed(
     values: list[str],
     allowed_classes: list[str],
 ) -> list[str]:
-
     allowed = set(str(v).strip().lower() for v in allowed_classes)
     out: list[str] = []
     seen: set[str] = set()
@@ -251,11 +302,42 @@ def _filter_classes_present_to_allowed(
 
     return out
 
-######################################################################################
-# Helpers to build the correct SQL query from the selection config, the output of
-# which is used in resolve_candidates() above to obtain normalized candidates.
-######################################################################################
+def _normalize_string_array(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
 
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return sorted(out)
+
+def _normalize_source_split_array(values: list[Any]) -> list[str]:
+    valid = {"train", "val", "test"}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        if text not in valid:
+            raise ValueError(f"Invalid non-empty source split from Athena result: {text!r}")
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return sorted(out)
+
+######################################################################################
+# SQL builder
+######################################################################################
 def build_selection_sql(
     *,
     iceberg_database_name: str,
@@ -265,18 +347,13 @@ def build_selection_sql(
     """
     Build Athena SQL that resolves candidate dataset membership rows from canonical tables.
 
-    New conventions:
-    - returns exactly one candidate row per image
-    - deduplicates repeated image_labels links
-    - single-label:
-        * label: varchar
-        * classes_present: array<string> of length 1
-    - multi-label:
-        * labels: array<string>
-        * classes_present: same deduped label array
-    - object-detection / semantic-segmentation / instance-segmentation:
-        * task-specific *_ids array<string>
-        * classes_present = deduped union of classes filtered to allowed_classes (subset)
+    Important provenance behavior:
+    - canonical_imagery no longer stores data_source
+    - provenance now comes from image_source_membership
+    - if allowed_sources is provided, provenance is scoped to only those membership rows
+    - returned SQL always includes:
+        data_sources: array<string>
+        source_splits_present: array<string>
     """
     query_label_type = _map_dataset_label_type_to_query_label_type(dataset_label_type)
     common_filters = _build_common_filter_clauses(
@@ -285,46 +362,63 @@ def build_selection_sql(
     )
 
     if dataset_label_type == "single-label":
-        return _build_single_label_sql(
+        base_candidate_select = _build_single_label_base_candidate_select(
             iceberg_database_name=iceberg_database_name,
             query_label_type=query_label_type,
             selection_config=selection_config,
             common_filters=common_filters,
         )
-
-    if dataset_label_type == "multi-label":
-        return _build_multi_label_sql(
+    elif dataset_label_type == "multi-label":
+        base_candidate_select = _build_multi_label_base_candidate_select(
             iceberg_database_name=iceberg_database_name,
             query_label_type=query_label_type,
             selection_config=selection_config,
             common_filters=common_filters,
         )
-
-    if dataset_label_type == "object-detection":
-        return _build_object_detection_sql(
+    elif dataset_label_type == "object-detection":
+        base_candidate_select = _build_object_detection_base_candidate_select(
             iceberg_database_name=iceberg_database_name,
             query_label_type=query_label_type,
             selection_config=selection_config,
             common_filters=common_filters,
         )
-
-    if dataset_label_type == "semantic-segmentation":
-        return _build_semantic_segmentation_sql(
+    elif dataset_label_type == "semantic-segmentation":
+        base_candidate_select = _build_semantic_segmentation_base_candidate_select(
             iceberg_database_name=iceberg_database_name,
             query_label_type=query_label_type,
             selection_config=selection_config,
             common_filters=common_filters,
         )
-
-    if dataset_label_type == "instance-segmentation":
-        return _build_instance_segmentation_sql(
+    elif dataset_label_type == "instance-segmentation":
+        base_candidate_select = _build_instance_segmentation_base_candidate_select(
             iceberg_database_name=iceberg_database_name,
             query_label_type=query_label_type,
             selection_config=selection_config,
             common_filters=common_filters,
         )
+    else:
+        raise ValueError(f"Unsupported dataset_label_type: {dataset_label_type}")
 
-    raise ValueError(f"Unsupported dataset_label_type: {dataset_label_type}")
+    source_membership_cte, source_membership_join_type = _build_source_membership_cte(
+        iceberg_database_name=iceberg_database_name,
+        selection_config=selection_config,
+    )
+
+    sql = f"""
+WITH
+{source_membership_cte},
+base_candidates AS (
+{base_candidate_select}
+)
+SELECT
+    bc.*,
+    COALESCE(sm.data_sources, CAST(ARRAY[] AS ARRAY(VARCHAR))) AS data_sources,
+    COALESCE(sm.source_splits_present, CAST(ARRAY[] AS ARRAY(VARCHAR))) AS source_splits_present
+FROM base_candidates bc
+{source_membership_join_type} source_membership sm
+    ON bc.image_id = sm.image_id
+"""
+    return sql.strip() + "\n"
 
 def _map_dataset_label_type_to_query_label_type(dataset_label_type: str) -> str:
     """
@@ -347,7 +441,6 @@ def _build_common_ci_select_list(*, dataset_label_type: str) -> str:
     ci.dtype,
     ci.file_size_mb,
     ci.uploaded_at,
-    ci.data_source,
     ci.luma_mean,
     ci.luma_p10,
     ci.luma_p90,
@@ -365,9 +458,6 @@ def _build_common_ci_select_list(*, dataset_label_type: str) -> str:
     '{_sql_escape_literal(dataset_label_type)}' AS dataset_label_type"""
 
 def _build_common_ci_group_by_list() -> str:
-    """
-    GROUP BY list for all canonical_imagery fields selected above.
-    """
     return """
     ci.image_id,
     ci.source_ref,
@@ -379,7 +469,6 @@ def _build_common_ci_group_by_list() -> str:
     ci.dtype,
     ci.file_size_mb,
     ci.uploaded_at,
-    ci.data_source,
     ci.luma_mean,
     ci.luma_p10,
     ci.luma_p90,
@@ -395,7 +484,46 @@ def _build_common_ci_group_by_list() -> str:
     ci.contrast_bucket,
     ci.color_bucket"""
 
-def _build_single_label_sql(
+def _build_source_membership_cte(
+    *,
+    iceberg_database_name: str,
+    selection_config: dict[str, Any],
+) -> tuple[str, str]:
+    allowed_sources = _get_allowed_sources(selection_config)
+
+    where_sql = ""
+    join_type = "LEFT JOIN"
+
+    if allowed_sources:
+        where_sql = f"\n    WHERE ism.data_source IN ({_sql_list(allowed_sources)})"
+        join_type = "JOIN"
+
+    cte_sql = f"""
+source_membership AS (
+    SELECT
+        ism.image_id,
+        ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(ism.data_source))) AS data_sources,
+        ARRAY_SORT(
+            FILTER(
+                ARRAY_DISTINCT(
+                    ARRAY_AGG(
+                        CASE
+                            WHEN TRIM(COALESCE(ism.source_split, '')) = '' THEN NULL
+                            ELSE LOWER(TRIM(ism.source_split))
+                        END
+                    )
+                ),
+                x -> x IS NOT NULL
+            )
+        ) AS source_splits_present
+    FROM {iceberg_database_name}.image_source_membership ism
+{where_sql}
+    GROUP BY ism.image_id
+)""".strip()
+
+    return cte_sql, join_type
+
+def _build_single_label_base_candidate_select(
     *,
     iceberg_database_name: str,
     query_label_type: str,
@@ -418,23 +546,6 @@ def _build_single_label_sql(
     )
 
     sql = f"""
-WITH filtered_links AS (
-    SELECT DISTINCT
-        ci.image_id,
-        il.label_id
-    FROM {iceberg_database_name}.canonical_imagery ci
-    JOIN {iceberg_database_name}.image_labels il
-        ON ci.image_id = il.image_id
-    {where_sql}
-),
-eligible_images AS (
-    SELECT
-        image_id,
-        MIN(label_id) AS label
-    FROM filtered_links
-    GROUP BY image_id
-    HAVING COUNT(*) = 1
-)
 SELECT
 {common_ci_cols},
     ei.label AS label,
@@ -444,15 +555,30 @@ SELECT
     CAST(NULL AS array(varchar)) AS semantic_mask_ids,
     CAST(NULL AS array(varchar)) AS instance_annotation_ids
 FROM {iceberg_database_name}.canonical_imagery ci
-JOIN eligible_images ei
+JOIN (
+    SELECT
+        image_id,
+        MIN(label_id) AS label
+    FROM (
+        SELECT DISTINCT
+            ci.image_id,
+            il.label_id
+        FROM {iceberg_database_name}.canonical_imagery ci
+        JOIN {iceberg_database_name}.image_labels il
+            ON ci.image_id = il.image_id
+        {where_sql}
+    ) filtered_links
+    GROUP BY image_id
+    HAVING COUNT(*) = 1
+) ei
     ON ci.image_id = ei.image_id
 GROUP BY
 {common_ci_group_by},
     ei.label
 """
-    return sql.strip() + "\n"
+    return sql.strip()
 
-def _build_multi_label_sql(
+def _build_multi_label_base_candidate_select(
     *,
     iceberg_database_name: str,
     query_label_type: str,
@@ -474,15 +600,6 @@ def _build_multi_label_sql(
     )
 
     sql = f"""
-WITH filtered_links AS (
-    SELECT DISTINCT
-        ci.image_id,
-        il.label_id
-    FROM {iceberg_database_name}.canonical_imagery ci
-    JOIN {iceberg_database_name}.image_labels il
-        ON ci.image_id = il.image_id
-    {where_sql}
-)
 SELECT
 {common_ci_cols},
     CAST(NULL AS varchar) AS label,
@@ -492,14 +609,22 @@ SELECT
     CAST(NULL AS array(varchar)) AS semantic_mask_ids,
     CAST(NULL AS array(varchar)) AS instance_annotation_ids
 FROM {iceberg_database_name}.canonical_imagery ci
-JOIN filtered_links fl
+JOIN (
+    SELECT DISTINCT
+        ci.image_id,
+        il.label_id
+    FROM {iceberg_database_name}.canonical_imagery ci
+    JOIN {iceberg_database_name}.image_labels il
+        ON ci.image_id = il.image_id
+    {where_sql}
+) fl
     ON ci.image_id = fl.image_id
 GROUP BY
 {common_ci_group_by}
 """
-    return sql.strip() + "\n"
+    return sql.strip()
 
-def _build_object_detection_sql(
+def _build_object_detection_base_candidate_select(
     *,
     iceberg_database_name: str,
     query_label_type: str,
@@ -518,7 +643,16 @@ def _build_object_detection_sql(
     )
 
     sql = f"""
-WITH filtered_links AS (
+SELECT
+{common_ci_cols},
+    CAST(NULL AS varchar) AS label,
+    CAST(NULL AS array(varchar)) AS labels,
+    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
+    ARRAY_SORT(ARRAY_AGG(fl.bbox_annotation_id)) AS bbox_annotation_ids,
+    CAST(NULL AS array(varchar)) AS semantic_mask_ids,
+    CAST(NULL AS array(varchar)) AS instance_annotation_ids
+FROM {iceberg_database_name}.canonical_imagery ci
+JOIN (
     SELECT DISTINCT
         ci.image_id,
         bb.bbox_annotation_id,
@@ -529,24 +663,14 @@ WITH filtered_links AS (
     JOIN {iceberg_database_name}.canonical_bounding_boxes bb
         ON il.label_id = bb.bbox_annotation_id
     {where_sql}
-)
-SELECT
-{common_ci_cols},
-    CAST(NULL AS varchar) AS label,
-    CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
-    ARRAY_SORT(ARRAY_AGG(fl.bbox_annotation_id)) AS bbox_annotation_ids,
-    CAST(NULL AS array(varchar)) AS semantic_mask_ids,
-    CAST(NULL AS array(varchar)) AS instance_annotation_ids
-FROM {iceberg_database_name}.canonical_imagery ci
-JOIN filtered_links fl
+) fl
     ON ci.image_id = fl.image_id
 GROUP BY
 {common_ci_group_by}
 """
-    return sql.strip() + "\n"
+    return sql.strip()
 
-def _build_semantic_segmentation_sql(
+def _build_semantic_segmentation_base_candidate_select(
     *,
     iceberg_database_name: str,
     query_label_type: str,
@@ -565,7 +689,16 @@ def _build_semantic_segmentation_sql(
     )
 
     sql = f"""
-WITH filtered_links AS (
+SELECT
+{common_ci_cols},
+    CAST(NULL AS varchar) AS label,
+    CAST(NULL AS array(varchar)) AS labels,
+    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
+    CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
+    ARRAY_SORT(ARRAY_AGG(fl.semantic_mask_id)) AS semantic_mask_ids,
+    CAST(NULL AS array(varchar)) AS instance_annotation_ids
+FROM {iceberg_database_name}.canonical_imagery ci
+JOIN (
     SELECT DISTINCT
         ci.image_id,
         sm.semantic_mask_id,
@@ -576,24 +709,14 @@ WITH filtered_links AS (
     JOIN {iceberg_database_name}.canonical_semantic_masks sm
         ON il.label_id = sm.semantic_mask_id
     {where_sql}
-)
-SELECT
-{common_ci_cols},
-    CAST(NULL AS varchar) AS label,
-    CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
-    CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
-    ARRAY_SORT(ARRAY_AGG(fl.semantic_mask_id)) AS semantic_mask_ids,
-    CAST(NULL AS array(varchar)) AS instance_annotation_ids
-FROM {iceberg_database_name}.canonical_imagery ci
-JOIN filtered_links fl
+) fl
     ON ci.image_id = fl.image_id
 GROUP BY
 {common_ci_group_by}
 """
-    return sql.strip() + "\n"
+    return sql.strip()
 
-def _build_instance_segmentation_sql(
+def _build_instance_segmentation_base_candidate_select(
     *,
     iceberg_database_name: str,
     query_label_type: str,
@@ -612,7 +735,16 @@ def _build_instance_segmentation_sql(
     )
 
     sql = f"""
-WITH filtered_links AS (
+SELECT
+{common_ci_cols},
+    CAST(NULL AS varchar) AS label,
+    CAST(NULL AS array(varchar)) AS labels,
+    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
+    CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
+    CAST(NULL AS array(varchar)) AS semantic_mask_ids,
+    ARRAY_SORT(ARRAY_AGG(fl.instance_annotation_id)) AS instance_annotation_ids
+FROM {iceberg_database_name}.canonical_imagery ci
+JOIN (
     SELECT DISTINCT
         ci.image_id,
         ia.instance_annotation_id,
@@ -623,22 +755,12 @@ WITH filtered_links AS (
     JOIN {iceberg_database_name}.canonical_instance_annotations ia
         ON il.label_id = ia.instance_annotation_id
     {where_sql}
-)
-SELECT
-{common_ci_cols},
-    CAST(NULL AS varchar) AS label,
-    CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
-    CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
-    CAST(NULL AS array(varchar)) AS semantic_mask_ids,
-    ARRAY_SORT(ARRAY_AGG(fl.instance_annotation_id)) AS instance_annotation_ids
-FROM {iceberg_database_name}.canonical_imagery ci
-JOIN filtered_links fl
+) fl
     ON ci.image_id = fl.image_id
 GROUP BY
 {common_ci_group_by}
 """
-    return sql.strip() + "\n"
+    return sql.strip()
 
 def _build_common_filter_clauses(
     *,
@@ -647,15 +769,12 @@ def _build_common_filter_clauses(
 ) -> list[str]:
     clauses: list[str] = []
 
-    allowed_sources = selection_config.get("allowed_sources")
-    if allowed_sources:
-        clauses.append(f"{imagery_alias}.data_source IN ({_sql_list(allowed_sources)})")
-
     upload_date_range = selection_config.get("upload_date_range")
     if upload_date_range:
         start_date, end_date = upload_date_range
         clauses.append(
-            f"DATE({imagery_alias}.uploaded_at) BETWEEN DATE '{_sql_escape_literal(start_date)}' AND DATE '{_sql_escape_literal(end_date)}'"
+            f"DATE({imagery_alias}.uploaded_at) BETWEEN DATE '{_sql_escape_literal(start_date)}' "
+            f"AND DATE '{_sql_escape_literal(end_date)}'"
         )
 
     width_range = selection_config.get("width_range")
@@ -685,6 +804,25 @@ def _build_common_filter_clauses(
         clauses.append(f"{imagery_alias}.color_bucket IN ({_sql_list(color_buckets)})")
 
     return clauses
+
+def _get_allowed_sources(selection_config: dict[str, Any]) -> list[str]:
+    values = selection_config.get("allowed_sources")
+    if not values:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+
+    return sorted(out)
 
 def _join_where_clauses(clauses: list[str]) -> str:
     clauses = [c for c in clauses if c]

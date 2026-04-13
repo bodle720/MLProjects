@@ -19,6 +19,7 @@ TASK_NAME = "[DATASET_VISUALIZE]"
 s3 = boto3.client("s3")
 
 _VALID_SPLITS = ("train", "val", "test")
+_VALID_SOURCE_SPLIT_STATUSES = ("resolved", "unresolved", "inconsistent")
 
 _NUMERIC_FIELDS = [
     "img_height",
@@ -34,14 +35,14 @@ _NUMERIC_FIELDS = [
     "contrast_luma_p90_p10",
     "blur_laplacian_var",
     "sat_mean",
-    "colorfulness"
+    "colorfulness",
 ]
 
 _BUCKET_FIELDS = [
     "lighting_bucket",
     "blur_bucket",
     "contrast_bucket",
-    "color_bucket"
+    "color_bucket",
 ]
 
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
@@ -61,7 +62,10 @@ def _parse_optional_float(value: Any) -> float | None:
     if text is None:
         return None
     try:
-        return float(text)
+        f = float(text)
+        if not math.isfinite(f):
+            return None
+        return f
     except Exception:
         return None
 
@@ -70,7 +74,6 @@ def _parse_optional_int(value: Any) -> int | None:
     if text is None:
         return None
     try:
-        # handles things like "10" and "10.0"
         f = float(text)
         if not math.isfinite(f):
             return None
@@ -113,7 +116,9 @@ def _normalize_row(row: dict[str, Any], label_type: str) -> dict[str, Any]:
         raise ValueError(f"Invalid split: {out['split']!r}")
 
     out["label"] = _optional_string(out.get("label"))
-    out["data_source"] = _optional_string(out.get("data_source"))
+    out["data_source"] = _optional_string(out.get("data_source"))  # compatibility fallback
+    out["resolved_source_split"] = _optional_string(out.get("resolved_source_split"))
+    out["source_split_status"] = _optional_string(out.get("source_split_status"))
     out["uploaded_at"] = _optional_string(out.get("uploaded_at"))
     out["img_type"] = _optional_string(out.get("img_type"))
     out["dtype"] = _optional_string(out.get("dtype"))
@@ -125,6 +130,8 @@ def _normalize_row(row: dict[str, Any], label_type: str) -> dict[str, Any]:
     out["semantic_mask_ids"] = _parse_json_array_field(out.get("semantic_mask_ids"))
     out["instance_annotation_ids"] = _parse_json_array_field(out.get("instance_annotation_ids"))
     out["classes_present"] = _parse_json_array_field(out.get("classes_present"))
+    out["data_sources"] = _parse_json_array_field(out.get("data_sources"))
+    out["source_splits_present"] = _parse_json_array_field(out.get("source_splits_present"))
 
     for field in ("img_height", "img_width", "num_channels"):
         out[field] = _parse_optional_int(out.get(field))
@@ -154,6 +161,10 @@ def _normalize_row(row: dict[str, Any], label_type: str) -> dict[str, Any]:
         elif label_type == "multi-label" and out["labels"]:
             out["classes_present"] = list(out["labels"])
 
+    # Backward-compatibility source shim
+    if not out["data_sources"] and out["data_source"]:
+        out["data_sources"] = [out["data_source"]]
+
     return out
 
 def _read_membership_enriched_csv(dataset_id: str, version: int, label_type: str) -> list[dict[str, Any]]:
@@ -168,6 +179,8 @@ def _build_overview(
     version: int,
     label_type: str,
     rows: list[dict[str, Any]],
+    honor_source_splits: bool | None,
+    effective_split_mode: str | None,
 ) -> dict[str, Any]:
     split_counts = Counter(row["split"] for row in rows)
     total = len(rows)
@@ -176,6 +189,8 @@ def _build_overview(
         "dataset_id": dataset_id,
         "version": version,
         "label_type": label_type,
+        "honor_source_splits": honor_source_splits,
+        "effective_split_mode": effective_split_mode,
         "row_count": total,
         "split_counts": {s: split_counts.get(s, 0) for s in _VALID_SPLITS},
         "split_percentages": {
@@ -183,6 +198,24 @@ def _build_overview(
             for s in _VALID_SPLITS
         },
     }
+
+def _extract_category_values(row: dict[str, Any], category_key: str) -> list[str]:
+    if category_key in {"classes_present", "data_sources", "source_splits_present"}:
+        values = row.get(category_key, [])
+        if not isinstance(values, list):
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = _optional_string(value)
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+        return out
+
+    value = row.get(category_key)
+    text = _optional_string(value)
+    return [text] if text else []
 
 def _build_distribution_by_split(
     rows: list[dict[str, Any]],
@@ -192,17 +225,8 @@ def _build_distribution_by_split(
 
     for row in rows:
         split = row["split"]
-
-        if category_key == "classes_present":
-            values = row.get("classes_present", [])
-        else:
-            value = row.get(category_key)
-            values = [value] if value else []
-
-        for value in values:
-            text = _optional_string(value)
-            if text:
-                counts_by_split[split][text] += 1
+        for value in _extract_category_values(row, category_key):
+            counts_by_split[split][value] += 1
 
     percentages_by_split: dict[str, dict[str, float]] = {}
     for split in _VALID_SPLITS:
@@ -218,6 +242,32 @@ def _build_distribution_by_split(
             for split in _VALID_SPLITS
         },
         "percentages_by_split": percentages_by_split,
+    }
+
+def _build_source_split_resolution_by_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
+    resolved_split_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
+
+    for row in rows:
+        split = row["split"]
+
+        status = _optional_string(row.get("source_split_status"))
+        if status in _VALID_SOURCE_SPLIT_STATUSES:
+            status_counts_by_split[split][status] += 1
+
+        resolved_source_split = _optional_string(row.get("resolved_source_split"))
+        if resolved_source_split in _VALID_SPLITS:
+            resolved_split_counts_by_split[split][resolved_source_split] += 1
+
+    return {
+        "source_split_status_counts_by_split": {
+            split: dict(sorted(status_counts_by_split[split].items()))
+            for split in _VALID_SPLITS
+        },
+        "resolved_source_split_counts_by_split": {
+            split: dict(sorted(resolved_split_counts_by_split[split].items()))
+            for split in _VALID_SPLITS
+        },
     }
 
 def _build_quality_distribution_by_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -346,7 +396,7 @@ def _build_numeric_feature_histograms(rows: list[dict[str, Any]]) -> dict[str, A
 
 def _build_split_comparison_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     class_dist = _build_distribution_by_split(rows, "classes_present")
-    source_dist = _build_distribution_by_split(rows, "data_source")
+    source_dist = _build_distribution_by_split(rows, "data_sources")
 
     train_class = class_dist["percentages_by_split"]["train"]
     train_source = source_dist["percentages_by_split"]["train"]
@@ -441,8 +491,13 @@ def handler(event, context):
         version_raw = dataset_context.get("new_version")
         if type(version_raw) is not int or version_raw < 1:
             raise ValueError("dataset_context.new_version must be an integer >= 1")
-
         version = version_raw
+
+        honor_source_splits_raw = dataset_context.get("honor_source_splits")
+        honor_source_splits = (
+            honor_source_splits_raw if isinstance(honor_source_splits_raw, bool) else None
+        )
+        effective_split_mode = _optional_string(dataset_context.get("effective_split_mode"))
 
         if task_type not in {"create_dataset", "update_dataset"}:
             raise ValueError(
@@ -469,9 +524,17 @@ def handler(event, context):
                 f"{TASK_NAME} membership_enriched.csv contained zero rows for dataset_id={dataset_id}, version={version}"
             )
 
-        overview = _build_overview(dataset_id, version, label_type, rows)
+        overview = _build_overview(
+            dataset_id,
+            version,
+            label_type,
+            rows,
+            honor_source_splits,
+            effective_split_mode,
+        )
         class_distribution = _build_distribution_by_split(rows, "classes_present")
-        source_distribution = _build_distribution_by_split(rows, "data_source")
+        source_distribution = _build_distribution_by_split(rows, "data_sources")
+        source_split_resolution = _build_source_split_resolution_by_split(rows)
         quality_distribution = _build_quality_distribution_by_split(rows)
         numeric_summary = _build_numeric_feature_summary(rows)
         numeric_histograms = _build_numeric_feature_histograms(rows)
@@ -486,6 +549,9 @@ def handler(event, context):
             ),
             "source_distribution_by_split_json_uri": _write_visualization_json(
                 dataset_id, version, "source_distribution_by_split.json", source_distribution
+            ),
+            "source_split_resolution_by_split_json_uri": _write_visualization_json(
+                dataset_id, version, "source_split_resolution_by_split.json", source_split_resolution
             ),
             "quality_distribution_by_split_json_uri": _write_visualization_json(
                 dataset_id, version, "quality_distribution_by_split.json", quality_distribution

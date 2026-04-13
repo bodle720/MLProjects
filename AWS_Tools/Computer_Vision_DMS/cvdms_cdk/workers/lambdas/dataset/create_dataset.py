@@ -28,9 +28,13 @@ VALID_LABEL_TYPES = {
     "instance-segmentation",
 }
 
+_VALID_SPLITS = {"train", "val", "test"}
+_VALID_SOURCE_SPLIT_STATUSES = {"resolved", "unresolved", "inconsistent"}
+
+
 def _assert_request_shape(
     request: dict[str, Any],
-) -> tuple[str, str, str | None, dict[str, Any], str]:
+) -> tuple[str, str, str | None, dict[str, Any], str | None, bool]:
     dataset_id = _require_nonempty_string(
         request.get("dataset_id"),
         field_name="request.dataset_id",
@@ -38,10 +42,6 @@ def _assert_request_shape(
     label_type = _require_nonempty_string(
         request.get("label_type"),
         field_name="request.label_type",
-    )
-    split_strategy_name = _require_nonempty_string(
-        request.get("split_strategy_name"),
-        field_name="request.split_strategy_name",
     )
 
     if label_type not in VALID_LABEL_TYPES:
@@ -57,13 +57,86 @@ def _assert_request_shape(
             raise ValueError("request.description must be a string or null")
         description = description.strip() or None
 
-    return dataset_id, label_type, description, selection_config, split_strategy_name
+    split_strategy_name = request.get("split_strategy_name")
+    if split_strategy_name is not None:
+        if not isinstance(split_strategy_name, str):
+            raise ValueError("request.split_strategy_name must be a string or null")
+        split_strategy_name = split_strategy_name.strip() or None
+
+    honor_source_splits = request.get("honor_source_splits")
+    if not isinstance(honor_source_splits, bool):
+        raise ValueError("request.honor_source_splits must be a bool")
+
+    return (
+        dataset_id,
+        label_type,
+        description,
+        selection_config,
+        split_strategy_name,
+        honor_source_splits,
+    )
+
 
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _build_honor_source_split_rows(
+    *,
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    split_rows: list[dict[str, Any]] = []
+    resolved_count = 0
+    unresolved_count = 0
+    inconsistent_count = 0
+
+    for row in candidates:
+        status = _optional_string(row.get("source_split_status"))
+        resolved_source_split = _optional_string(row.get("resolved_source_split"))
+
+        if status not in _VALID_SOURCE_SPLIT_STATUSES:
+            raise ValueError(
+                f"{TASK_NAME} Invalid source_split_status={status!r} for image_id={row.get('image_id')!r}"
+            )
+
+        if status == "resolved":
+            if resolved_source_split not in _VALID_SPLITS:
+                raise ValueError(
+                    f"{TASK_NAME} Resolved candidate missing valid resolved_source_split "
+                    f"for image_id={row.get('image_id')!r}: {resolved_source_split!r}"
+                )
+
+            split_rows.append({**row, "split": resolved_source_split})
+            resolved_count += 1
+            continue
+
+        if status == "unresolved":
+            unresolved_count += 1
+            continue
+
+        if status == "inconsistent":
+            inconsistent_count += 1
+            continue
+
+    summary = {
+        "resolved_count": resolved_count,
+        "unresolved_count": unresolved_count,
+        "inconsistent_count": inconsistent_count,
+        "excluded_count": unresolved_count + inconsistent_count,
+    }
+
+    return split_rows, summary
+
 
 def handler(event, context):
     job_id = "unknown"
@@ -87,31 +160,41 @@ def handler(event, context):
         if task_type != "create_dataset":
             raise ValueError(f"{TASK_NAME} expected task_type=create_dataset, got {task_type!r}")
 
-        dataset_id, label_type, description, selection_config, split_strategy_name = _assert_request_shape(request)
+        (
+            dataset_id,
+            label_type,
+            description,
+            selection_config,
+            split_strategy_name,
+            honor_source_splits,
+        ) = _assert_request_shape(request)
 
         log(
             job_id,
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Starting create flow for dataset_id={dataset_id}",
+            (
+                f"{TASK_NAME} Starting create flow for dataset_id={dataset_id}, "
+                f"label_type={label_type}, honor_source_splits={honor_source_splits}"
+            ),
             level="info",
         )
 
-        ok, reason = update_job_status(
+        update_job_status(
             job_id=job_id,
-            status="IN_PROGRESS",  # or COMPLETED / FAILED
+            status="IN_PROGRESS",
             job_table_name=JOB_TABLE_NAME,
             stream_name=LOG_FIREHOSE_STREAM_NAME,
             user=user,
-            event_type=event_type
+            event_type=event_type,
         )
 
         # Authoritative server-side uniqueness check.
         if dataset_exists(dataset_id, DATASETS_TABLE_NAME):
             raise ValueError(f"Dataset '{dataset_id}' already exists.")
 
-        # Resolve candidate imagery from canonical tables.
+        # Resolve candidate imagery from canonical/provenance tables.
         selection_sql, candidates = resolve_candidate_imagery(
             iceberg_database_name=ICEBERG_DATABASE_NAME,
             label_type=label_type,
@@ -134,22 +217,74 @@ def handler(event, context):
         )
 
         # Split assignment
-        if split_strategy_name != "stratified_v1":
-            raise ValueError(f"Split strategy '{split_strategy_name}' not supported.")
+        exclusion_summary = {
+            "resolved_count": 0,
+            "unresolved_count": 0,
+            "inconsistent_count": 0,
+            "excluded_count": 0,
+        }
 
-        split_rows = stratified_v1(candidates=candidates)
+        if honor_source_splits:
+            if split_strategy_name:
+                log(
+                    job_id,
+                    user,
+                    event_type,
+                    LOG_FIREHOSE_STREAM_NAME,
+                    (
+                        f"{TASK_NAME} honor_source_splits=True, so split_strategy_name="
+                        f"{split_strategy_name!r} is accepted but ignored. "
+                        f"Splits will be assigned from image_source_membership.source_split."
+                    ),
+                    level="info",
+                )
 
-        if not split_rows:
-            raise ValueError(f"{TASK_NAME} stratified_v1 returned zero split rows for dataset_id={dataset_id}")
+            split_rows, exclusion_summary = _build_honor_source_split_rows(
+                candidates=candidates,
+            )
 
-        log(
-            job_id,
-            user,
-            event_type,
-            LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Assigned splits for {len(split_rows)} rows",
-            level="info",
-        )
+            if not split_rows:
+                raise ValueError(
+                    f"{TASK_NAME} honor_source_splits=True but zero candidates had a resolved "
+                    f"source split after excluding unresolved/inconsistent rows."
+                )
+
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} Honored source splits for dataset_id={dataset_id}: "
+                    f"kept={exclusion_summary['resolved_count']}, "
+                    f"excluded_unresolved={exclusion_summary['unresolved_count']}, "
+                    f"excluded_inconsistent={exclusion_summary['inconsistent_count']}"
+                ),
+                level="info",
+            )
+
+        else:
+            if split_strategy_name != "stratified_v1":
+                raise ValueError(
+                    f"Split strategy {split_strategy_name!r} not supported when "
+                    f"honor_source_splits=False. Expected 'stratified_v1'."
+                )
+
+            split_rows = stratified_v1(candidates=candidates)
+
+            if not split_rows:
+                raise ValueError(
+                    f"{TASK_NAME} stratified_v1 returned zero split rows for dataset_id={dataset_id}"
+                )
+
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Assigned splits with stratified_v1 for {len(split_rows)} rows",
+                level="info",
+            )
 
         # Iceberg membership rows
         membership_result = write_dataset_membership(
@@ -170,6 +305,7 @@ def handler(event, context):
             version=1,
             label_type=label_type,
             split_strategy_name=split_strategy_name,
+            honor_source_splits=honor_source_splits,
             selection_sql=selection_sql,
             selection_config=selection_config,
             split_rows=split_rows,
@@ -186,6 +322,7 @@ def handler(event, context):
             dataset_description=description,
             version_description=description,
             split_strategy_name=split_strategy_name,
+            honor_source_splits=honor_source_splits,
             created_by=user,
             operation="create",
             split_approach="initial",
@@ -194,13 +331,19 @@ def handler(event, context):
             artifact_result=artifact_result,
         )
 
-        ok, reason = update_job_status(
+        update_job_status(
             job_id=job_id,
             status="COMPLETED",
             job_table_name=JOB_TABLE_NAME,
             stream_name=LOG_FIREHOSE_STREAM_NAME,
             user=user,
-            event_type=event_type
+            event_type=event_type,
+        )
+
+        effective_split_mode = (
+            "honor_source_splits"
+            if honor_source_splits
+            else split_strategy_name
         )
 
         log(
@@ -210,7 +353,9 @@ def handler(event, context):
             LOG_FIREHOSE_STREAM_NAME,
             (
                 f"{TASK_NAME} Completed create flow for dataset_id={dataset_id}, "
-                f"version=1, candidates={len(candidates)}, membership_rows={membership_result['row_count']}"
+                f"version=1, candidates={len(candidates)}, "
+                f"membership_rows={membership_result['row_count']}, "
+                f"effective_split_mode={effective_split_mode}"
             ),
             level="info",
         )
@@ -226,10 +371,15 @@ def handler(event, context):
             "version": 1,
             "label_type": label_type,
             "description": description,
+            "honor_source_splits": honor_source_splits,
             "split_strategy_name": split_strategy_name,
+            "effective_split_mode": effective_split_mode,
             "candidate_count": len(candidates),
             "membership_row_count": membership_result["row_count"],
             "membership_table_name": membership_result["table_name"],
+            "excluded_unresolved_count": exclusion_summary["unresolved_count"],
+            "excluded_inconsistent_count": exclusion_summary["inconsistent_count"],
+            "excluded_count": exclusion_summary["excluded_count"],
             "artifact_result": artifact_result,
             "ddb_result": ddb_result,
         }
@@ -238,16 +388,15 @@ def handler(event, context):
         error_message = f"{TASK_NAME} Failed: {type(e).__name__}: {e}"
 
         try:
-            ok, reason = update_job_status(
+            update_job_status(
                 job_id=job_id,
                 status="FAILED",
                 job_table_name=JOB_TABLE_NAME,
                 stream_name=LOG_FIREHOSE_STREAM_NAME,
                 user=user,
                 event_type=event_type,
-                error_msg=error_message
+                error_msg=error_message,
             )
-
         except Exception:
             pass
 

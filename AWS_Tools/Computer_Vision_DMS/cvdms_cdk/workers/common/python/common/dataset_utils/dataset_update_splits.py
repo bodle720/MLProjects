@@ -17,14 +17,18 @@ _TASK_TYPE_TO_ID_FIELD = {
     "instance-segmentation": "instance_annotation_ids",
 }
 
+_VALID_SPLITS = {"train", "val", "test"}
+_VALID_SOURCE_SPLIT_STATUSES = {"resolved", "unresolved", "inconsistent"}
+
 def update_dataset_splits(
     *,
     selected_imagery_rows: list[dict[str, Any]],
     current_rows: list[dict[str, Any]],
     operation: Operation,
     split_approach: SplitApproach,
-    split_strategy_name: str,
-) -> list[dict[str, Any]]:
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Compute the next dataset-version rows after applying an add/remove operation.
 
@@ -33,8 +37,8 @@ def update_dataset_splits(
         output of resolve_candidate_imagery(...), already splitter-ready
     - current_rows:
         output of resolve_dataset_membership(...), which differs by task type:
-          * single-label: label, no classes_present
-          * multi-label: labels, no classes_present
+          * single-label: label, no classes_present required in minimal mode
+          * multi-label: labels, no classes_present required in minimal mode
           * structured tasks: payload + classes_present
 
     Semantics:
@@ -54,18 +58,32 @@ def update_dataset_splits(
     - split_approach="rebalance":
         recompute splits across the full next-version image universe
 
-    Output contract:
-    - every returned row has a valid split
-    - every returned row has consistent payload fields
-    - single-label rows always include classes_present = [label]
-    - multi-label rows always include classes_present = labels
-    - structured rows always include normalized classes_present and *_ids
+    Special honoring behavior:
+    - honor_source_splits=True:
+        * split_approach='rebalance' is forbidden
+        * truly new rows are assigned from resolved_source_split
+        * unresolved/inconsistent truly new rows are excluded
+        * overlapping existing rows keep their current split regardless of selected-row
+          source split status because they are already members of the dataset
+
+    Output:
+    - tuple of:
+        1) final split_rows
+        2) summary dict with split/exclusion metadata
     """
     _validate_operation(operation)
     _validate_split_approach(split_approach)
 
+    if not isinstance(honor_source_splits, bool):
+        raise ValueError("honor_source_splits must be a bool.")
+
     if not current_rows:
         raise ValueError("current_rows must not be empty.")
+
+    if honor_source_splits and split_approach == "rebalance":
+        raise ValueError(
+            "split_approach='rebalance' is not allowed when honor_source_splits=True."
+        )
 
     current_by_image_id = _index_rows_by_image_id(
         rows=current_rows,
@@ -113,31 +131,57 @@ def update_dataset_splits(
         raise ValueError("Update would produce an empty dataset version.")
 
     if split_approach == "maintain":
-        return _build_maintained_split_rows(
+        final_rows, summary = _build_maintained_split_rows(
             retained_rows=retained_rows,
             added_rows=added_rows,
             split_strategy_name=split_strategy_name,
+            honor_source_splits=honor_source_splits,
+        )
+    else:
+        final_rows, summary = _build_rebalanced_split_rows(
+            retained_rows=retained_rows,
+            added_rows=added_rows,
+            split_strategy_name=split_strategy_name,
+            honor_source_splits=honor_source_splits,
         )
 
-    return _build_rebalanced_split_rows(
-        retained_rows=retained_rows,
-        added_rows=added_rows,
-        split_strategy_name=split_strategy_name,
+    summary.update(
+        {
+            "operation": operation,
+            "split_approach": split_approach,
+            "honor_source_splits": honor_source_splits,
+            "retained_input_count": len(retained_rows),
+            "added_input_count": len(added_rows),
+            "selected_input_count": len(selected_imagery_rows),
+            "current_input_count": len(current_rows),
+            "final_row_count": len(final_rows),
+        }
     )
+
+    return final_rows, summary
 
 def _build_maintained_split_rows(
     *,
     retained_rows: list[dict[str, Any]],
     added_rows: list[dict[str, Any]],
-    split_strategy_name: str,
-) -> list[dict[str, Any]]:
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Preserve existing splits for retained rows. Only truly new rows are assigned.
     """
     _require_rows_have_existing_split(retained_rows)
 
-    prepared_added_rows = _prepare_rows_for_rebalance(added_rows)
-    _require_rows_have_rebalance_fields(prepared_added_rows)
+    if honor_source_splits:
+        assigned_new_rows, assign_summary = _assign_honored_source_splits(rows=added_rows)
+        out = retained_rows + assigned_new_rows
+        return _finalize_rows_for_output(out), {
+            "effective_split_mode": "honor_source_splits",
+            **assign_summary,
+        }
+
+    prepared_added_rows = _prepare_rows_for_splitter(added_rows)
+    _require_rows_have_splitter_fields(prepared_added_rows)
 
     assigned_new_rows = _assign_splits(
         rows=prepared_added_rows,
@@ -145,26 +189,46 @@ def _build_maintained_split_rows(
     )
 
     out = retained_rows + assigned_new_rows
-    return _finalize_rows_for_output(out)
+    return _finalize_rows_for_output(out), {
+        "effective_split_mode": split_strategy_name,
+        "assigned_new_rows_count": len(assigned_new_rows),
+        "excluded_unresolved_count": 0,
+        "excluded_inconsistent_count": 0,
+        "excluded_count": 0,
+    }
 
 def _build_rebalanced_split_rows(
     *,
     retained_rows: list[dict[str, Any]],
     added_rows: list[dict[str, Any]],
-    split_strategy_name: str,
-) -> list[dict[str, Any]]:
+    split_strategy_name: str | None,
+    honor_source_splits: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Recompute splits across the full next-version image universe.
+
+    Only valid when honor_source_splits=False.
     """
+    if honor_source_splits:
+        raise ValueError(
+            "Rebalance is not allowed when honor_source_splits=True."
+        )
+
     final_rows = retained_rows + added_rows
-    prepared_rows = _prepare_rows_for_rebalance(final_rows)
-    _require_rows_have_rebalance_fields(prepared_rows)
+    prepared_rows = _prepare_rows_for_splitter(final_rows)
+    _require_rows_have_splitter_fields(prepared_rows)
 
     assigned_rows = _assign_splits(
         rows=prepared_rows,
         split_strategy_name=split_strategy_name,
     )
-    return _finalize_rows_for_output(assigned_rows)
+    return _finalize_rows_for_output(assigned_rows), {
+        "effective_split_mode": split_strategy_name,
+        "assigned_new_rows_count": len(added_rows),
+        "excluded_unresolved_count": 0,
+        "excluded_inconsistent_count": 0,
+        "excluded_count": 0,
+    }
 
 def _merge_overlapping_rows_for_add(
     *,
@@ -253,7 +317,7 @@ def _merge_overlapping_rows_for_add(
 def _assign_splits(
     *,
     rows: list[dict[str, Any]],
-    split_strategy_name: str,
+    split_strategy_name: str | None,
 ) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -262,9 +326,58 @@ def _assign_splits(
         assigned_rows = stratified_v1(candidates=rows)
         return _sort_rows_by_image_id([dict(row) for row in assigned_rows])
 
-    raise ValueError(f"Split strategy '{split_strategy_name}' not supported.")
+    raise ValueError(f"Split strategy {split_strategy_name!r} not supported.")
 
-def _prepare_rows_for_rebalance(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _assign_honored_source_splits(
+    *,
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """
+    Assign splits from resolved_source_split for truly new rows.
+
+    Rows with:
+    - source_split_status='resolved' are kept and assigned
+    - source_split_status='unresolved' are excluded
+    - source_split_status='inconsistent' are excluded
+    """
+    assigned_rows: list[dict[str, Any]] = []
+    unresolved_count = 0
+    inconsistent_count = 0
+
+    for row in rows:
+        status = _optional_string(row.get("source_split_status"))
+        resolved_source_split = _optional_string(row.get("resolved_source_split"))
+
+        if status not in _VALID_SOURCE_SPLIT_STATUSES:
+            raise ValueError(
+                f"Invalid source_split_status={status!r} for image_id={row.get('image_id')!r}"
+            )
+
+        if status == "resolved":
+            if resolved_source_split not in _VALID_SPLITS:
+                raise ValueError(
+                    f"Resolved row missing valid resolved_source_split for image_id="
+                    f"{row.get('image_id')!r}: {resolved_source_split!r}"
+                )
+            assigned_rows.append({**row, "split": resolved_source_split})
+            continue
+
+        if status == "unresolved":
+            unresolved_count += 1
+            continue
+
+        if status == "inconsistent":
+            inconsistent_count += 1
+            continue
+
+    return _sort_rows_by_image_id(assigned_rows), {
+        "assigned_new_rows_count": len(assigned_rows),
+        "excluded_unresolved_count": unresolved_count,
+        "excluded_inconsistent_count": inconsistent_count,
+        "excluded_count": unresolved_count + inconsistent_count,
+    }
+
+def _prepare_rows_for_splitter(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Ensure every row is splitter-ready by synthesizing classes_present where needed.
 
@@ -329,7 +442,7 @@ def _finalize_rows_for_output(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     - single-label and multi-label rows always carry classes_present
     - structured rows have normalized classes_present and *_ids
     """
-    prepared = _prepare_rows_for_rebalance(rows)
+    prepared = _prepare_rows_for_splitter(rows)
     _require_rows_have_existing_split(prepared)
     return _sort_rows_by_image_id(prepared)
 
@@ -358,12 +471,12 @@ def _index_rows_by_image_id(
 def _require_rows_have_existing_split(rows: list[dict[str, Any]]) -> None:
     for idx, row in enumerate(rows):
         split = row.get("split")
-        if split not in {"train", "val", "test"}:
+        if split not in _VALID_SPLITS:
             raise ValueError(
-                f"Retained row {idx} is missing a valid split: {row!r}"
+                f"Row {idx} is missing a valid split: {row!r}"
             )
 
-def _require_rows_have_rebalance_fields(rows: list[dict[str, Any]]) -> None:
+def _require_rows_have_splitter_fields(rows: list[dict[str, Any]]) -> None:
     """
     stratified_v1 requires:
     - image_id
@@ -380,13 +493,13 @@ def _require_rows_have_rebalance_fields(rows: list[dict[str, Any]]) -> None:
         missing = [field for field in required_fields if field not in row]
         if missing:
             raise ValueError(
-                f"rebalance row {idx} missing required fields {missing}: {row!r}"
+                f"splitter row {idx} missing required fields {missing}: {row!r}"
             )
 
         classes_present = row.get("classes_present")
         if not isinstance(classes_present, list) or len(classes_present) == 0:
             raise ValueError(
-                f"rebalance row {idx} must have non-empty classes_present: {row!r}"
+                f"splitter row {idx} must have non-empty classes_present: {row!r}"
             )
 
 def _sort_rows_by_image_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -454,3 +567,9 @@ def _require_nonempty_string(value: Any, *, field_name: str) -> str:
         raise ValueError(f"{field_name} cannot be empty.")
 
     return text
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

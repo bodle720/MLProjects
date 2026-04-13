@@ -96,7 +96,7 @@ class DatasetClient:
         Submits request to create a new dataset at version 1.
 
         High-level flow:
-        1. validate inputs
+        1. validate the inputs
         2. verify the dataset does not exist
         3. submit the request to S3
         """

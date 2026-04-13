@@ -7,7 +7,7 @@ _SPLITS: tuple[str, ...] = ("train", "val", "test")
 _SPLIT_RATIOS: dict[str, float] = {
     "train": 0.70,
     "val": 0.15,
-    "test": 0.15
+    "test": 0.15,
 }
 
 # Objective weights, in priority order.
@@ -53,6 +53,11 @@ def stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Output:
         same rows, with 'split' attached
+
+    Notes:
+    - This strategy is for the non-honor-source-splits path.
+    - Source balancing uses row["data_sources"] when present and falls back to the
+      legacy scalar row["data_source"] only for compatibility.
     """
     if not candidates:
         return []
@@ -63,7 +68,7 @@ def stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     overall = _compute_overall_counts(candidates)
 
     target_total_rows = _compute_target_counter(
-        total=sum(1 for _ in candidates),
+        total=len(candidates),
         ratios=_SPLIT_RATIOS,
     )
 
@@ -149,6 +154,7 @@ def stratified_v1(*, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _validate_candidates(candidates: list[dict[str, Any]]) -> None:
     required_fields = {"image_id", "dataset_label_type", "classes_present"}
+
     for idx, row in enumerate(candidates):
         missing = [field for field in required_fields if field not in row]
         if missing:
@@ -166,6 +172,12 @@ def _validate_candidates(candidates: list[dict[str, Any]]) -> None:
         # classes_present should never be empty by this point for a selected candidate.
         if len(row["classes_present"]) == 0:
             raise ValueError(f"Candidate row {idx} has empty classes_present")
+
+        if "data_sources" in row and row["data_sources"] is not None and not isinstance(row["data_sources"], list):
+            raise TypeError(
+                f"Candidate row {idx} field data_sources must be list[str] | None, "
+                f"got {type(row['data_sources']).__name__}"
+            )
 
 def _build_groups(candidates: list[dict[str, Any]]) -> list[GroupSummary]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -195,8 +207,10 @@ def _build_groups(candidates: list[dict[str, Any]]) -> list[GroupSummary]:
             class_union.update(row_classes)
             class_counts.update(row_classes)
 
-            if row.get("data_source"):
-                source_counts[str(row["data_source"])] += 1
+            row_sources = _extract_row_sources(row)
+            if row_sources:
+                source_counts.update(row_sources)
+
             if row.get("lighting_bucket"):
                 lighting_counts[str(row["lighting_bucket"])] += 1
             if row.get("blur_bucket"):
@@ -251,8 +265,10 @@ def _compute_overall_counts(candidates: list[dict[str, Any]]) -> dict[str, Count
     for row in candidates:
         class_counts.update(_deduped_strings(row.get("classes_present", [])))
 
-        if row.get("data_source"):
-            source_counts[str(row["data_source"])] += 1
+        row_sources = _extract_row_sources(row)
+        if row_sources:
+            source_counts.update(row_sources)
+
         if row.get("lighting_bucket"):
             lighting_counts[str(row["lighting_bucket"])] += 1
         if row.get("blur_bucket"):
@@ -406,6 +422,25 @@ def _attach_split_to_rows(
 
     return out
 
+def _extract_row_sources(row: dict[str, Any]) -> list[str]:
+    """
+    Prefer the provenance-aware array field data_sources.
+    Fall back to legacy scalar data_source only for compatibility.
+    """
+    data_sources = row.get("data_sources")
+    if isinstance(data_sources, list):
+        return _deduped_strings(data_sources)
+
+    data_source = row.get("data_source")
+    if data_source is None:
+        return []
+
+    text = str(data_source).strip()
+    if not text:
+        return []
+
+    return [text]
+
 def _deduped_strings(values: list[Any]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -425,5 +460,4 @@ def _stable_small_bias(group_key: str, split: str) -> float:
     Tiny deterministic perturbation so ties break reproducibly.
     """
     digest = sha1(f"{group_key}|{split}".encode("utf-8")).hexdigest()
-    # convert a few hex chars into a tiny fraction in [0, 1)
     return int(digest[:8], 16) / 16**8 / 1000.0

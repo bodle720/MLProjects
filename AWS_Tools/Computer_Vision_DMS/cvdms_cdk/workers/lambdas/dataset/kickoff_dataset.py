@@ -158,7 +158,7 @@ def handler(event, context):
         task_type = submission["task_type"]
         request = submission["request"]
         submission_s3_uri = submission["submission_s3_uri"]
-        dataset_context = submission["dataset_context"] # dict, dataset context fields
+        dataset_context = submission["dataset_context"] # dict, dataset context fields, see dataset client
     except Exception as e:
         log(
             job_id,

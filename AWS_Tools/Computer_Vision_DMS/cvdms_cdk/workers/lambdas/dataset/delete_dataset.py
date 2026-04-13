@@ -85,27 +85,37 @@ def handler(event, context):
             "submission_s3_uri": submission_s3_uri,
             "dataset_id": dataset_id,
             "dataset_id_exists": False,
+            "label_type": None,
+            "latest_version": None,
+            "honor_source_splits": None,
             "deleted_iceberg_rows": False,
             "deleted_s3_artifacts": False,
             "deleted_ddb_records": False,
         }
 
-        dataset_ref = get_dataset_info(
+        dataset_state = get_dataset_info(
             datasets_table_name=DATASETS_TABLE_NAME,
             dataset_versions_table_name=DATASET_VERSIONS_TABLE_NAME,
             dataset_id=dataset_id,
         )
 
-        if not dataset_ref["dataset_info"].get("exists"):
+        if not dataset_state["dataset_info"].get("exists"):
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
-        result["dataset_id_exists"] = True
+        dataset_meta = dataset_state["dataset_info"]
+        dataset_label_type = dataset_meta.get("label_type")
+        latest_version = dataset_meta.get("latest_version")
+        honor_source_splits = dataset_meta.get("honor_source_splits")
 
-        dataset_label_type = dataset_ref["dataset_info"].get("label_type")
         if not dataset_label_type:
             raise ValueError(
                 f"Dataset '{dataset_id}' exists but is missing required field 'label_type'."
             )
+
+        result["dataset_id_exists"] = True
+        result["label_type"] = dataset_label_type
+        result["latest_version"] = latest_version
+        result["honor_source_splits"] = honor_source_splits
 
         iceberg_result = delete_iceberg_membership(
             iceberg_database_name=ICEBERG_DATABASE_NAME,
@@ -147,7 +157,11 @@ def handler(event, context):
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Completed delete flow for dataset_id={dataset_id}",
+            (
+                f"{TASK_NAME} Completed delete flow for dataset_id={dataset_id}, "
+                f"label_type={dataset_label_type}, latest_version={latest_version}, "
+                f"honor_source_splits={honor_source_splits}"
+            ),
             level="info",
         )
 

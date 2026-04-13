@@ -64,7 +64,7 @@ _ALLOWED_SELECTION_CONFIG_KEYS = {
 }
 
 #############################################################
-# The validation helper functions
+# Validation helper functions
 #############################################################
 def validate_dataset_id(dataset_id: str) -> str:
     """
@@ -157,7 +157,6 @@ def validate_split_strategy_name(split_strategy_name: str) -> str:
 def validate_optional_split_strategy_name(
     split_strategy_name: str | None,
 ) -> str | None:
-
     if split_strategy_name is None:
         return None
 
@@ -409,8 +408,8 @@ def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any
 
     return validated
 
-def validate_honor_source_splits(val):
-    if val not in [True, False]:
+def validate_honor_source_splits(val: Any) -> bool:
+    if not isinstance(val, bool):
         raise TypeError("honor_source_splits must be a boolean True or False.")
     return val
 
@@ -424,10 +423,14 @@ def validate_create_dataset_inputs(
     description: str | None,
     selection_config: dict[str, Any],
     split_strategy_name: str,
-    honor_source_splits: bool
+    honor_source_splits: bool,
 ) -> dict[str, Any]:
     """
     Top-level validator for DatasetClient.create_dataset(...).
+
+    Notes:
+    - split_strategy_name remains required by the public client API
+    - when honor_source_splits=True, the server may ignore split_strategy_name
     """
     return {
         "dataset_id": validate_dataset_id(dataset_id),
@@ -435,7 +438,7 @@ def validate_create_dataset_inputs(
         "description": validate_optional_description(description),
         "selection_config": validate_selection_config(selection_config),
         "split_strategy_name": validate_split_strategy_name(split_strategy_name),
-        "honor_source_splits": validate_honor_source_splits(honor_source_splits)
+        "honor_source_splits": validate_honor_source_splits(honor_source_splits),
     }
 
 def validate_update_dataset_inputs(
@@ -470,10 +473,6 @@ def validate_update_dataset_inputs(
         raise ValueError(
             "split_strategy_name is required when split_approach='rebalance'."
         )
-    elif validated_split_approach == "maintain" and validated_split_strategy_name is not None:
-        raise ValueError(
-            "split_strategy_name must be None when split_approach='maintain'."
-        )
 
     return {
         "dataset_id": validated_dataset_id,
@@ -486,7 +485,7 @@ def validate_update_dataset_inputs(
 
 def validate_delete_dataset_inputs(
     *,
-    dataset_id: str
+    dataset_id: str,
 ) -> dict[str, Any]:
     """
     Top-level validator for DatasetClient.delete_dataset_all_versions(...).
@@ -502,7 +501,7 @@ def validate_delete_dataset_inputs(
 
 def validate_get_dataset_inputs(
     *,
-    dataset_id: str
+    dataset_id: str,
 ) -> dict[str, Any]:
     """
     Top-level validator for DatasetClient.get_dataset(...).

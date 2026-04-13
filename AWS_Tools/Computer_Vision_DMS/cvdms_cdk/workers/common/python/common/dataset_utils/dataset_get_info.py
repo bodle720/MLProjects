@@ -23,15 +23,14 @@ def get_dataset_info(
     logging.info("Getting dataset row.")
     dataset_item = get_dataset_row(
         datasets_table_name=datasets_table_name,
-        dataset_id=dataset_id
+        dataset_id=dataset_id,
     )
 
     if dataset_item is None:
-        res = {
+        return {
             "dataset_info": {"exists": False},
             "latest_version_info": None,
         }
-        return res
 
     latest_version = _coerce_required_int(
         dataset_item.get("latest_version"),
@@ -114,38 +113,92 @@ def build_get_dataset_result(
     dataset_item: dict[str, Any],
     dataset_version_item: dict[str, Any],
 ) -> dict[str, Any]:
+    dataset_id = _coerce_required_string(
+        dataset_item.get("dataset_id"),
+        field_name="dataset_id",
+    )
+    latest_version = _coerce_required_int(
+        dataset_item.get("latest_version"),
+        field_name="latest_version",
+    )
+    label_type = _coerce_required_string(
+        dataset_item.get("label_type"),
+        field_name="label_type",
+    )
+    allowed_classes = _coerce_required_string_list(
+        dataset_item.get("allowed_classes"),
+        field_name="allowed_classes",
+    )
+    honor_source_splits = _coerce_required_bool(
+        dataset_item.get("honor_source_splits"),
+        field_name="honor_source_splits",
+    )
+
+    version = _coerce_required_int(
+        dataset_version_item.get("version"),
+        field_name="version",
+    )
+    total_image_count = _coerce_required_int(
+        dataset_version_item.get("total_image_count"),
+        field_name="total_image_count",
+    )
+    total_train_count = _coerce_required_int(
+        dataset_version_item.get("total_train_count"),
+        field_name="total_train_count",
+    )
+    total_val_count = _coerce_required_int(
+        dataset_version_item.get("total_val_count"),
+        field_name="total_val_count",
+    )
+    total_test_count = _coerce_required_int(
+        dataset_version_item.get("total_test_count"),
+        field_name="total_test_count",
+    )
+
+    # Prefer version-row copies when present, but fall back to dataset row for safety.
+    latest_version_honor_source_splits = dataset_version_item.get("honor_source_splits")
+    if latest_version_honor_source_splits is None:
+        latest_version_honor_source_splits = honor_source_splits
+    else:
+        latest_version_honor_source_splits = _coerce_required_bool(
+            latest_version_honor_source_splits,
+            field_name="latest_version_info.honor_source_splits",
+        )
 
     result: dict[str, Any] = {
         "dataset_info": {
             "exists": True,
-            "dataset_id": dataset_item["dataset_id"],
-            "latest_version": _coerce_required_int(dataset_item.get("latest_version"),field_name="latest_version"),
-            "label_type": dataset_item["label_type"],
-            "allowed_classes": dataset_item["allowed_classes"],
-            "created_at": dataset_item.get("created_at"),
-            "created_by": dataset_item.get("created_by"),
-            "last_modified_by": dataset_item.get("last_modified_by"),
-            "dataset_description": dataset_item.get("dataset_description")
+            "dataset_id": dataset_id,
+            "latest_version": latest_version,
+            "label_type": label_type,
+            "allowed_classes": allowed_classes,
+            "honor_source_splits": honor_source_splits,
+            "created_at": _coerce_optional_string(dataset_item.get("created_at")),
+            "created_by": _coerce_optional_string(dataset_item.get("created_by")),
+            "last_modified_by": _coerce_optional_string(dataset_item.get("last_modified_by")),
+            "dataset_description": _coerce_optional_string(dataset_item.get("dataset_description")),
         },
-         "latest_version_info": {
-            "version": _coerce_required_int(dataset_version_item.get("version"),field_name="version"),
-            "created_at": dataset_version_item.get("created_at"),
-            "description": dataset_version_item.get("description"),
-            "operation": dataset_version_item.get("operation"),
-            "split_approach": dataset_version_item.get("split_approach"),
-            "split_strategy": dataset_version_item.get("split_strategy_name")     ,
-            "total_image_count": _coerce_required_int(dataset_version_item.get("total_image_count"),field_name="total_image_count"),
-            "total_train_count": _coerce_required_int(dataset_version_item.get("total_train_count"),field_name="total_train_count"),
-            "total_val_count": _coerce_required_int(dataset_version_item.get("total_val_count"),field_name="total_val_count"),
-            "total_test_count": _coerce_required_int(dataset_version_item.get("total_test_count"),field_name="total_test_count"),
-            "s3_prefix": dataset_version_item.get("version_s3_prefix"),
-            "selection_sql_uri": dataset_version_item.get("selection_sql_uri"),
-            "selection_config_uri": dataset_version_item.get("selection_config_uri"),
-            "metadata_json_uri": dataset_version_item.get("metadata_json_uri"),
-            "membership_enriched_csv_uri": dataset_version_item.get("membership_enriched_csv_uri"),
-            "manifest_uris": dataset_version_item.get("manifest_uris"),
-            "selection_config": dataset_version_item.get("selection_config")
-         }
+        "latest_version_info": {
+            "version": version,
+            "created_at": _coerce_optional_string(dataset_version_item.get("created_at")),
+            "description": _coerce_optional_string(dataset_version_item.get("description")),
+            "operation": _coerce_optional_string(dataset_version_item.get("operation")),
+            "split_approach": _coerce_optional_string(dataset_version_item.get("split_approach")),
+            "split_strategy_name": _coerce_optional_string(dataset_version_item.get("split_strategy_name")),
+            "honor_source_splits": latest_version_honor_source_splits,
+            "effective_split_mode": _coerce_optional_string(dataset_version_item.get("effective_split_mode")),
+            "total_image_count": total_image_count,
+            "total_train_count": total_train_count,
+            "total_val_count": total_val_count,
+            "total_test_count": total_test_count,
+            "version_s3_prefix": _coerce_optional_string(dataset_version_item.get("version_s3_prefix")),
+            "selection_sql_uri": _coerce_optional_string(dataset_version_item.get("selection_sql_uri")),
+            "selection_config_uri": _coerce_optional_string(dataset_version_item.get("selection_config_uri")),
+            "metadata_json_uri": _coerce_optional_string(dataset_version_item.get("metadata_json_uri")),
+            "membership_enriched_csv_uri": _coerce_optional_string(dataset_version_item.get("membership_enriched_csv_uri")),
+            "manifest_uris": _coerce_optional_dict(dataset_version_item.get("manifest_uris")),
+            "selection_config": _coerce_optional_dict(dataset_version_item.get("selection_config")),
+        },
     }
 
     return result
@@ -183,3 +236,66 @@ def _coerce_required_int(value: Any, *, field_name: str) -> int:
             return int(stripped)
 
     raise ValueError(f"Field '{field_name}' must be an int, got {value!r}")
+
+def _coerce_required_bool(value: Any, *, field_name: str) -> bool:
+    value = normalize_ddb_value(value)
+
+    if isinstance(value, bool):
+        return value
+
+    raise ValueError(f"Field '{field_name}' must be a bool, got {value!r}")
+
+def _coerce_required_string(value: Any, *, field_name: str) -> str:
+    value = normalize_ddb_value(value)
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+
+    raise ValueError(f"Field '{field_name}' must be a non-empty string, got {value!r}")
+
+def _coerce_optional_string(value: Any) -> str | None:
+    value = normalize_ddb_value(value)
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+
+    return str(value).strip() or None
+
+def _coerce_required_string_list(value: Any, *, field_name: str) -> list[str]:
+    value = normalize_ddb_value(value)
+
+    if not isinstance(value, list):
+        raise ValueError(f"Field '{field_name}' must be a list[str], got {value!r}")
+
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(
+                f"Field '{field_name}' must contain only strings, got {item!r}"
+            )
+        text = item.strip()
+        if not text:
+            continue
+        out.append(text)
+
+    if not out:
+        raise ValueError(f"Field '{field_name}' must be a non-empty list[str]")
+
+    return out
+
+def _coerce_optional_dict(value: Any) -> dict[str, Any] | None:
+    value = normalize_ddb_value(value)
+
+    if value is None:
+        return None
+
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected dict or None, got {value!r}")
+
+    return value
