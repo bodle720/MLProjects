@@ -210,13 +210,15 @@ class CvdmsApp:
                                  label_type: str,
                                  description: str,
                                  selection_config: dict,
-                                 split_strategy_name: str) -> Dict:
+                                 split_strategy_name: str,
+                                 honor_source_splits: bool) -> Dict:
 
         return self._dataset_client.submit_create_dataset(dataset_id=dataset_id,
                                                             label_type=label_type,
                                                             description=description,
                                                             selection_config=selection_config,
-                                                            split_strategy_name=split_strategy_name)
+                                                            split_strategy_name=split_strategy_name,
+                                                            honor_source_splits=honor_source_splits)
 
     # Call to update a dataset.
     def submit_update_dataset(self,

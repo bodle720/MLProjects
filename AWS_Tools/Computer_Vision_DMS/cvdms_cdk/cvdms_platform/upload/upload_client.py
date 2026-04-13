@@ -424,9 +424,9 @@ class UploadClient:
             err = validation_dict.get('error')
             # mark job failed and release lock
             logging.error(f"Failed to load and validate manifest: {err}")
-            self._update_job_status(job_id, "FAILED", error_msg=err)
+            job_ok, job_msg = self._update_job_status(job_id, "FAILED", error_msg=err)
             self._release_lock(expected_holder=job_id)
-            return {"error": err}
+            return {"error": str(err) + f" updated job status to FAILED attempt: {job_ok}, msg = {job_msg}"}
         else:
             manifest_path = validation_dict['local_path']
 
@@ -449,9 +449,9 @@ class UploadClient:
                                           source_split)
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
-            self._update_job_status(job_id, "FAILED", error_msg=msg)
+            job_ok, job_msg = self._update_job_status(job_id, "FAILED", error_msg=msg)
             self._release_lock(expected_holder=job_id)
-            return {"error": f"Failed upload step: {msg}"}
+            return {"error": f"Failed upload step: {msg}, updated job status to FAILED attempt: {job_ok}, msg = {job_msg}"}
 
         logging.info("Done uploading manifest and job.json to S3.")
         self._update_job_status(job_id, "IN_PROGRESS")

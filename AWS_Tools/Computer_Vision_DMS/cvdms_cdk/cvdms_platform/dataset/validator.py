@@ -409,6 +409,11 @@ def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any
 
     return validated
 
+def validate_honor_source_splits(val):
+    if val not in [True, False]:
+        raise TypeError("honor_source_splits must be a boolean True or False.")
+    return val
+
 #############################################################
 # The four main validator entrypoints
 #############################################################
@@ -419,6 +424,7 @@ def validate_create_dataset_inputs(
     description: str | None,
     selection_config: dict[str, Any],
     split_strategy_name: str,
+    honor_source_splits: bool
 ) -> dict[str, Any]:
     """
     Top-level validator for DatasetClient.create_dataset(...).
@@ -429,6 +435,7 @@ def validate_create_dataset_inputs(
         "description": validate_optional_description(description),
         "selection_config": validate_selection_config(selection_config),
         "split_strategy_name": validate_split_strategy_name(split_strategy_name),
+        "honor_source_splits": validate_honor_source_splits(honor_source_splits)
     }
 
 def validate_update_dataset_inputs(

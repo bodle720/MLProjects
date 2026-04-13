@@ -90,7 +90,8 @@ class DatasetClient:
                                 label_type: str,
                                 description: str | None,
                                 selection_config: dict,
-                                split_strategy_name: str) -> dict:
+                                split_strategy_name: str,
+                                honor_source_splits: bool) -> dict:
         """
         Submits request to create a new dataset at version 1.
 
@@ -109,7 +110,8 @@ class DatasetClient:
                 label_type=label_type,
                 description=description,
                 selection_config=selection_config,
-                split_strategy_name=split_strategy_name
+                split_strategy_name=split_strategy_name,
+                honor_source_splits=honor_source_splits
             )
 
             dataset_id = validated["dataset_id"]
@@ -117,6 +119,7 @@ class DatasetClient:
             description = validated["description"]
             selection_config = validated["selection_config"]
             split_strategy_name = validated["split_strategy_name"]
+            honor_source_splits = validated["honor_source_splits"]
         except Exception as e:
             logging.error(str(e))
             raise
@@ -135,6 +138,17 @@ class DatasetClient:
             logging.error(f"Dataset '{dataset_id}' already exists, choose a different name.")
             raise ValueError(f"Dataset '{dataset_id}' already exists, choose a different name.")
 
+        if honor_source_splits and split_strategy_name:
+            logging.info(
+                "Create request for dataset_id='%s' has honor_source_splits=True, "
+                "so split_strategy_name='%s' will be ignored. "
+                "Dataset splits will be assigned directly from image_source_membership.source_split. "
+                "Images with conflicting non-empty source splits will be excluded, and images with no "
+                "resolved non-empty source split will also be excluded.",
+                dataset_id,
+                split_strategy_name,
+            )
+
         # 3. Submit task to S3
         payload = {"user": self.user,
                     "event_type": self.event_type,
@@ -145,7 +159,8 @@ class DatasetClient:
                         "new_version": 1,
                         "description": description,
                         "selection_config": selection_config,
-                        "split_strategy_name": split_strategy_name
+                        "split_strategy_name": split_strategy_name,
+                        "honor_source_splits": honor_source_splits
                     }
                 }
 
@@ -207,6 +222,24 @@ class DatasetClient:
             logging.error(f"Dataset '{dataset_id}' does not exist.")
             raise ValueError(f"Dataset '{dataset_id}' does not exist.")
 
+        honor_source_splits = dataset_info["dataset_info"]["honor_source_splits"]
+
+        if honor_source_splits and split_approach == "rebalance":
+            raise ValueError(
+                "You may not rebalance a dataset that has honor_source_splits=True."
+            )
+
+        if honor_source_splits and split_approach == "maintain" and split_strategy_name:
+            logging.info(
+                "Update request for dataset_id='%s' has honor_source_splits=True and "
+                "split_approach='maintain', so split_strategy_name='%s' will be ignored. "
+                "Existing retained rows keep their current split, and newly added rows will be "
+                "assigned directly from image_source_membership.source_split. "
+                "Images with conflicting non-empty source splits will be excluded, and images with no "
+                "resolved non-empty source split will also be excluded.",
+                dataset_id,
+                split_strategy_name,
+            )
         label_type = dataset_info["dataset_info"]["label_type"]
         current_version = dataset_info["dataset_info"]["latest_version"]
         new_version = current_version + 1
@@ -233,7 +266,8 @@ class DatasetClient:
                         "selection_config": selection_config,
                         "split_approach": split_approach,
                         "split_strategy_name": split_strategy_name,
-                        "description": description
+                        "description": description,
+                        "honor_source_splits": honor_source_splits
                     }
                 }
 
@@ -454,14 +488,18 @@ class DatasetClient:
 
         job_id = holder_or_err  # we used holder as generated job id in acquire lock
         dataset_id = payload["request"]["dataset_id"]
-        new_version = payload["request"]["new_version"] # None for delete
+        new_version = payload["request"]["new_version"] # 1 for create, int N > 1 for update, None for delete
         label_type = payload["request"]["label_type"]
+        honor_source_splits = payload["request"].get("honor_source_splits")
 
         logging.info(f"Acquired lock: {job_id}")
 
         payload["job_id"] = job_id
         payload["submission_s3_uri"] = f"s3://{self.file_bucket_name}/temp/dataset-ops/{job_id}/submission.json"
-        payload["dataset_context"] = {"dataset_id": dataset_id, "new_version": new_version, "label_type": label_type}
+        payload["dataset_context"] = {"dataset_id": dataset_id,
+                                      "new_version": new_version,
+                                      "label_type": label_type,
+                                      "honor_source_splits": honor_source_splits}
 
         # create job row
         task_type = payload["task_type"]
