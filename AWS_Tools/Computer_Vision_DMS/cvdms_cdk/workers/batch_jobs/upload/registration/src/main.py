@@ -24,6 +24,7 @@ from helpers import (
     build_canonical_imagery_row,
     build_canonical_label_table_row,
     build_image_label_rows,
+    build_image_source_membership_row,
     copy_objects_or_raise,
     fingerprint_owner_shard_id,
     build_owner_label_output_key,
@@ -34,6 +35,7 @@ JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
+SOURCE_SPLIT = os.environ["SOURCE_SPLIT"]
 PATH_PREFIX = os.environ["PATH_PREFIX"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
@@ -54,11 +56,8 @@ if not SHA256_TABLE_NAME:
 
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/registration-step/processed"
 
-# Safety bound for a single worker shard (same as before)
 MAX_ROWS_IN_MEMORY = 200000
-
-# Fingerprint-owner shard count (no extra infra required; keep fixed & deterministic)
-OWNER_SHARDS = 512  # keep aligned with your MAX_SHARDS in batching
+OWNER_SHARDS = 512  # keep aligned with batching MAX_SHARDS
 
 ddb = boto3.client("dynamodb")
 
@@ -68,7 +67,9 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
     Uses a conditional put to avoid overwriting an existing mapping.
     """
     if not sha256_hash or not image_id:
-        raise RuntimeError(f"{TASK_NAME} cannot write sha256 mapping: missing sha256_hash or image_id")
+        raise RuntimeError(
+            f"{TASK_NAME} cannot write sha256 mapping: missing sha256_hash or image_id"
+        )
 
     try:
         ddb.put_item(
@@ -84,7 +85,6 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
         if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
 
-        # already exists: verify it's the same mapping
         resp = ddb.get_item(
             TableName=SHA256_TABLE_NAME,
             Key={"sha256": {"S": sha256_hash}},
@@ -93,27 +93,33 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
         existing = resp.get("Item", {}).get("image_id", {}).get("S")
 
         if not existing:
-            raise RuntimeError(f"{TASK_NAME} sha256_hash exists but could not read existing image_id")
+            raise RuntimeError(
+                f"{TASK_NAME} sha256_hash exists but could not read existing image_id"
+            )
 
         if existing == image_id:
             return
 
-        raise RuntimeError(f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}")
+        raise RuntimeError(
+            f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}"
+        )
 
 def process_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
     Dict[str, List[Dict[str, Any]]],   # canonical label rows by owner shard
     List[Dict[str, Any]],
-    Dict[str, Any]
+    List[Dict[str, Any]],
+    Dict[str, Any],
 ]:
     """
     Returns:
-      - updated_upload_rows: list[dict] (rows we read, with registration_status updated when processed)
-      - canonical_imagery_rows: list[dict] (target-image shard owned)
-      - canonical_label_rows_by_owner: dict[owner_shard_id -> list[dict]] (fingerprint-owner owned)
-      - image_labels_rows: list[dict] (target-image shard owned)
-      - summary: dict
+      - updated_upload_rows
+      - canonical_imagery_rows
+      - canonical_label_rows_by_owner
+      - image_labels_rows
+      - image_source_membership_rows
+      - summary
     """
     files = manifest.get("files", []) or []
     shard_name = manifest.get("shard_prefix", "shard")
@@ -128,21 +134,23 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
     updated_upload_rows: List[Dict[str, Any]] = []
     canonical_imagery_rows: List[Dict[str, Any]] = []
     image_labels_rows: List[Dict[str, Any]] = []
+    image_source_membership_rows: List[Dict[str, Any]] = []
 
-    # Canonical label rows are keyed by fingerprint-owner shard
     canonical_label_rows_by_owner: Dict[str, List[Dict[str, Any]]] = {}
 
-    # Dedup within THIS worker outputs
     seen_canonical_images: set[str] = set()
-    seen_image_labels: set[Tuple[str, str, str]] = set()  # (image_id, label_type, label_id)
-
-    # Dedup label rows emitted by this worker (avoid duplicates in its per-owner outputs)
+    seen_image_labels: set[Tuple[str, str, str]] = set()
     seen_fingerprints: set[str] = set()
+
+    # one upload job has one data_source/source_split, but dedupe anyway
+    seen_source_memberships: Dict[Tuple[str, str], Any] = {}
 
     for row in read_parquet_rows_from_s3_uris(files):
         total_rows += 1
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY={MAX_ROWS_IN_MEMORY}")
+            raise RuntimeError(
+                f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY={MAX_ROWS_IN_MEMORY}"
+            )
 
         vstat = row.get("validation_status")
         dstat = row.get("dedup_status")
@@ -165,11 +173,11 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
 
         if dstat not in ("passed", "external_duplicate"):
             skipped_rows += 1
-
-            # Preserve more specific dedup failure context when present
             dedup_err = row.get("dedup_error")
             if isinstance(dedup_err, str) and dedup_err.strip():
-                row["registration_error"] = f"skipped registration because dedup failed: {dedup_err.strip()}"
+                row["registration_error"] = (
+                    f"skipped registration because dedup failed: {dedup_err.strip()}"
+                )
             else:
                 row["registration_error"] = f"skipped registration because dedup_status={dstat}"
 
@@ -179,6 +187,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
             continue
 
         registration_candidate_rows += 1
+
         try:
             if dstat in ("passed", "external_duplicate"):
                 usable_labels = [
@@ -191,7 +200,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                     raise RuntimeError(f"{TASK_NAME} Missing usable string_labels for {LABEL_TYPE}")
 
             if dstat == "passed":
-                # New canonical image
                 image_id = row.get("image_id")
                 if not image_id:
                     raise RuntimeError(f"{TASK_NAME} Missing image_id")
@@ -204,21 +212,25 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                 if not sha256_hash:
                     raise RuntimeError(f"{TASK_NAME} Missing sha256_hash")
 
-                # Copy image to canonical location
                 canonical_image_key, canonical_image_uri = build_canonical_image_dest(
-                    FILE_BUCKET_NAME, image_id, temp_image_uri, DATA_SOURCE, PATH_PREFIX
+                    FILE_BUCKET_NAME,
+                    image_id,
+                    temp_image_uri,
+                    DATA_SOURCE,
+                    PATH_PREFIX,
                 )
 
                 copy_plan: List[Tuple[str, str, str, str]] = []
                 src_b, src_k = parse_s3_uri(temp_image_uri, TASK_NAME)
                 copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, canonical_image_key))
 
-                # Label handling (files + label table row + image_labels rows)
                 fingerprint = row.get("label_fingerprint")
 
                 if LABEL_TYPE in ("object-detection", "semantic-segmentation", "instance-segmentation"):
                     if not fingerprint:
-                        raise RuntimeError(f"{TASK_NAME} Missing label_fingerprint for label-type requiring label files")
+                        raise RuntimeError(
+                            f"{TASK_NAME} Missing label_fingerprint for label-type requiring label files"
+                        )
 
                     _, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
                         file_bucket=FILE_BUCKET_NAME,
@@ -233,8 +245,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
 
                     copy_plan.extend(label_copy_plan)
 
-                    # Emit canonical label row exactly once per fingerprint for THIS worker,
-                    # routed to the fingerprint-owner shard output.
                     if fingerprint not in seen_fingerprints:
                         label_row = build_canonical_label_table_row(
                             label_type=LABEL_TYPE,
@@ -247,10 +257,8 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             canonical_label_rows_by_owner.setdefault(owner, []).append(label_row)
                             seen_fingerprints.add(fingerprint)
 
-                # Execute all copies for this row
                 copy_objects_or_raise(copy_plan)
 
-                # Canonical imagery row (target-image shard owned)
                 if image_id not in seen_canonical_images:
                     canon_img_row = build_canonical_imagery_row(
                         row=row,
@@ -260,7 +268,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                     canonical_imagery_rows.append(canon_img_row)
                     seen_canonical_images.add(image_id)
 
-                # Image_labels rows (target-image shard owned)
                 for ilr in build_image_label_rows(
                     job_label_type=LABEL_TYPE,
                     target_image_id=image_id,
@@ -272,7 +279,26 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                         image_labels_rows.append(ilr)
                         seen_image_labels.add(key)
 
-                # Register sha256->image_id mapping in DDB (only for NEW canonical images)
+                # new provenance membership row
+                membership_row = build_image_source_membership_row(
+                    image_id=image_id,
+                    data_source=DATA_SOURCE,
+                    source_split=SOURCE_SPLIT,
+                )
+                membership_key = (membership_row["image_id"], membership_row["data_source"])
+                membership_split = membership_row["source_split"]
+
+                if membership_key in seen_source_memberships:
+                    prev_split = seen_source_memberships[membership_key]
+                    if prev_split != membership_split:
+                        raise RuntimeError(
+                            f"{TASK_NAME} conflicting source_split for {membership_key}: "
+                            f"{prev_split} vs {membership_split}"
+                        )
+                else:
+                    image_source_membership_rows.append(membership_row)
+                    seen_source_memberships[membership_key] = membership_split
+
                 put_sha256_mapping_idempotent(sha256_hash=sha256_hash, image_id=image_id)
 
                 row["registration_status"] = "passed"
@@ -280,14 +306,14 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                 new_canonical_images_registered += 1
 
             elif dstat == "external_duplicate":
-                # Label enrichment against matched_image_id
                 target_image_id = row.get("matched_image_id")
                 if not target_image_id:
-                    raise RuntimeError(f"{TASK_NAME} Missing matched_image_id for external_duplicate row")
+                    raise RuntimeError(
+                        f"{TASK_NAME} Missing matched_image_id for external_duplicate row"
+                    )
 
                 fingerprint = row.get("label_fingerprint")
 
-                # 1) Image_labels mappings (target-image shard owned)
                 for ilr in build_image_label_rows(
                     job_label_type=LABEL_TYPE,
                     target_image_id=target_image_id,
@@ -299,10 +325,11 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                         image_labels_rows.append(ilr)
                         seen_image_labels.add(key)
 
-                # 2) Structured label types: ensure label files exist & emit canonical label row routed to owner shard
                 if LABEL_TYPE in ("object-detection", "semantic-segmentation", "instance-segmentation"):
                     if not fingerprint:
-                        raise RuntimeError(f"{TASK_NAME} Missing label_fingerprint for external_duplicate structured label")
+                        raise RuntimeError(
+                            f"{TASK_NAME} Missing label_fingerprint for external_duplicate structured label"
+                        )
 
                     _, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
                         file_bucket=FILE_BUCKET_NAME,
@@ -315,10 +342,8 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                         temp_instance_meta_uri=row.get("temp_source_ref_instance_meta"),
                     )
 
-                    # Copy (deterministic keys; overwrites acceptable)
                     copy_objects_or_raise(label_copy_plan)
 
-                    # Emit canonical label row once per fingerprint for THIS worker, routed to owner shard
                     if fingerprint not in seen_fingerprints:
                         label_row = build_canonical_label_table_row(
                             label_type=LABEL_TYPE,
@@ -331,7 +356,27 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             canonical_label_rows_by_owner.setdefault(owner, []).append(label_row)
                             seen_fingerprints.add(fingerprint)
 
-                # NOTE: We intentionally do NOT set registration_status here; ingest will decide enriched/no_op based on DB.
+                # provenance membership row for existing canonical image
+                membership_row = build_image_source_membership_row(
+                    image_id=target_image_id,
+                    data_source=DATA_SOURCE,
+                    source_split=SOURCE_SPLIT,
+                )
+                membership_key = (membership_row["image_id"], membership_row["data_source"])
+                membership_split = membership_row["source_split"]
+
+                if membership_key in seen_source_memberships:
+                    prev_split = seen_source_memberships[membership_key]
+                    if prev_split != membership_split:
+                        raise RuntimeError(
+                            f"{TASK_NAME} conflicting source_split for {membership_key}: "
+                            f"{prev_split} vs {membership_split}"
+                        )
+                else:
+                    image_source_membership_rows.append(membership_row)
+                    seen_source_memberships[membership_key] = membership_split
+
+                # keep registration_status unset here; ingest decides enriched vs no_op
             else:
                 skipped_rows += 1
 
@@ -349,17 +394,25 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
         "shard_name": shard_name,
         "label_type": LABEL_TYPE,
         "rows_read": total_rows,
-        "registration_candidate_rows": registration_candidate_rows, # rows that entered active registration/enrichment logic
+        "registration_candidate_rows": registration_candidate_rows,
         "skipped_rows": skipped_rows,
-        "new_canonical_images_registered": new_canonical_images_registered, # not counting enrichments or no-ops
+        "new_canonical_images_registered": new_canonical_images_registered,
         "registration_failed": reg_failed,
         "canonical_imagery_rows": len(canonical_imagery_rows),
         "image_labels_rows": len(image_labels_rows),
+        "image_source_membership_rows": len(image_source_membership_rows),
         "canonical_label_owner_shards_touched": owner_shards_touched,
         "canonical_label_rows_total": sum(len(v) for v in canonical_label_rows_by_owner.values()),
     }
 
-    return updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary
+    return (
+        updated_upload_rows,
+        canonical_imagery_rows,
+        canonical_label_rows_by_owner,
+        image_labels_rows,
+        image_source_membership_rows,
+        summary,
+    )
 
 def write_outputs(
     shard_name: str,
@@ -367,6 +420,7 @@ def write_outputs(
     canonical_imagery_rows: List[Dict[str, Any]],
     canonical_label_rows_by_owner: Dict[str, List[Dict[str, Any]]],
     image_labels_rows: List[Dict[str, Any]],
+    image_source_membership_rows: List[Dict[str, Any]],
     summary: Dict[str, Any],
 ) -> None:
     bucket = FILE_BUCKET_NAME
@@ -374,17 +428,18 @@ def write_outputs(
     upload_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
     imagery_key = f"{PROCESSED_PREFIX}/canonical_imagery/shard-{shard_name}.jsonl"
     image_labels_key = f"{PROCESSED_PREFIX}/image_labels/shard-{shard_name}.jsonl"
+    image_source_membership_key = (
+        f"{PROCESSED_PREFIX}/image_source_membership/shard-{shard_name}.jsonl"
+    )
 
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
-    # Stream to S3 to avoid huge in-memory strings
     jsonl_stream_to_s3(bucket, upload_key, updated_upload_rows)
     jsonl_stream_to_s3(bucket, imagery_key, canonical_imagery_rows)
     jsonl_stream_to_s3(bucket, image_labels_key, image_labels_rows)
+    jsonl_stream_to_s3(bucket, image_source_membership_key, image_source_membership_rows)
 
-    # Fingerprint-owner outputs (many files)
-    # Each owner shard gets one file from this worker (may be empty if not present -> we skip writing those).
     for owner_shard_id, rows in canonical_label_rows_by_owner.items():
         if not rows:
             continue
@@ -412,19 +467,37 @@ def main():
 
     shard_name = manifest.get("shard_prefix", "shard")
 
-    log(JOB_ID,
+    log(
+        JOB_ID,
         USER,
         EVENT_TYPE,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
+        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
+    )
 
     try:
-        updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary = process_manifest(manifest)
+        (
+            updated_upload_rows,
+            canonical_imagery_rows,
+            canonical_label_rows_by_owner,
+            image_labels_rows,
+            image_source_membership_rows,
+            summary,
+        ) = process_manifest(manifest)
 
-        write_outputs(shard_name, updated_upload_rows, canonical_imagery_rows, canonical_label_rows_by_owner, image_labels_rows, summary)
+        write_outputs(
+            shard_name,
+            updated_upload_rows,
+            canonical_imagery_rows,
+            canonical_label_rows_by_owner,
+            image_labels_rows,
+            image_source_membership_rows,
+            summary,
+        )
 
         elapsed = time.time() - start
-        log(JOB_ID,
+        log(
+            JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
@@ -434,17 +507,21 @@ def main():
             f"registration_failed={summary['registration_failed']} "
             f"canon_imagery={summary['canonical_imagery_rows']} "
             f"image_labels={summary['image_labels_rows']} "
+            f"image_source_membership={summary['image_source_membership_rows']} "
             f"canon_label_rows={summary['canonical_label_rows_total']} "
             f"owner_shards={len(summary['canonical_label_owner_shards_touched'])} "
-            f"time_s={elapsed:.1f}")
+            f"time_s={elapsed:.1f}",
+        )
 
     except Exception as e:
-        log(JOB_ID,
+        log(
+            JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
             f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
-            level="error")
+            level="error",
+        )
         raise
 
 if __name__ == "__main__":

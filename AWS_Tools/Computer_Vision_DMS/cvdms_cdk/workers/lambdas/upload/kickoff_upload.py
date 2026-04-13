@@ -150,12 +150,26 @@ def handler(event, context):
         event_type = job_data.get("event_type", "IMAGE_UPLOAD")
         label_type = job_data["label_type"]
         data_source = job_data["data_source"]
+        source_split = job_data["source_split"]
         path_prefix = job_data["path_prefix"]
         registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
         log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json", level='error')
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
+
+    if not isinstance(data_source, str) or data_source.strip() == "":
+        return fail(job_id, user, event_type,f"{TASK_NAME} Invalid data_source type: {type(data_source).__name__}, value = {data_source}")
+
+    if source_split is None:
+        source_split = ""
+    elif isinstance(source_split, str):
+        source_split = source_split.strip().lower()
+    else:
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid source_split type: {type(source_split).__name__}")
+
+    if source_split not in {"", "train", "val", "test"}:
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid source_split: {source_split}")
 
     if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid label_type: {label_type}")
@@ -203,6 +217,7 @@ def handler(event, context):
                 "event_type": event_type,
                 "label_type": label_type,
                 "data_source": data_source,
+                "source_split": source_split,
                 "path_prefix": path_prefix,
                 "original_manifest_s3_uri": original_manifest_s3_uri,
                 "registration_time": registration_time
@@ -221,6 +236,7 @@ def handler(event, context):
         "label_type": label_type,
         "event_type": event_type,
         "data_source": data_source,
+        "source_split": source_split,
         "path_prefix": path_prefix,
         "original_manifest_s3_uri": original_manifest_s3_uri
     }

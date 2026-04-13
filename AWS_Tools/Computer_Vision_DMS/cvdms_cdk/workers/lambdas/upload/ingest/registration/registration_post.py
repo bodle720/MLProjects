@@ -33,6 +33,7 @@ def handler(event, context):
     total_canon_imagery_rows = _safe_int(pre.get("total_canon_imagery_rows"))
     total_canon_label_rows = _safe_int(pre.get("total_canon_label_rows"))
     total_image_labels_rows = _safe_int(pre.get("total_image_labels_rows"))
+    total_image_source_membership_rows = _safe_int(pre.get("total_image_source_membership_rows"))
 
     log(
         job_id,
@@ -44,7 +45,8 @@ def handler(event, context):
             f"total_rows={total_rows} total_rows_read={total_rows_read} "
             f"canon_imagery_rows_expected={total_canon_imagery_rows} "
             f"canon_label_rows_total_expected={total_canon_label_rows} "
-            f"image_labels_rows_expected={total_image_labels_rows}"
+            f"image_labels_rows_expected={total_image_labels_rows} "
+            f"image_source_membership_rows_expected={total_image_source_membership_rows}"
         )
     )
 
@@ -79,7 +81,13 @@ def handler(event, context):
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Completed registration post-ingest cleanup for job {job_id}"
+            (
+                f"{TASK_NAME} Completed registration post-ingest cleanup for job {job_id}. "
+                f"canon_imagery_rows_expected={total_canon_imagery_rows} "
+                f"canon_label_rows_total_expected={total_canon_label_rows} "
+                f"image_labels_rows_expected={total_image_labels_rows} "
+                f"image_source_membership_rows_expected={total_image_source_membership_rows}"
+            )
         )
     else:
         log(
@@ -87,8 +95,14 @@ def handler(event, context):
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Completed registration post-ingest with CTAS cleanup warning for job {job_id}",
-            level="warning"
+            (
+                f"{TASK_NAME} Completed registration post-ingest with CTAS cleanup warning for job {job_id}. "
+                f"canon_imagery_rows_expected={total_canon_imagery_rows} "
+                f"canon_label_rows_total_expected={total_canon_label_rows} "
+                f"image_labels_rows_expected={total_image_labels_rows} "
+                f"image_source_membership_rows_expected={total_image_source_membership_rows}"
+            ),
+            level="warning",
         )
 
     return {
@@ -98,6 +112,7 @@ def handler(event, context):
         "total_canon_imagery_rows_expected": total_canon_imagery_rows,
         "total_canon_label_rows_total_expected": total_canon_label_rows,
         "total_image_labels_rows_expected": total_image_labels_rows,
+        "total_image_source_membership_rows_expected": total_image_source_membership_rows,
         "ctas_table_name": ctas_table_name,
         "ctas_drop_ok": ctas_drop_ok,
     }

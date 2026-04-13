@@ -81,6 +81,7 @@ def generate_start_athena_ctas_sql(job_id: str, export_s3_prefix: str, num_shard
         file_size_mb,
         CAST(uploaded_at AS timestamp(3)) AS uploaded_at,
         data_source,
+        source_split,
         sha256_hash,
         luma_mean,
         luma_p10,
@@ -196,6 +197,7 @@ def handler(event, context):
         event_type = event["event_type"]
         label_type = event["label_type"]
         data_source = event["data_source"]
+        source_split = event["source_split"]
     except KeyError as e:
         raise RuntimeError(f"{TASK_NAME} missing required key {e}; event={json.dumps(event)}")
 
@@ -287,6 +289,7 @@ def handler(event, context):
         "event_type": event_type,
         "label_type": label_type,
         "data_source": data_source,
+        "source_split": source_split,
         "total_rows": total_rows,
         "num_shards": num_shards,
         "manifests": manifest_uris

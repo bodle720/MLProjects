@@ -11,7 +11,7 @@ def delete_job_rows_from_table(job_id: str,
                                 poll_interval: Union[int,float] = 5,
                                 timeout_seconds: Union[int,float] = 1800) -> dict:
     """
-    Delete all rows for a given job_id from an Iceberg table and optionally compact.
+    Delete all rows for a given job_id from an Iceberg table.
     Returns a dict with query ids and final states for DELETE and OPTIMIZE.
     """
     # Escape single quotes in job_id for SQL literal safety

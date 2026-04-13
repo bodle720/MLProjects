@@ -18,20 +18,16 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     """
     expected: List[str] = []
     for m in manifests:
-        try:
-            _, key = parse_s3_uri(m, TASK_NAME)
-        except Exception:
-            raise
+        _, key = parse_s3_uri(m, TASK_NAME)
 
         fname = key.split("/")[-1]
         if fname.startswith("manifest-shard-") and fname.endswith(".json"):
-            shard_name = fname[len("manifest-shard-"): -len(".json")]
+            shard_name = fname[len("manifest-shard-") : -len(".json")]
         else:
             shard_name = fname.rsplit(".", 1)[0]
 
         expected.append(shard_name)
 
-    # stable unique
     seen = set()
     out = []
     for s in expected:
@@ -52,14 +48,15 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
     """
     Locate per-shard registration processed outputs.
 
-    Target-image shards (same as before, minus canonical_labels):
+    Target-image shards:
       - upload_staging/shard-<shard>.jsonl
       - canonical_imagery/shard-<shard>.jsonl
       - image_labels/shard-<shard>.jsonl
+      - image_source_membership/shard-<shard>.jsonl
       - shard-<shard>-summary.json
       - shard-<shard>-SUCCESS
 
-    Canonical label rows are now fingerprint-owner sharded:
+    Canonical label rows are fingerprint-owner sharded:
       - canonical_labels_by_fingerprint/owner-<owner>/part-<targetShard>.jsonl
       (no SUCCESS marker per owner shard)
     """
@@ -73,11 +70,11 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
     shard_upload: Dict[str, str] = {}
     shard_imagery: Dict[str, str] = {}
     shard_image_labels: Dict[str, str] = {}
+    shard_image_source_membership: Dict[str, str] = {}
     shard_summary: Dict[str, str] = {}
     shard_success = set()
 
     # ---- fingerprint-owner outputs ----
-    # owner_id -> list of jsonl keys (parts)
     owner_parts: Dict[str, List[str]] = {}
 
     for k in processed_keys:
@@ -99,6 +96,8 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
                 shard_imagery[shard] = k
             elif "/image_labels/" in k:
                 shard_image_labels[shard] = k
+            elif "/image_source_membership/" in k:
+                shard_image_source_membership[shard] = k
 
         # Summary/SUCCESS live at the processed_prefix root
         elif name.startswith("shard-") and name.endswith("-summary.json"):
@@ -109,17 +108,16 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
             shard = name[len("shard-") : -len("-SUCCESS")]
             shard_success.add(shard)
 
-    # If manifest parsing failed, infer target shards from discovered keys
     if not expected_target_shards:
         expected_target_shards = sorted(
             set(shard_upload)
             | set(shard_imagery)
             | set(shard_image_labels)
+            | set(shard_image_source_membership)
             | set(shard_summary)
             | set(shard_success)
         )
 
-    # sort owner part lists for stable ordering
     for owner_id in owner_parts:
         owner_parts[owner_id] = sorted(owner_parts[owner_id])
 
@@ -129,8 +127,7 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
     total_rows_read = 0
     total_canon_imagery_rows = 0
     total_image_labels_rows = 0
-
-    # canonical label totals now come from summary["canonical_label_rows_total"]
+    total_image_source_membership_rows = 0
     total_canon_label_rows = 0
 
     expected_owner_shards_from_summaries = set()
@@ -140,11 +137,11 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         up_k = shard_upload.get(shard)
         img_k = shard_imagery.get(shard)
         img_lab_k = shard_image_labels.get(shard)
+        img_src_k = shard_image_source_membership.get(shard)
         sum_k = shard_summary.get(shard)
         ok = shard in shard_success
 
-        # NOTE: no canonical_labels file required anymore
-        if not (up_k and img_k and img_lab_k and sum_k and ok):
+        if not (up_k and img_k and img_lab_k and img_src_k and sum_k and ok):
             missing_target.append(shard)
             continue
 
@@ -152,7 +149,8 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         rows_read = int(summary.get("rows_read", 0))
         canon_im_rows = int(summary.get("canonical_imagery_rows", 0))
         img_lbl_rows = int(summary.get("image_labels_rows", 0))
-        canon_lbl_rows = int(summary.get("canonical_label_rows_total", 0))  # <-- changed
+        img_src_rows = int(summary.get("image_source_membership_rows", 0))
+        canon_lbl_rows = int(summary.get("canonical_label_rows_total", 0))
 
         owner_shards_touched = summary.get("canonical_label_owner_shards_touched", [])
         if isinstance(owner_shards_touched, list):
@@ -163,6 +161,7 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         total_rows_read += rows_read
         total_canon_imagery_rows += canon_im_rows
         total_image_labels_rows += img_lbl_rows
+        total_image_source_membership_rows += img_src_rows
         total_canon_label_rows += canon_lbl_rows
 
         shards.append(
@@ -172,15 +171,16 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
                 "rows_read": rows_read,
                 "canonical_imagery_rows": canon_im_rows,
                 "image_labels_rows": img_lbl_rows,
+                "image_source_membership_rows": img_src_rows,
                 "upload_staging_key": up_k,
                 "canonical_imagery_key": img_k,
-                "canonical_labels_key": None,  # <-- important
+                "canonical_labels_key": None,
                 "image_labels_key": img_lab_k,
+                "image_source_membership_key": img_src_k,
             }
         )
 
     # ---- build fingerprint-owner shard items (Map kind=label_owner) ----
-    # Each item points at the owner prefix; shard ingest can list all jsonl under it.
     owner_shards: List[str] = sorted(owner_parts.keys())
 
     actual_owner_shards = set(owner_shards)
@@ -194,12 +194,14 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
 
     unexpected_owner_shards = actual_owner_shards - expected_owner_shards_from_summaries
     if unexpected_owner_shards:
-        log(job_id,
+        log(
+            job_id,
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
             f"{TASK_NAME} Warning: unexpected owner shard outputs discovered: {sorted(unexpected_owner_shards)}",
-            level="warning")
+            level="warning",
+        )
 
     total_owner_label_files = 0
     for owner_id in owner_shards:
@@ -218,11 +220,11 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
                 "owner_shard_id": owner_id,
                 "owner_prefix": owner_prefix,
                 "parts_count": len(parts),
-                # Pattern A keys: only canonical_labels_key is used for this kind
                 "upload_staging_key": None,
                 "canonical_imagery_key": None,
-                "canonical_labels_key": owner_prefix,  # prefix, not a file
+                "canonical_labels_key": owner_prefix,
                 "image_labels_key": None,
+                "image_source_membership_key": None,
             }
         )
 
@@ -233,6 +235,7 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         "total_canon_imagery_rows": total_canon_imagery_rows,
         "total_canon_label_rows": total_canon_label_rows,
         "total_image_labels_rows": total_image_labels_rows,
+        "total_image_source_membership_rows": total_image_source_membership_rows,
         "processed_prefix": processed_prefix,
         "expected_target_shards": expected_target_shards,
         "owner_shards": owner_shards,
@@ -244,9 +247,7 @@ def handler(event, context):
     Expected input:
       {
         job_id, user, event_type, manifests,
-        label_type?, data_source?,
-        total_rows  (total_rows from reg batching)
-        Note: Ingest stage injects expected_count.$ from $.registrationStage.total_rows, hence the naming mismatch. Wiring is correct.
+        total_rows
       }
     """
     try:
@@ -263,7 +264,13 @@ def handler(event, context):
     if not manifests or not isinstance(manifests, list):
         raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting registration pre-ingest for job {job_id}")
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Starting registration pre-ingest for job {job_id}",
+    )
 
     collected = collect_processed_shards(job_id, manifests, user, event_type)
 
@@ -276,7 +283,8 @@ def handler(event, context):
     shards = collected["shards"]
     total_rows_read = int(collected["total_rows_read"])
 
-    log(job_id,
+    log(
+        job_id,
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
@@ -286,26 +294,27 @@ def handler(event, context):
         f"canon_imagery_rows={collected['total_canon_imagery_rows']} "
         f"canon_label_rows_total={collected['total_canon_label_rows']} "
         f"image_labels_rows={collected['total_image_labels_rows']} "
-        f"owner_label_files={collected['total_owner_label_files']}")
+        f"image_source_membership_rows={collected['total_image_source_membership_rows']} "
+        f"owner_label_files={collected['total_owner_label_files']}"
+    )
 
-    # Validate against total row count (best check for registration)
     if total_rows_read != total_rows:
         raise RuntimeError(
             f"{TASK_NAME} Total row count mismatch: total_rows={total_rows}, "
             f"workers total_rows_read={total_rows_read}"
         )
 
-    # Precompute CTAS temp table name for post step
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     ctas_table_name = f"reg_export_{sanitized_job_id}"
 
     return {
-        "shards": shards,  # mixed kinds: target + label_owner
+        "shards": shards,
         "total_rows": total_rows,
         "total_rows_read": total_rows_read,
         "total_canon_imagery_rows": int(collected["total_canon_imagery_rows"]),
         "total_canon_label_rows": int(collected["total_canon_label_rows"]),
         "total_image_labels_rows": int(collected["total_image_labels_rows"]),
+        "total_image_source_membership_rows": int(collected["total_image_source_membership_rows"]),
         "processed_prefix": collected.get("processed_prefix"),
         "ctas_table_name": ctas_table_name,
         "expected_target_shards": collected.get("expected_target_shards"),

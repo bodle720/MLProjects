@@ -89,7 +89,12 @@ class BatchingStage(Construct):
         ))
 
         batching_fn.add_to_role_policy(iam.PolicyStatement(
-            actions=["athena:StartQueryExecution","athena:GetQueryExecution","athena:GetQueryResults"],
+            actions=[
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:StopQueryExecution",
+            ],
             resources=[f"arn:aws:athena:{region}:{account}:workgroup/primary"]
         ))
 
@@ -298,6 +303,7 @@ class BatchingStage(Construct):
             "USER": sfn.JsonPath.string_at("$.user"),
             "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
             "DATA_SOURCE": sfn.JsonPath.string_at("$.data_source"),
+            "SOURCE_SPLIT": sfn.JsonPath.string_at("$.source_split"),
             "PATH_PREFIX": sfn.JsonPath.string_at("$.path_prefix"),
             "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
             "FILE_BUCKET_NAME": file_bucket.bucket_name,
@@ -331,6 +337,7 @@ class BatchingStage(Construct):
                 "user.$": "$.user",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
+                "source_split.$": "$.source_split",
                 "path_prefix.$": "$.path_prefix",
                 "event_type.$": "$.event_type",
                 "registration_time.$": "$.registration_time"

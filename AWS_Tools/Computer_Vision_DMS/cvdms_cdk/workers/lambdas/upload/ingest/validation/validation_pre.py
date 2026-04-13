@@ -138,7 +138,8 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
                 "upload_staging_key": jsonl_key,
                 "canonical_imagery_key": None,
                 "canonical_labels_key": None,
-                "image_labels_key": None
+                "image_labels_key": None,
+                "image_source_membership_key": None
             }
         )
 

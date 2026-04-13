@@ -27,6 +27,7 @@ JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
+SOURCE_SPLIT = os.environ["SOURCE_SPLIT"]
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
@@ -71,6 +72,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
             "file_size_mb": None,
             "uploaded_at": REGISTRATION_TIME,
             "data_source": DATA_SOURCE,
+            "source_split": SOURCE_SPLIT,
             "sha256_hash": None,
             "luma_mean": None,
             "luma_p10": None,
@@ -116,6 +118,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         "file_size_mb": None,
         "uploaded_at": REGISTRATION_TIME,
         "data_source": DATA_SOURCE,
+        "source_split": SOURCE_SPLIT,
         "sha256_hash": None,
         "luma_mean": None,
         "luma_p10": None,

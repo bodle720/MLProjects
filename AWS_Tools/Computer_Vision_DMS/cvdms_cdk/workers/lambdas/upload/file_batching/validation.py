@@ -23,6 +23,7 @@ def handler(event, context):
         event_type = event["event_type"]
         label_type = event["label_type"]
         data_source = event["data_source"]
+        source_split = event["source_split"]
         original_manifest_s3_uri = event["original_manifest_s3_uri"]
     except KeyError as e:
         raise RuntimeError(f"{TASK_NAME} Validation batching Lambda failed: missing required key {e}")
@@ -84,7 +85,8 @@ def handler(event, context):
         "user": user,
         "event_type": event_type,
         "label_type": label_type,
-        "data_source":data_source,
+        "data_source": data_source,
+        "source_split": source_split,
         "manifests": manifest_uris,
         "expected_count": total
     }

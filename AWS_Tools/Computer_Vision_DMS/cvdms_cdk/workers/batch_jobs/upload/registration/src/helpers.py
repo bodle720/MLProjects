@@ -23,16 +23,22 @@ def copy_objects_or_raise(copy_plan: List[Tuple[str, str, str, str]]) -> None:
     for src_bucket, src_key, dst_bucket, dst_key in copy_plan:
         s3_copy_with_retry(src_bucket, src_key, dst_bucket, dst_key, TASK_NAME)
 
-def build_canonical_image_dest(file_bucket: str,
-                               image_id: str,
-                               temp_image_uri: str,
-                               data_source: str,
-                               path_prefix: str) -> Tuple[str, str]:
+def build_canonical_image_dest(
+    file_bucket: str,
+    image_id: str,
+    temp_image_uri: str,
+    data_source: str,
+    path_prefix: str,
+) -> Tuple[str, str]:
     _, temp_key = parse_s3_uri(temp_image_uri, TASK_NAME)
     fname = get_key_basename(temp_key)
     _, ext = split_ext(fname)
     if ext not in ("png", "jpg", "jpeg"):
-        raise RuntimeError(f"{TASK_NAME} Unsupported or missing image extension for temp_source_ref={temp_image_uri}")
+        raise RuntimeError(
+            f"{TASK_NAME} Unsupported or missing image extension for temp_source_ref={temp_image_uri}"
+        )
+
+    # data_source is expected to already be canonicalized client-side/server-side.
     dst_key = f"canonical/images/{data_source}/{path_prefix}/{image_id}.{ext}"
     return dst_key, make_s3_uri(file_bucket, dst_key)
 
@@ -70,7 +76,9 @@ def build_canonical_label_dests_by_fingerprint(
 
     if label_type == "semantic-segmentation":
         if not (temp_semantic_png_uri and temp_semantic_meta_uri):
-            raise RuntimeError(f"{TASK_NAME} Missing semantic png/meta temp refs for semantic-segmentation")
+            raise RuntimeError(
+                f"{TASK_NAME} Missing semantic png/meta temp refs for semantic-segmentation"
+            )
 
         src_b1, src_k1 = parse_s3_uri(temp_semantic_png_uri, TASK_NAME)
         src_b2, src_k2 = parse_s3_uri(temp_semantic_meta_uri, TASK_NAME)
@@ -86,7 +94,9 @@ def build_canonical_label_dests_by_fingerprint(
 
     if label_type == "instance-segmentation":
         if not (temp_instance_png_uri and temp_instance_meta_uri):
-            raise RuntimeError(f"{TASK_NAME} Missing instance png/meta temp refs for instance-segmentation")
+            raise RuntimeError(
+                f"{TASK_NAME} Missing instance png/meta temp refs for instance-segmentation"
+            )
 
         src_b1, src_k1 = parse_s3_uri(temp_instance_png_uri, TASK_NAME)
         src_b2, src_k2 = parse_s3_uri(temp_instance_meta_uri, TASK_NAME)
@@ -103,7 +113,12 @@ def build_canonical_label_dests_by_fingerprint(
     # single-label / multi-label: no label files
     return [], [], []
 
-def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str, registration_time: str) -> Dict[str, Any]:
+def build_canonical_imagery_row(
+    *,
+    row: Dict[str, Any],
+    canonical_image_uri: str,
+    registration_time: str,
+) -> Dict[str, Any]:
     image_id = row.get("image_id")
     if not image_id:
         raise RuntimeError(f"{TASK_NAME} Missing image_id in upload_staging row")
@@ -118,7 +133,6 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "dtype": row.get("dtype"),
         "file_size_mb": row.get("file_size_mb"),
         "uploaded_at": registration_time,
-        "data_source": row.get("data_source"),
         "sha256_hash": row.get("sha256_hash"),
         "luma_mean": row.get("luma_mean"),
         "luma_p10": row.get("luma_p10"),
@@ -133,7 +147,40 @@ def build_canonical_imagery_row(*, row: Dict[str, Any], canonical_image_uri: str
         "lighting_bucket": row.get("lighting_bucket"),
         "blur_bucket": row.get("blur_bucket"),
         "contrast_bucket": row.get("contrast_bucket"),
-        "color_bucket": row.get("color_bucket")
+        "color_bucket": row.get("color_bucket"),
+    }
+
+def normalize_source_split(source_split: Optional[str]) -> Optional[str]:
+    if source_split is None:
+        return None
+    if not isinstance(source_split, str):
+        raise RuntimeError(
+            f"{TASK_NAME} source_split must be str or None, got {type(source_split).__name__}"
+        )
+
+    s = source_split.strip().lower()
+    if s == "":
+        return None
+    if s not in {"train", "val", "test"}:
+        raise RuntimeError(f"{TASK_NAME} invalid source_split={source_split!r}")
+    return s
+
+def build_image_source_membership_row(
+    *,
+    image_id: str,
+    data_source: str,
+    source_split: Optional[str],
+) -> Dict[str, Any]:
+    if not isinstance(image_id, str) or not image_id.strip():
+        raise RuntimeError(f"{TASK_NAME} Missing/invalid image_id for image_source_membership row")
+
+    if not isinstance(data_source, str) or not data_source.strip():
+        raise RuntimeError(f"{TASK_NAME} Missing/invalid data_source for image_source_membership row")
+
+    return {
+        "image_id": image_id.strip(),
+        "data_source": data_source.strip(),
+        "source_split": normalize_source_split(source_split),
     }
 
 def build_canonical_label_table_row(
@@ -159,7 +206,9 @@ def build_canonical_label_table_row(
 
     if label_type == "semantic-segmentation":
         if len(canonical_label_uris) != 2:
-            raise RuntimeError(f"{TASK_NAME} semantic-segmentation expected exactly 2 canonical label uris")
+            raise RuntimeError(
+                f"{TASK_NAME} semantic-segmentation expected exactly 2 canonical label uris"
+            )
 
         png_uri = next(u for u in canonical_label_uris if u.endswith(".png"))
         meta_uri = next(u for u in canonical_label_uris if u.endswith(".json"))
@@ -173,7 +222,9 @@ def build_canonical_label_table_row(
 
     if label_type == "instance-segmentation":
         if len(canonical_label_uris) != 2:
-            raise RuntimeError(f"{TASK_NAME} instance-segmentation expected exactly 2 canonical label uris")
+            raise RuntimeError(
+                f"{TASK_NAME} instance-segmentation expected exactly 2 canonical label uris"
+            )
 
         png_uri = next(u for u in canonical_label_uris if u.endswith(".png"))
         meta_uri = next(u for u in canonical_label_uris if u.endswith(".json"))
@@ -207,14 +258,24 @@ def build_image_label_rows(
         for lab in string_labels:
             if isinstance(lab, str) and lab.strip():
                 out.append(
-                    {"image_id": target_image_id, "label_id": lab.strip().lower(), "label_type": "string-label"}
+                    {
+                        "image_id": target_image_id,
+                        "label_id": lab.strip().lower(),
+                        "label_type": "string-label",
+                    }
                 )
         return out
 
     if job_label_type in ("object-detection", "semantic-segmentation", "instance-segmentation"):
         if not fingerprint:
             return []
-        out.append({"image_id": target_image_id, "label_id": fingerprint, "label_type": job_label_type})
+        out.append(
+            {
+                "image_id": target_image_id,
+                "label_id": fingerprint,
+                "label_type": job_label_type,
+            }
+        )
         return out
 
     return []
@@ -235,16 +296,19 @@ def fingerprint_owner_shard_id(fingerprint: str, num_shards: int) -> str:
         raise RuntimeError(f"{TASK_NAME} fingerprint is empty")
 
     try:
-        # sha256 hex path
         v = int(fp[:8], 16)
     except Exception:
-        # fallback path
         v = int(hashlib.md5(fp.encode("utf-8")).hexdigest()[:8], 16)
 
     shard = v % num_shards
     return str(shard).rjust(6, "0")
 
-def build_owner_label_output_key(*, processed_prefix: str, owner_shard_id: str, source_target_shard: str) -> str:
+def build_owner_label_output_key(
+    *,
+    processed_prefix: str,
+    owner_shard_id: str,
+    source_target_shard: str,
+) -> str:
     """
     Where the worker writes canonical label table rows routed by fingerprint-owner shard.
 

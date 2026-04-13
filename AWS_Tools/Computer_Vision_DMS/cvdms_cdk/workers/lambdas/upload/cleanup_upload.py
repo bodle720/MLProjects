@@ -32,9 +32,6 @@ def handler(event, context):
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
         f"{TASK_NAME} Deleted S3 temp files under prefix {prefix}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Cleanup completed successfully for job {job_id}")
-
     # ---------------------------------------------------------
     # 2. Release infrastructure lock
     # ---------------------------------------------------------
@@ -75,6 +72,9 @@ def handler(event, context):
 
     if not update_success:
         raise RuntimeError(f"{TASK_NAME} Failed to update job status: {update_msg}")
+
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Cleanup completed successfully for job {job_id}")
 
     return {
         "job_id": job_id,

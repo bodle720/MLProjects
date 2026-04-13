@@ -99,7 +99,12 @@ class DLQOps(Construct):
 
         # 2) Athena: start and poll queries in the workgroup
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults"],
+            actions=[
+                "athena:StartQueryExecution",
+                "athena:GetQueryExecution",
+                "athena:GetQueryResults",
+                "athena:StopQueryExecution",
+            ],
             resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"]
         ))
 

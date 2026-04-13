@@ -268,69 +268,115 @@ class UploadStack(Stack):
             "ATHENA_WORKGROUP": "primary",
             "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
             "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
-            "SHA256_TABLE_NAME": self.sha256_table.table_name
+            "SHA256_TABLE_NAME": self.sha256_table.table_name,
         }
 
-        dlq_out = DLQOps(self,
-                         "upload_dlq",
-                         name="upload",
-                         app_name=self.app_name,
-                         dlq_processor_env_vars=dlq_processor_env_vars,
-                         region=self.region,
-                         account=self.account,
-                         dlq_ops_config=CONFIG.upload.dlq_ops,
-                         iceberg_database_name=self.iceberg_database_name,
-                         common_utils_layer=self.common_utils_layer,
-                         file_bucket=self.file_bucket,
-                         firehose_delivery_stream=self.firehose_delivery_stream)
+        dlq_out = DLQOps(
+            self,
+            "upload_dlq",
+            name="upload",
+            app_name=self.app_name,
+            dlq_processor_env_vars=dlq_processor_env_vars,
+            region=self.region,
+            account=self.account,
+            dlq_ops_config=CONFIG.upload.dlq_ops,
+            iceberg_database_name=self.iceberg_database_name,
+            common_utils_layer=self.common_utils_layer,
+            file_bucket=self.file_bucket,
+            firehose_delivery_stream=self.firehose_delivery_stream,
+        )
 
         dlq = dlq_out.dlq
         dlq_processor = dlq_out.dlq_processor
 
-        # Assign proper permissions
+        # DynamoDB
         self.lock_table.grant_read_write_data(dlq_processor)
         self.job_table.grant_read_write_data(dlq_processor)
         self.sha256_table.grant_read_write_data(dlq_processor)
 
+        # File bucket:
+        # - temp/image-upload/* : read rollback artifacts / processed outputs
+        # - canonical/*        : delete canonical image + label objects written by failed job
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:DeleteObject"],
-            resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"]
+            resources=[
+                f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*",
+                f"arn:aws:s3:::{self.file_bucket.bucket_name}/canonical/*",
+            ]
         ))
 
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"],
             resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}}
+            conditions={
+                "StringLike": {
+                    "s3:prefix": [
+                        "temp/image-upload/*",
+                        "canonical/*",
+                    ]
+                }
+            }
         ))
 
+        # Iceberg bucket:
+        # canonical/* covers:
+        # - canonical/imagery/*
+        # - canonical/image-labels/*
+        # - canonical/bounding-boxes/*
+        # - canonical/semantic-masks/*
+        # - canonical/instance-annotations/*
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
-            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*",
-                       f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/canonical/*"]
-        ))
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"],
-            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
-            conditions={"StringLike": {"s3:prefix": ["upload_staging/*", "canonical/*"]}}
-        ))
-
-        dlq_processor.add_to_role_policy(iam.PolicyStatement(
-            actions=["glue:DeleteTable"],
             resources=[
-                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/dedup_export_*"
+                f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/upload_staging/*",
+                f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/canonical/*",
+                f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/image_source_membership/*",
             ]
         ))
 
-        # Glue metadata write for upload_staging (required when Athena DELETE/OPTIMIZE updates Iceberg metadata)
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"],
+            conditions={
+                "StringLike": {
+                    "s3:prefix": [
+                        "upload_staging/*",
+                        "canonical/*",
+                        "image_source_membership/*",
+                    ]
+                }
+            }
+        ))
+
+        # Glue delete for CTAS temp tables
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["glue:DeleteTable"],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/dedup_export_*",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/reg_export_*",
+            ]
+        ))
+
+        # Glue metadata write for rollback-mutated Iceberg tables
         dlq_processor.add_to_role_policy(iam.PolicyStatement(
             actions=[
-                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
-                "glue:BatchCreatePartition", "glue:BatchDeletePartition"
+                "glue:CreateTable",
+                "glue:UpdateTable",
+                "glue:DeleteTable",
+                "glue:BatchCreatePartition",
+                "glue:BatchDeletePartition",
             ],
-            resources=[f"arn:aws:glue:{self.region}:{self.account}:catalog",
-                       f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
-                       f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/upload_staging"
-                       ]
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/upload_staging",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/canonical_imagery",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/image_labels",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/image_source_membership",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/canonical_bounding_boxes",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/canonical_semantic_masks",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/canonical_instance_annotations",
+            ]
         ))
 
         return dlq

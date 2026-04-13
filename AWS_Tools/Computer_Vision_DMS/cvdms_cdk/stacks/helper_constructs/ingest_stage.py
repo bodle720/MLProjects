@@ -85,6 +85,7 @@ class IngestStage(Construct):
             "event_type.$": "$.event_type",
             "label_type.$": "$.label_type",
             "data_source.$": "$.data_source",
+            "source_split.$": "$.source_split",
             "manifests.$": self.manifest_path,
         }
         if self.expected_count_path:
@@ -139,13 +140,15 @@ class IngestStage(Construct):
                 "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
+                "source_split.$": "$.source_split",
                 "shard.$": "$$.Map.Item.Value.shard",
                 "kind.$": "$$.Map.Item.Value.kind",
                 "rows_read.$": "$$.Map.Item.Value.rows_read",
                 "upload_staging_key.$": "$$.Map.Item.Value.upload_staging_key",
                 "canonical_imagery_key.$": "$$.Map.Item.Value.canonical_imagery_key",
                 "canonical_labels_key.$": "$$.Map.Item.Value.canonical_labels_key",
-                "image_labels_key.$": "$$.Map.Item.Value.image_labels_key"
+                "image_labels_key.$": "$$.Map.Item.Value.image_labels_key",
+                "image_source_membership_key.$": "$$.Map.Item.Value.image_source_membership_key"
             },
             result_path=sfn.JsonPath.DISCARD,
             output_path="$",
@@ -189,6 +192,7 @@ class IngestStage(Construct):
                 "event_type.$": "$.event_type",
                 "label_type.$": "$.label_type",
                 "data_source.$": "$.data_source",
+                "source_split.$": "$.source_split",
                 "pre.$": f"$.{stage_name}PreLambdaTask"
             })
         )
@@ -215,7 +219,7 @@ class IngestStage(Construct):
         # 2) S3 (file bucket): temp artifacts + bucket listing/location
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["s3:GetObject", "s3:DeleteObject"],
+                actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
                 resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"],
             )
         )
@@ -306,6 +310,6 @@ class IngestStage(Construct):
             iam.PolicyStatement(
                 actions=["s3:ListBucket"],
                 resources=[self.iceberg_bucket.bucket_arn],
-                conditions={"StringLike": {"s3:prefix": ["canonical/*", "upload_staging/*"]}},
+                conditions={"StringLike": {"s3:prefix": ["canonical/*", "upload_staging/*", "image_source_membership/*"]}},
             )
         )

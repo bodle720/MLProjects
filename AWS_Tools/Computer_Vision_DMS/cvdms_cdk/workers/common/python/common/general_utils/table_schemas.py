@@ -15,6 +15,9 @@ OBJECT_DETECTION_TABLE_NAME = "object_detection"
 SEMANTIC_SEGMENTATION_TABLE_NAME = "semantic_segmentation"
 INSTANCE_SEGMENTATION_TABLE_NAME = "instance_segmentation"
 
+# The image data source and split membership table
+IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME = "image_source_membership"
+
 SqlType = Literal["string", "int", "float", "timestamp", "array_string"]
 
 @dataclass(frozen=True)
@@ -45,7 +48,6 @@ CANONICAL_IMAGERY_SCHEMA = TableSchema(
         "dtype",
         "file_size_mb",
         "uploaded_at",
-        "data_source",
         "sha256_hash",
         "luma_mean",
         "luma_p10",
@@ -73,7 +75,6 @@ CANONICAL_IMAGERY_SCHEMA = TableSchema(
         "dtype": "string",
         "file_size_mb": "float",
         "uploaded_at": "timestamp",
-        "data_source": "string",
         "sha256_hash": "string",
         "luma_mean": "float",
         "luma_p10": "float",
@@ -165,6 +166,7 @@ UPLOAD_STAGING_SCHEMA = TableSchema(
         "file_size_mb",
         "uploaded_at",
         "data_source",
+        "source_split",
         "sha256_hash",
         "luma_mean",
         "luma_p10",
@@ -209,6 +211,7 @@ UPLOAD_STAGING_SCHEMA = TableSchema(
         "file_size_mb": "float",
         "uploaded_at": "timestamp",
         "data_source": "string",
+        "source_split": "string",
         "sha256_hash": "string",
         "luma_mean": "float",
         "luma_p10": "float",
@@ -338,6 +341,20 @@ INSTANCE_SEGMENTATION_SCHEMA = TableSchema(
     },
 )
 
+IMAGE_SOURCE_MEMBERSHIP_SCHEMA = TableSchema(
+    cols=[
+        "image_id",
+        "data_source",
+        "source_split"
+    ],
+    key_cols=["image_id", "data_source"],
+    types={
+        "image_id": "string",
+        "data_source": "string",
+        "source_split": "string"
+    },
+)
+
 TABLES: dict[str, TableSchema] = {
     CANONICAL_IMAGERY_TABLE_NAME: CANONICAL_IMAGERY_SCHEMA,
     IMAGE_LABELS_TABLE_NAME: IMAGE_LABELS_SCHEMA,
@@ -350,4 +367,5 @@ TABLES: dict[str, TableSchema] = {
     OBJECT_DETECTION_TABLE_NAME: OBJECT_DETECTION_SCHEMA,
     SEMANTIC_SEGMENTATION_TABLE_NAME: SEMANTIC_SEGMENTATION_SCHEMA,
     INSTANCE_SEGMENTATION_TABLE_NAME: INSTANCE_SEGMENTATION_SCHEMA,
+    IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME: IMAGE_SOURCE_MEMBERSHIP_SCHEMA
 }

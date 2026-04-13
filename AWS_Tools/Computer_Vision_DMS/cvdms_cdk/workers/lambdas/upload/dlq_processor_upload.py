@@ -1,13 +1,12 @@
 import os
 import json
-from typing import Dict, List, Iterable, Tuple, Optional
+from typing import Dict, List, Iterable, Tuple, Optional, Set
 
 import boto3
 from botocore.exceptions import ClientError
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
-    delete_s3_prefix,
     parse_s3_uri,
     s3_list_keys,
     s3_read_jsonl_list,
@@ -19,9 +18,10 @@ from common.general_utils.table_schemas import (
     TABLES,
     CANONICAL_IMAGERY_TABLE_NAME,
     IMAGE_LABELS_TABLE_NAME,
+    IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME,
     CANONICAL_BBOX_TABLE_NAME,
     CANONICAL_SEMANTIC_TABLE_NAME,
-    CANONICAL_INSTANCE_TABLE_NAME
+    CANONICAL_INSTANCE_TABLE_NAME,
 )
 
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
@@ -42,6 +42,12 @@ LABEL_TABLES = {
     CANONICAL_BBOX_TABLE_NAME,
     CANONICAL_SEMANTIC_TABLE_NAME,
     CANONICAL_INSTANCE_TABLE_NAME,
+}
+
+LABEL_TYPE_BY_TABLE = {
+    CANONICAL_BBOX_TABLE_NAME: "object-detection",
+    CANONICAL_SEMANTIC_TABLE_NAME: "semantic-segmentation",
+    CANONICAL_INSTANCE_TABLE_NAME: "instance-segmentation",
 }
 
 def chunked(lst: List, n: int) -> Iterable[List]:
@@ -77,6 +83,11 @@ def _safe_s3_key_from_uri(uri: str) -> Optional[str]:
     except Exception:
         return None
 
+def _read_json_key(key: str) -> Dict:
+    resp = s3.get_object(Bucket=FILE_BUCKET_NAME, Key=key)
+    body = resp["Body"].read().decode("utf-8")
+    return json.loads(body)
+
 def _load_new_sha_mappings_from_processed_upload_staging(processed_keys: List[str]) -> List[Tuple[str, str]]:
     """
     Returns list of (sha256, image_id) mappings that this job attempted to register
@@ -92,11 +103,8 @@ def _load_new_sha_mappings_from_processed_upload_staging(processed_keys: List[st
     seen = set()
 
     for row in s3_read_jsonl_list(FILE_BUCKET_NAME, upload_jsonls, f"{TASK_NAME}.read_upload_staging_for_sha"):
-        # Only NEW canonical images produce a sha mapping in reg worker
         if row.get("dedup_status") != "passed":
             continue
-
-        # The worker sets registration_status="passed" on success for NEW images
         if row.get("registration_status") != "passed":
             continue
 
@@ -127,7 +135,6 @@ def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int,
             dynamodb.delete_item(
                 TableName=SHA256_TABLE_NAME,
                 Key={"sha256": {"S": sha}},
-                # Only delete if the mapping still points at the image_id we created
                 ConditionExpression="image_id = :iid",
                 ExpressionAttributeValues={":iid": {"S": iid}},
             )
@@ -148,7 +155,7 @@ def _list_registration_processed_keys(job_id: str) -> List[str]:
     except Exception:
         return []
 
-def _load_canonical_imagery_outputs(job_id: str, processed_keys: List[str]) -> Tuple[List[str], List[str]]:
+def _load_canonical_imagery_outputs(processed_keys: List[str]) -> Tuple[List[str], List[str]]:
     """
     Returns (new_image_ids, canonical_image_s3_keys)
     """
@@ -176,6 +183,45 @@ def _load_canonical_imagery_outputs(job_id: str, processed_keys: List[str]) -> T
 
     return new_image_ids, image_s3_keys
 
+def _load_exact_rollback_targets(processed_keys: List[str]) -> Tuple[Set[Tuple[str, str, str]], List[Tuple[str, str]]]:
+    """
+    Reads rollback plan JSONs written by registration ingest map lambda and returns:
+      - exact image_labels keys to delete: (image_id, label_type, label_id)
+      - exact image_source_membership keys to delete: (image_id, data_source)
+
+    These are candidate-new rows only, so deleting them is safe on failure.
+    """
+    rollback_keys = [k for k in processed_keys if "/rollback/" in k and k.endswith(".json")]
+    rollback_keys.sort()
+
+    image_label_keys: Set[Tuple[str, str, str]] = set()
+    image_source_membership_keys: Set[Tuple[str, str]] = set()
+
+    for key in rollback_keys:
+        try:
+            payload = _read_json_key(key)
+        except Exception:
+            continue
+
+        for row in payload.get("image_labels_to_delete", []) or []:
+            iid = row.get("image_id")
+            lt = row.get("label_type")
+            lid = row.get("label_id")
+            if (
+                isinstance(iid, str) and iid.strip()
+                and isinstance(lt, str) and lt.strip()
+                and isinstance(lid, str) and lid.strip()
+            ):
+                image_label_keys.add((iid.strip(), lt.strip(), lid.strip()))
+
+        for row in payload.get("image_source_memberships_to_delete", []) or []:
+            iid = row.get("image_id")
+            ds = row.get("data_source")
+            if isinstance(iid, str) and iid.strip() and isinstance(ds, str) and ds.strip():
+                image_source_membership_keys.add((iid.strip(), ds.strip()))
+
+    return image_label_keys, sorted(image_source_membership_keys)
+
 def _delete_canonical_imagery_rows(image_ids: List[str]) -> None:
     if not image_ids:
         return
@@ -186,13 +232,62 @@ def _delete_canonical_imagery_rows(image_ids: List[str]) -> None:
 
 def _delete_image_labels_for_images(image_ids: List[str]) -> None:
     """
-    Safe for *new images* (images created by this job).
+    Safe for *new images* created by this job.
     """
     if not image_ids:
         return
     for chunk in chunked(image_ids, 500):
         in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}" WHERE image_id IN ({in_list})'
+        run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=1800)
+
+def _delete_image_source_memberships_for_images(image_ids: List[str]) -> None:
+    """
+    Safe for *new images* created by this job.
+    """
+    if not image_ids:
+        return
+    for chunk in chunked(image_ids, 500):
+        in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
+        sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME}" WHERE image_id IN ({in_list})'
+        run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=1800)
+
+def _delete_exact_image_labels(keys: Set[Tuple[str, str, str]]) -> None:
+    """
+    Delete only exact image_labels rows identified by rollback plans.
+    """
+    if not keys:
+        return
+
+    rows = sorted(keys)
+    for chunk in chunked(rows, 200):
+        clauses = []
+        for image_id, label_type, label_id in chunk:
+            clauses.append(
+                f"(image_id = '{escape_sql_string(image_id)}' "
+                f"AND label_type = '{escape_sql_string(label_type)}' "
+                f"AND label_id = '{escape_sql_string(label_id)}')"
+            )
+        where_sql = " OR ".join(clauses)
+        sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}" WHERE {where_sql}'
+        run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=1800)
+
+def _delete_exact_image_source_memberships(keys: List[Tuple[str, str]]) -> None:
+    """
+    Delete only exact image_source_membership rows identified by rollback plans.
+    """
+    if not keys:
+        return
+
+    for chunk in chunked(keys, 200):
+        clauses = []
+        for image_id, data_source in chunk:
+            clauses.append(
+                f"(image_id = '{escape_sql_string(image_id)}' "
+                f"AND data_source = '{escape_sql_string(data_source)}')"
+            )
+        where_sql = " OR ".join(clauses)
+        sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME}" WHERE {where_sql}'
         run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=1800)
 
 def _load_owner_label_rows(processed_keys: List[str]) -> Dict[str, List[Dict]]:
@@ -216,15 +311,13 @@ def _load_owner_label_rows(processed_keys: List[str]) -> Dict[str, List[Dict]]:
 
     return out
 
-def _extract_label_s3_keys(table: str, rows: List[Dict]) -> List[str]:
+def _extract_label_s3_keys(rows: List[Dict]) -> List[str]:
     """
     From canonical label table row fields, extract canonical label S3 keys to delete (file bucket only).
     """
     keys: List[str] = []
     seen = set()
     for r in rows:
-        # bbox table: source_ref_meta
-        # semantic/instance: source_ref_png + source_ref_meta
         for col in ("source_ref_png", "source_ref_meta"):
             v = r.get(col)
             k = _safe_s3_key_from_uri(v) if isinstance(v, str) else None
@@ -267,8 +360,6 @@ def _is_label_id_referenced(label_type: str, label_id: str) -> bool:
     """
     qid, _ = run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=300)
     rows = athena_fetch_all_rows(qid)
-    # athena_fetch_all_rows in the codebase returns list[dict] with keys matching select aliases
-    # Be defensive:
     for r in rows:
         v = r.get("c") or r.get("_col0") or r.get("count") or r.get("count(*)")
         try:
@@ -363,43 +454,74 @@ def handler(event, context):
 
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} DLQ received message: {body}")
 
-        # ---- NEW ORDER: collect rollback targets BEFORE deleting temp prefix ----
         processed_keys = _list_registration_processed_keys(job_id)
 
-        # 2) Roll back canonical writes best-effort (registration side-effects)
-        #    Only “safe” deletions:
-        #      - canonical_imagery + image_labels for NEW images created by this job
-        #      - canonical label rows + objects only if orphaned (no remaining image_labels refs)
+        # ---- collect rollback targets before any optional temp cleanup ----
         try:
-            new_image_ids, canon_image_s3_keys = _load_canonical_imagery_outputs(job_id, processed_keys)
+            new_image_ids, canon_image_s3_keys = _load_canonical_imagery_outputs(processed_keys)
+            rollback_label_keys, rollback_source_membership_keys = _load_exact_rollback_targets(processed_keys)
+        except Exception as e:
+            new_image_ids, canon_image_s3_keys = [], []
+            rollback_label_keys, rollback_source_membership_keys = set(), []
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed loading rollback targets: {e}", level="error")
 
-            # Delete Iceberg rows for new images
+        # ---- rollback registration side-effects best-effort ----
+        try:
+            # 1) delete exact enrichment rows first (safe because rollback plans contain candidate-new rows only)
+            if rollback_label_keys:
+                try:
+                    _delete_exact_image_labels(rollback_label_keys)
+                    log(
+                        job_id,
+                        user,
+                        event_type,
+                        LOG_FIREHOSE_STREAM_NAME,
+                        f"{TASK_NAME} Deleted exact image_labels rollback keys count={len(rollback_label_keys)}",
+                    )
+                except Exception as e:
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Exact image_labels rollback failed: {e}", level="error")
+
+            if rollback_source_membership_keys:
+                try:
+                    _delete_exact_image_source_memberships(rollback_source_membership_keys)
+                    log(
+                        job_id,
+                        user,
+                        event_type,
+                        LOG_FIREHOSE_STREAM_NAME,
+                        f"{TASK_NAME} Deleted exact image_source_membership rollback keys count={len(rollback_source_membership_keys)}",
+                    )
+                except Exception as e:
+                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Exact image_source_membership rollback failed: {e}", level="error")
+
+            # 2) delete all rows for newly created images (safe because image ids are new)
             if new_image_ids:
                 try:
                     _delete_image_labels_for_images(new_image_ids)
+                    _delete_image_source_memberships_for_images(new_image_ids)
                     _delete_canonical_imagery_rows(new_image_ids)
-                    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted canonical_imagery + image_labels for {len(new_image_ids)} new image(s)")
+                    log(
+                        job_id,
+                        user,
+                        event_type,
+                        LOG_FIREHOSE_STREAM_NAME,
+                        f"{TASK_NAME} Deleted canonical_imagery + image_labels + image_source_membership for {len(new_image_ids)} new image(s)",
+                    )
                 except Exception as e:
                     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Iceberg rollback for new images failed: {e}", level="error")
 
-            # Delete canonical image S3 objects for new images
+            # 3) delete canonical image S3 objects for new images
             if canon_image_s3_keys:
                 deleted_est, errors = delete_s3_keys_best_effort(FILE_BUCKET_NAME, canon_image_s3_keys)
-                msg = f"{TASK_NAME} Deleted canonical image objects: attempted={len(canon_image_s3_keys)} deleted_est={deleted_est} errors={errors}"
+                msg = (
+                    f"{TASK_NAME} Deleted canonical image objects: attempted={len(canon_image_s3_keys)} "
+                    f"deleted_est={deleted_est} errors={errors}"
+                )
                 log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level=("warning" if errors else "info"))
 
-            # Canonical label rollback (only if orphaned)
-            # Note: label_type strings must match your IMAGE_LABELS label_type values.
-            # If your label_type values differ, adjust LABEL_TYPE_BY_TABLE.
-            LABEL_TYPE_BY_TABLE = {
-                CANONICAL_BBOX_TABLE_NAME: "object-detection",
-                CANONICAL_SEMANTIC_TABLE_NAME: "semantic-segmentation",
-                CANONICAL_INSTANCE_TABLE_NAME: "instance-segmentation",
-            }
-
+            # 4) delete orphaned canonical label rows/objects after image_labels cleanup
             owner_rows_by_table = _load_owner_label_rows(processed_keys)
 
-            # We only consider deleting label rows/objects that were part of this job’s owner outputs.
             for table, rows in owner_rows_by_table.items():
                 if not rows:
                     continue
@@ -408,7 +530,6 @@ def handler(event, context):
                 if not label_type:
                     continue
 
-                # If orphaned, delete label table rows. If deleted, delete their S3 objects.
                 try:
                     deleted_ids, skipped_rows = _delete_canonical_label_rows_if_orphaned(table, label_type, rows)
 
@@ -421,13 +542,16 @@ def handler(event, context):
                     )
 
                     if deleted_ids:
-                        # delete S3 objects only for the rows whose ids we deleted
                         kcol = _label_key_col(table)
-                        rows_deleted = [r for r in rows if (r.get(kcol) in set(deleted_ids))]
-                        label_s3_keys = _extract_label_s3_keys(table, rows_deleted)
+                        deleted_id_set = set(deleted_ids)
+                        rows_deleted = [r for r in rows if r.get(kcol) in deleted_id_set]
+                        label_s3_keys = _extract_label_s3_keys(rows_deleted)
                         if label_s3_keys:
                             d_est, errs = delete_s3_keys_best_effort(FILE_BUCKET_NAME, label_s3_keys)
-                            msg = f"{TASK_NAME} Deleted canonical label objects table={table}: attempted={len(label_s3_keys)} deleted_est={d_est} errors={errs}"
+                            msg = (
+                                f"{TASK_NAME} Deleted canonical label objects table={table}: "
+                                f"attempted={len(label_s3_keys)} deleted_est={d_est} errors={errs}"
+                            )
                             log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level=("warning" if errs else "info"))
 
                 except Exception as e:
@@ -442,16 +566,6 @@ def handler(event, context):
         except Exception:
             pass
 
-        # 1) Delete temp folder for this job (always, after we used it for rollback)
-        # this can cause race conditions with in-flight batch jobs after 1 or more jobs fail, implement later
-        # in a manner that won't race with a failed map state of batch jobs
-        # prefix = f"temp/image-upload/{job_id}/"
-        # try:
-        #     delete_s3_prefix(FILE_BUCKET_NAME, prefix, TASK_NAME)
-        #     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted temp s3 prefix")
-        # except Exception:
-        #     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Temp S3 cleanup failed", level="error")
-
         # 3) Mark job FAILED
         try:
             update_success, update_msg = update_job_status(
@@ -461,7 +575,7 @@ def handler(event, context):
                 LOG_FIREHOSE_STREAM_NAME,
                 user=user,
                 event_type=event_type,
-                error_msg=(error_msg or "")[:512]
+                error_msg=(error_msg or "")[:512],
             )
             if update_success:
                 log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job status to FAILED.")
@@ -475,16 +589,24 @@ def handler(event, context):
             mappings = _load_new_sha_mappings_from_processed_upload_staging(processed_keys)
             d, s, e = delete_sha256_entries_for_job(mappings)
             log(
-                job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} SHA256 rollback: deleted={d} skipped(not-matching)={s} errors={e} candidates={len(mappings)}"
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} SHA256 rollback: deleted={d} skipped(not-matching)={s} errors={e} candidates={len(mappings)}",
             )
         except Exception as e:
-            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} SHA256 rollback failed: {e}",
-                level="error")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} SHA256 rollback failed: {e}", level="error")
 
         # 5) Release global lock
         try:
-            release_success, release_msg = release_lock(job_id, LOCK_TABLE_NAME, LOG_FIREHOSE_STREAM_NAME, user=user, event_type=event_type)
+            release_success, release_msg = release_lock(
+                job_id,
+                LOCK_TABLE_NAME,
+                LOG_FIREHOSE_STREAM_NAME,
+                user=user,
+                event_type=event_type,
+            )
             if release_success:
                 log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Released lock.")
             else:
