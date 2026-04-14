@@ -66,6 +66,7 @@ class BatchTaskJobDefConfig:
 @dataclass
 class BatchingStageConfig:
     file_batching: LambdaConfig
+    map_max_concurrency: int
     batch_task_job_def: BatchTaskJobDefConfig
 
 @dataclass

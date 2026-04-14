@@ -38,7 +38,7 @@ CONFIG = AppConfig(
                     path="workers/lambdas/upload",
                     handler="dlq_processor_upload.handler",
                     memory_size=512,
-                    timeout_sec=600
+                    timeout_sec=900
                 ),
             sqs_queue=SQSConfig(
                     retention_period_days=14,
@@ -56,6 +56,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
+            map_max_concurrency=7,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
                 memory_limit_mib=2048,
@@ -70,6 +71,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
+            map_max_concurrency=7,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
                 memory_limit_mib=2048,
@@ -84,6 +86,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
+            map_max_concurrency=7,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=2,
                 memory_limit_mib=4096,
@@ -101,10 +104,10 @@ CONFIG = AppConfig(
             map_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/validation",
                 handler="validation_map.handler",
-                memory_size=1024,
+                memory_size=4096,
                 timeout_sec=900
             ),
-            map_max_concurrency=5,
+            map_max_concurrency=10, # max 40
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/validation",
                 handler="validation_post.handler",
@@ -122,10 +125,10 @@ CONFIG = AppConfig(
             map_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/deduplication",
                 handler="deduplication_map.handler",
-                memory_size=1024,
+                memory_size=4096,
                 timeout_sec=900
             ),
-            map_max_concurrency=5,
+            map_max_concurrency=10,
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/deduplication",
                 handler="deduplication_post.handler",
@@ -143,10 +146,10 @@ CONFIG = AppConfig(
             map_ingest_lambda=LambdaConfig(
                         path="workers/lambdas/upload/ingest/registration",
                         handler="registration_map.handler",
-                        memory_size=1024,
+                        memory_size=4096,
                         timeout_sec=900
                     ),
-            map_max_concurrency=5,
+            map_max_concurrency=10,
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/registration",
                 handler="registration_post.handler",
@@ -158,7 +161,7 @@ CONFIG = AppConfig(
             path="workers/lambdas/upload",
             handler="cleanup_upload.handler",
             memory_size=1024,
-            timeout_sec=500
+            timeout_sec=900
         )
     ),
     dataset=DatasetConfig(
@@ -167,7 +170,7 @@ CONFIG = AppConfig(
                 path="workers/lambdas/dataset",
                 handler="kickoff_dataset.handler",
                 memory_size=1024,
-                timeout_sec=500
+                timeout_sec=900
             ),
             dlq_ops=DLQOpsConfig(
                 dlq_processor=LambdaConfig(

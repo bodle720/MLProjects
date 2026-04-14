@@ -359,8 +359,7 @@ class BatchingStage(Construct):
             item_selector=params,
             result_path=sfn.JsonPath.DISCARD,
             output_path="$",
-            # max_concurrency=max(1, min(50, int(ce_maxv_cpus / max(1, config.batch_task_job_def.vcpus))))
-            max_concurrency=7
+            max_concurrency=config.map_max_concurrency
         )
 
         map_state.add_catch(
