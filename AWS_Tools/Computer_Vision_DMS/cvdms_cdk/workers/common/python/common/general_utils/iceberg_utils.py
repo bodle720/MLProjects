@@ -1,5 +1,7 @@
 import re
 import math
+import time
+import random
 from datetime import datetime
 from decimal import Decimal
 from typing import Union, Optional, Iterable, Any
@@ -9,6 +11,26 @@ from common.general_utils.athena_utils import run_athena
 from common.general_utils.table_schemas import TABLES, TableSchema
 
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+_ICEBERG_COMMIT_RETRY_MARKERS = (
+    "ICEBERG_COMMIT_ERROR",
+    "Failed to commit Iceberg update",
+)
+
+def _is_retryable_iceberg_commit_error(exc: Exception | str) -> bool:
+    text = str(exc)
+    return any(marker in text for marker in _ICEBERG_COMMIT_RETRY_MARKERS)
+
+def _sleep_with_backoff(
+    *,
+    base_sleep_sec: float,
+    attempt_index: int,
+    jitter_sec: float,
+) -> None:
+    delay = base_sleep_sec * (2 ** attempt_index)
+    if jitter_sec > 0:
+        delay += random.uniform(0.0, jitter_sec)
+    time.sleep(delay)
 
 #################################################################################
 # Perform chunked insert via WHERE NOT EXISTS clause.
@@ -79,12 +101,17 @@ def chunked_insert_where_not_exists(rows: Iterable[dict],
                                     chunk_size: int = 200,
                                     allow_empty: bool = True,
                                     poll: Union[int, float] = 5,
-                                    timeout: Union[int, float] = 1800) -> tuple[bool, str]:
+                                    timeout: Union[int, float] = 1800,
+                                    commit_retry_attempts: int = 4,
+                                    commit_retry_base_sleep_sec: Union[int, float] = 2.0,
+                                    commit_retry_jitter_sec: Union[int, float] = 0.5) -> tuple[bool, str]:
     """
     Insert-only ingest (no delete step). Idempotent by key via WHERE NOT EXISTS.
 
     This is intended for tables whose keyspace is NOT shard-owned (e.g. fingerprint tables),
     or append-only mapping tables where you never want destructive deletes.
+
+    Retries are intentionally narrow: only Iceberg commit-conflict style failures are retried.
     """
     if not isinstance(chunk_size, int):
         return False, f"{task_name} chunk_size must be int, got {type(chunk_size).__name__}"
@@ -92,6 +119,12 @@ def chunked_insert_where_not_exists(rows: Iterable[dict],
         return False, f"{task_name} timeout must be int or float, got {type(timeout).__name__}"
     if not isinstance(poll, (int, float)):
         return False, f"{task_name} poll must be int or float, got {type(poll).__name__}"
+    if not isinstance(commit_retry_attempts, int) or commit_retry_attempts < 1:
+        return False, f"{task_name} commit_retry_attempts must be int >= 1, got {commit_retry_attempts!r}"
+    if not isinstance(commit_retry_base_sleep_sec, (int, float)) or commit_retry_base_sleep_sec < 0:
+        return False, f"{task_name} commit_retry_base_sleep_sec must be >= 0, got {commit_retry_base_sleep_sec!r}"
+    if not isinstance(commit_retry_jitter_sec, (int, float)) or commit_retry_jitter_sec < 0:
+        return False, f"{task_name} commit_retry_jitter_sec must be >= 0, got {commit_retry_jitter_sec!r}"
     if not (0 < chunk_size <= 1000):
         return False, f"{task_name} chunk_size must be 1..1000, got {chunk_size}"
     if rows is None:
@@ -113,17 +146,48 @@ def chunked_insert_where_not_exists(rows: Iterable[dict],
     saw_any = False
 
     def flush_one_batch(b: list[dict], chunk_no: int) -> tuple[bool, str]:
-        try:
-            insert_sql = build_insert_where_not_exists_sql(b, full_table, task_name, schema)
-            run_athena(insert_sql, f"{task_name} INSERT_ONLY", athena_output_s3, athena_workgroup, poll, timeout)
-            return True, ""
-        except Exception as e:
-            sample = b[0] if b else {}
-            sample_types = row_type_summary(sample, schema.cols)
-            return False, (
-                f"{task_name} {e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
-                f"| rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
-            )
+        sample = b[0] if b else {}
+        sample_types = row_type_summary(sample, schema.cols)
+
+        for attempt in range(commit_retry_attempts):
+            try:
+                insert_sql = build_insert_where_not_exists_sql(b, full_table, task_name, schema)
+                run_athena(
+                    insert_sql,
+                    f"{task_name} INSERT_ONLY",
+                    athena_output_s3,
+                    athena_workgroup,
+                    poll,
+                    timeout,
+                )
+                return True, ""
+
+            except Exception as e:
+                retryable = _is_retryable_iceberg_commit_error(e)
+                is_last_attempt = attempt >= (commit_retry_attempts - 1)
+
+                if retryable and not is_last_attempt:
+                    _sleep_with_backoff(
+                        base_sleep_sec=float(commit_retry_base_sleep_sec),
+                        attempt_index=attempt,
+                        jitter_sec=float(commit_retry_jitter_sec),
+                    )
+                    continue
+
+                retry_note = (
+                    f" | commit_retry_attempt={attempt + 1}/{commit_retry_attempts}"
+                    if retryable else ""
+                )
+
+                return False, (
+                    f"{task_name} {e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
+                    f"| rows_seen_so_far={total_rows}{retry_note} | sample_row_types: {sample_types}"
+                )
+
+        return False, (
+            f"{task_name} insert-only flush exhausted retries unexpectedly | table={table_name} "
+            f"| chunk number={chunk_no} | rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
+        )
 
     try:
         for r in rows:
@@ -279,7 +343,10 @@ def chunked_insert(rows: Iterable[dict],
                    chunk_size: int = 200,
                    allow_empty: bool = True,
                    poll: Union[int, float] = 5,
-                   timeout: Union[int, float] = 1800) -> tuple[bool, str]:
+                   timeout: Union[int, float] = 1800,
+                   commit_retry_attempts: int = 4,
+                   commit_retry_base_sleep_sec: Union[int, float] = 2.0,
+                   commit_retry_jitter_sec: Union[int, float] = 0.5) -> tuple[bool, str]:
 
     if not isinstance(chunk_size, int):
         return False, f"chunk_size must be int, got {type(chunk_size).__name__}"
@@ -287,6 +354,12 @@ def chunked_insert(rows: Iterable[dict],
         return False, f"timeout must be int or float, got {type(timeout).__name__}"
     if not isinstance(poll, (int, float)):
         return False, f"poll must be int or float, got {type(poll).__name__}"
+    if not isinstance(commit_retry_attempts, int) or commit_retry_attempts < 1:
+        return False, f"{task_name} commit_retry_attempts must be int >= 1, got {commit_retry_attempts!r}"
+    if not isinstance(commit_retry_base_sleep_sec, (int, float)) or commit_retry_base_sleep_sec < 0:
+        return False, f"{task_name} commit_retry_base_sleep_sec must be >= 0, got {commit_retry_base_sleep_sec!r}"
+    if not isinstance(commit_retry_jitter_sec, (int, float)) or commit_retry_jitter_sec < 0:
+        return False, f"{task_name} commit_retry_jitter_sec must be >= 0, got {commit_retry_jitter_sec!r}"
     if not (0 < chunk_size <= 1000):
         return False, f"chunk_size must be 1..1000, got {chunk_size}"
     if rows is None:
@@ -306,21 +379,59 @@ def chunked_insert(rows: Iterable[dict],
     saw_any = False
 
     def flush_one_batch(b: list[dict], chunk_no: int) -> tuple[bool, str]:
-        try:
-            delete_sql = build_delete_sql_by_keys(b, full_table, task_name, schema.key_cols)
-            run_athena(delete_sql, f"{task_name} DELETE", athena_output_s3, athena_workgroup, poll, timeout)
+        sample = b[0] if b else {}
+        sample_types = row_type_summary(sample, schema.cols)
 
-            insert_sql = build_insert_sql(b, full_table, task_name, schema)
-            run_athena(insert_sql, f"{task_name} INSERT", athena_output_s3, athena_workgroup, poll, timeout)
+        for attempt in range(commit_retry_attempts):
+            try:
+                delete_sql = build_delete_sql_by_keys(b, full_table, task_name, schema.key_cols)
+                run_athena(
+                    delete_sql,
+                    f"{task_name} DELETE",
+                    athena_output_s3,
+                    athena_workgroup,
+                    poll,
+                    timeout,
+                )
 
-            return True, ""
-        except Exception as e:
-            sample = b[0] if b else {}
-            sample_types = row_type_summary(sample, schema.cols)
-            return False, (
-                f"{e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
-                f"| rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
-            )
+                insert_sql = build_insert_sql(b, full_table, task_name, schema)
+                run_athena(
+                    insert_sql,
+                    f"{task_name} INSERT",
+                    athena_output_s3,
+                    athena_workgroup,
+                    poll,
+                    timeout,
+                )
+
+                return True, ""
+
+            except Exception as e:
+                retryable = _is_retryable_iceberg_commit_error(e)
+                is_last_attempt = attempt >= (commit_retry_attempts - 1)
+
+                if retryable and not is_last_attempt:
+                    _sleep_with_backoff(
+                        base_sleep_sec=float(commit_retry_base_sleep_sec),
+                        attempt_index=attempt,
+                        jitter_sec=float(commit_retry_jitter_sec),
+                    )
+                    continue
+
+                retry_note = (
+                    f" | commit_retry_attempt={attempt + 1}/{commit_retry_attempts}"
+                    if retryable else ""
+                )
+
+                return False, (
+                    f"{e} | table={table_name} | chunk number={chunk_no} of chunks of size {chunk_size} "
+                    f"| rows_seen_so_far={total_rows}{retry_note} | sample_row_types: {sample_types}"
+                )
+
+        return False, (
+            f"{task_name} flush exhausted retries unexpectedly | table={table_name} "
+            f"| chunk number={chunk_no} | rows_seen_so_far={total_rows} | sample_row_types: {sample_types}"
+        )
 
     try:
         for r in rows:
@@ -338,7 +449,6 @@ def chunked_insert(rows: Iterable[dict],
                 batch = []
                 chunk_counter += 1
 
-        # flush tail
         if batch:
             ok, err = flush_one_batch(batch, chunk_counter)
             if not ok:
