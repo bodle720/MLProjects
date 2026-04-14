@@ -27,7 +27,14 @@ JOB_ID = os.environ["JOB_ID"]
 USER = os.environ["USER"]
 LABEL_TYPE = os.environ["LABEL_TYPE"]
 DATA_SOURCE = os.environ["DATA_SOURCE"]
-SOURCE_SPLIT = os.environ["SOURCE_SPLIT"]
+
+SOURCE_SPLIT = os.environ["SOURCE_SPLIT"].strip().lower()
+if SOURCE_SPLIT == "__none__":
+    SOURCE_SPLIT = None
+
+if SOURCE_SPLIT not in {None, "train", "val", "test"}:
+    raise ValueError(f"Invalid SOURCE_SPLIT env value: {SOURCE_SPLIT!r}")
+
 EVENT_TYPE = os.environ["EVENT_TYPE"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]

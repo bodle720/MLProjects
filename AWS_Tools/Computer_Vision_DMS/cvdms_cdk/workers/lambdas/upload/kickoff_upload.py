@@ -162,13 +162,13 @@ def handler(event, context):
         return fail(job_id, user, event_type,f"{TASK_NAME} Invalid data_source type: {type(data_source).__name__}, value = {data_source}")
 
     if source_split is None:
-        source_split = ""
+        source_split = "__none__"
     elif isinstance(source_split, str):
         source_split = source_split.strip().lower()
     else:
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid source_split type: {type(source_split).__name__}")
 
-    if source_split not in {"", "train", "val", "test"}:
+    if source_split not in {"__none__", "train", "val", "test"}:
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid source_split: {source_split}")
 
     if not isinstance(label_type, str) or label_type not in ALLOWED_LABEL_TYPES:
