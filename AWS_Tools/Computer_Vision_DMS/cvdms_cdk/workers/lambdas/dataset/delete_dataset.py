@@ -2,7 +2,6 @@ import os
 from typing import Any
 
 from common.general_utils.logging_utils import log
-from common.general_utils.ddb_utils import update_job_status
 from common.dataset_utils.dataset_get_info import get_dataset_info
 from common.dataset_utils.dataset_delete_utils import (
     delete_iceberg_membership,
@@ -10,7 +9,6 @@ from common.dataset_utils.dataset_delete_utils import (
     delete_ddb_rows,
 )
 
-JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
@@ -65,15 +63,6 @@ def handler(event, context):
             LOG_FIREHOSE_STREAM_NAME,
             f"{TASK_NAME} Starting delete flow for dataset_id={dataset_id}",
             level="info",
-        )
-
-        update_job_status(
-            job_id=job_id,
-            status="IN_PROGRESS",
-            job_table_name=JOB_TABLE_NAME,
-            stream_name=LOG_FIREHOSE_STREAM_NAME,
-            user=user,
-            event_type=event_type,
         )
 
         result: dict[str, Any] = {
@@ -143,15 +132,6 @@ def handler(event, context):
         result["deleted_ddb_records"] = True
         result["ddb_result"] = ddb_result
 
-        update_job_status(
-            job_id=job_id,
-            status="COMPLETED",
-            job_table_name=JOB_TABLE_NAME,
-            stream_name=LOG_FIREHOSE_STREAM_NAME,
-            user=user,
-            event_type=event_type,
-        )
-
         log(
             job_id,
             user,
@@ -169,19 +149,6 @@ def handler(event, context):
 
     except Exception as e:
         error_message = f"{TASK_NAME} Failed: {type(e).__name__}: {e}"
-
-        try:
-            update_job_status(
-                job_id=job_id,
-                status="FAILED",
-                job_table_name=JOB_TABLE_NAME,
-                stream_name=LOG_FIREHOSE_STREAM_NAME,
-                user=user,
-                event_type=event_type,
-                error_msg=error_message,
-            )
-        except Exception:
-            pass
 
         log(
             job_id,

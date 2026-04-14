@@ -18,7 +18,7 @@ DATASET_DLQ_URL = os.environ["DATASET_DLQ_URL"]
 ALLOWED_TASK_TYPES = {
     "create_dataset",
     "update_dataset",
-    "delete_dataset",
+    "delete_dataset"
 }
 
 TASK_NAME = "[DATASET_KICKOFF]"

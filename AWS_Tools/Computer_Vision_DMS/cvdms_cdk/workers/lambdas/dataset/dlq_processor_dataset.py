@@ -25,7 +25,7 @@ def _extract_error_message(error_value: Any) -> str:
     Normalize the DLQ error payload into a readable string.
 
     Handles:
-    - plain strings
+    - Plain strings
     - Step Functions-style JSON strings with nested Cause
     - dict-like payloads
     """

@@ -2,14 +2,13 @@ import os
 from typing import Any
 
 from common.general_utils.logging_utils import log
-from common.general_utils.ddb_utils import update_job_status, dataset_exists
+from common.general_utils.ddb_utils import dataset_exists
 from common.dataset_utils.resolve_candidate_imagery import resolve_candidate_imagery
 from common.dataset_utils.dataset_iceberg_utils import write_dataset_membership
 from common.dataset_utils.dataset_s3_utils import write_s3_artifacts
 from common.dataset_utils.dataset_ddb_utils import write_ddb_artifacts
 from common.dataset_utils.split_strategies.stratified_v1 import stratified_v1
 
-JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
@@ -181,15 +180,6 @@ def handler(event, context):
             level="info",
         )
 
-        update_job_status(
-            job_id=job_id,
-            status="IN_PROGRESS",
-            job_table_name=JOB_TABLE_NAME,
-            stream_name=LOG_FIREHOSE_STREAM_NAME,
-            user=user,
-            event_type=event_type,
-        )
-
         # Authoritative server-side uniqueness check.
         if dataset_exists(dataset_id, DATASETS_TABLE_NAME):
             raise ValueError(f"Dataset '{dataset_id}' already exists.")
@@ -331,15 +321,6 @@ def handler(event, context):
             artifact_result=artifact_result,
         )
 
-        update_job_status(
-            job_id=job_id,
-            status="COMPLETED",
-            job_table_name=JOB_TABLE_NAME,
-            stream_name=LOG_FIREHOSE_STREAM_NAME,
-            user=user,
-            event_type=event_type,
-        )
-
         effective_split_mode = (
             "honor_source_splits"
             if honor_source_splits
@@ -386,19 +367,6 @@ def handler(event, context):
 
     except Exception as e:
         error_message = f"{TASK_NAME} Failed: {type(e).__name__}: {e}"
-
-        try:
-            update_job_status(
-                job_id=job_id,
-                status="FAILED",
-                job_table_name=JOB_TABLE_NAME,
-                stream_name=LOG_FIREHOSE_STREAM_NAME,
-                user=user,
-                event_type=event_type,
-                error_msg=error_message,
-            )
-        except Exception:
-            pass
 
         log(
             job_id,

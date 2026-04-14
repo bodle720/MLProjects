@@ -10,8 +10,11 @@ import boto3
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import write_s3_obj
+from common.dataset_utils.dataset_get_info import get_dataset_info
 
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
+DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
+DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[DATASET_VISUALIZE]"
@@ -483,33 +486,64 @@ def handler(event, context):
             dataset_context.get("dataset_id"),
             field_name="dataset_context.dataset_id",
         )
-        label_type = _require_nonempty_string(
-            dataset_context.get("label_type"),
-            field_name="dataset_context.label_type",
-        )
 
         version_raw = dataset_context.get("new_version")
         if type(version_raw) is not int or version_raw < 1:
             raise ValueError("dataset_context.new_version must be an integer >= 1")
         version = version_raw
 
-        honor_source_splits_raw = dataset_context.get("honor_source_splits")
-        honor_source_splits = (
-            honor_source_splits_raw if isinstance(honor_source_splits_raw, bool) else None
-        )
-        effective_split_mode = _optional_string(dataset_context.get("effective_split_mode"))
-
         if task_type not in {"create_dataset", "update_dataset"}:
             raise ValueError(
                 f"{TASK_NAME} expected task_type create_dataset/update_dataset, got {task_type!r}"
             )
+
+        dataset_state = get_dataset_info(
+            datasets_table_name=DATASETS_TABLE_NAME,
+            dataset_versions_table_name=DATASET_VERSIONS_TABLE_NAME,
+            dataset_id=dataset_id,
+        )
+
+        if not dataset_state["dataset_info"].get("exists"):
+            raise ValueError(f"Dataset '{dataset_id}' does not exist.")
+
+        dataset_meta = dataset_state["dataset_info"]
+        latest_meta = dataset_state["latest_version_info"]
+
+        if latest_meta is None:
+            raise ValueError(
+                f"{TASK_NAME} Dataset '{dataset_id}' is missing latest_version_info."
+            )
+
+        latest_version = latest_meta.get("version")
+        if latest_version != version:
+            raise ValueError(
+                f"{TASK_NAME} dataset_context.new_version={version} does not match "
+                f"authoritative latest version {latest_version} for dataset_id={dataset_id}."
+            )
+
+        label_type = _require_nonempty_string(
+            dataset_meta.get("label_type"),
+            field_name="dataset_info.label_type",
+        )
+        honor_source_splits = dataset_meta.get("honor_source_splits")
+        if not isinstance(honor_source_splits, bool):
+            raise ValueError(
+                f"{TASK_NAME} dataset_info.honor_source_splits must be a bool, "
+                f"got {honor_source_splits!r}"
+            )
+
+        effective_split_mode = _optional_string(latest_meta.get("effective_split_mode"))
 
         log(
             job_id,
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Starting visualization generation for dataset_id={dataset_id}, version={version}",
+            (
+                f"{TASK_NAME} Starting visualization generation for dataset_id={dataset_id}, "
+                f"version={version}, label_type={label_type}, "
+                f"effective_split_mode={effective_split_mode}"
+            ),
             level="info",
         )
 
@@ -521,7 +555,8 @@ def handler(event, context):
 
         if not rows:
             raise ValueError(
-                f"{TASK_NAME} membership_enriched.csv contained zero rows for dataset_id={dataset_id}, version={version}"
+                f"{TASK_NAME} membership_enriched.csv contained zero rows for "
+                f"dataset_id={dataset_id}, version={version}"
             )
 
         overview = _build_overview(
@@ -583,6 +618,11 @@ def handler(event, context):
             "event_type": event_type,
             "task_type": task_type,
             "dataset_context": dataset_context,
+            "dataset_id": dataset_id,
+            "version": version,
+            "label_type": label_type,
+            "honor_source_splits": honor_source_splits,
+            "effective_split_mode": effective_split_mode,
             "visualization_prefix": f"s3://{DATASETS_BUCKET_NAME}/datasets/{dataset_id}/v{version}/visualization/",
             "row_count": len(rows),
             "written_files": written_files,

@@ -532,6 +532,10 @@ class DatasetClient:
             raise RuntimeError(f"Failed to upload file to S3: {msg}")
 
         logging.info("Done uploading submission.json to S3.")
-        self._update_job_status(job_id, "IN_PROGRESS")
+        job_ok, job_msg = self._update_job_status(job_id, "IN_PROGRESS")
+
+        if not job_ok:
+            logging.error(f"Failed to update job status to IN_PROGRESS: {job_msg}")
+            raise RuntimeError(f"Failed to update job status to IN_PROGRESS: {job_msg}")
 
         return {"submission_status": "success", "job_id": job_id}

@@ -14,6 +14,7 @@ TASK_NAME = "[DATASET_CLEANUP]"
 
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""
+
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
