@@ -330,6 +330,13 @@ class BatchingStage(Construct):
             integration_pattern=sfn.IntegrationPattern.RUN_JOB
         )
 
+        batch_task.add_retry(
+            errors=["Batch.ServerException"],
+            interval=Duration.seconds(10),
+            backoff_rate=2.0,
+            max_attempts=2,
+        )
+
         # Map state (wired to Batch task)
         params = {
                 "manifest.$": "$$.Map.Item.Value",
