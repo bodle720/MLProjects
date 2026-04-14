@@ -13,7 +13,9 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_lambda as _lambda,
     custom_resources as cr,
-    aws_ssm as ssm
+    aws_ssm as ssm,
+    aws_sqs as sqs,
+    aws_s3_notifications as s3n
 )
 
 from config import CONFIG
@@ -388,6 +390,57 @@ class StorageStack(Stack):
                        removal_policy=RemovalPolicy.DESTROY
                        )
 
+        # Let's make the event queues the Upload and Dataset stacks will need
+
+        # Upload Queue for upload kickoff to poll
+        upload_events_dlq = sqs.Queue(
+            self, "UploadEventsDLQ",
+            retention_period=Duration.days(14)
+        )
+
+        upload_events_queue = sqs.Queue(
+            self, "UploadEventsQueue",
+            visibility_timeout=Duration.minutes(CONFIG.upload.events_queue.visibility_timeout_minutes),
+            retention_period=Duration.days(CONFIG.upload.events_queue.retention_period_days),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                queue=upload_events_dlq,
+                max_receive_count=1
+            )
+        )
+
+        file_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.SqsDestination(upload_events_queue),
+            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="/job.json")
+        )
+
+        # Make the Dataset stack events queue for the dataset kickoff lambda
+        dataset_events_dlq = sqs.Queue(
+            self,
+            "DatasetEventsDLQ",
+            retention_period=Duration.days(14)
+        )
+
+        dataset_events_queue = sqs.Queue(
+            self,
+            "DatasetEventsQueue",
+            visibility_timeout=Duration.minutes(CONFIG.dataset.events_queue.visibility_timeout_minutes),
+            retention_period=Duration.days(CONFIG.dataset.events_queue.retention_period_days),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                queue=dataset_events_dlq,
+                max_receive_count=1
+            )
+        )
+
+        file_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.SqsDestination(dataset_events_queue),
+            s3.NotificationKeyFilter(
+                prefix="temp/dataset-ops/",
+                suffix="/submission.json"
+            )
+        )
+
         # Expose constructs for cross-stack wiring
         self.file_bucket = file_bucket
         self.iceberg_bucket = iceberg_bucket
@@ -402,6 +455,10 @@ class StorageStack(Stack):
         # Expose the datasets table as well
         self.datasets_table = datasets_table
         self.dataset_versions_table = dataset_versions_table
+
+        # Expose the queues
+        self.upload_events_queue = upload_events_queue
+        self.dataset_events_queue = dataset_events_queue
 
         # SSM params
         # Buckets
@@ -450,3 +507,11 @@ class StorageStack(Stack):
                             parameter_name=f"/cvdms/{app_name}/storage/sha256_table_name",
                             string_value=sha256_table.table_name
                             )
+
+        ssm.StringParameter(self, "UploadEventsQueueNameParam",
+                            parameter_name=f"/cvdms/{app_name}/upload/upload_events_queue_name",
+                            string_value=upload_events_queue.queue_name)
+
+        ssm.StringParameter(self,"DatasetEventsQueueNameParam",
+            parameter_name=f"/cvdms/{app_name}/dataset/dataset_events_queue_name",
+            string_value=dataset_events_queue.queue_name)

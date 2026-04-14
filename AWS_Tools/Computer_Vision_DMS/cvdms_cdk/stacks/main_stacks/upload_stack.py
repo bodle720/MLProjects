@@ -16,9 +16,7 @@ from aws_cdk import (
     aws_iam as iam,
     aws_sqs as sqs,
     aws_dynamodb as dynamodb,
-    aws_kinesisfirehose as firehose,
-    aws_s3_notifications as s3n,
-    aws_ssm as ssm
+    aws_kinesisfirehose as firehose
 )
 
 from config import CONFIG
@@ -40,6 +38,7 @@ class UploadStack(Stack):
                  lock_table: dynamodb.Table,
                  iceberg_database_name: str,
                  firehose_delivery_stream: firehose.CfnDeliveryStream,  # L1 type
+                 upload_events_queue: sqs.Queue,
                  **kwargs) -> None:
 
         super().__init__(scope, construct_id, **kwargs)
@@ -56,7 +55,7 @@ class UploadStack(Stack):
         self.common_utils_layer = common_utils_layer
 
         # Make the SQS Queue that will receive upload events
-        self.upload_events_queue = self.make_upload_events_queue()
+        self.upload_events_queue = upload_events_queue
 
         # Make the dlq
         self.dlq = self.make_dlq_assign_permissions()
@@ -229,35 +228,6 @@ class UploadStack(Stack):
 
         # Make kickoff lambda to trigger on job.json upload
         self._make_kickoff_lambda(upload_state_machine, CONFIG.upload.kickoff_lambda)
-
-    def make_upload_events_queue(self):
-        upload_events_dlq = sqs.Queue(
-            self, "UploadEventsDLQ",
-            retention_period=Duration.days(14)
-        )
-
-        upload_events_queue = sqs.Queue(
-            self, "UploadEventsQueue",
-            visibility_timeout=Duration.minutes(CONFIG.upload.events_queue.visibility_timeout_minutes),
-            retention_period=Duration.days(CONFIG.upload.events_queue.retention_period_days),
-            dead_letter_queue=sqs.DeadLetterQueue(
-                queue=upload_events_dlq,
-                max_receive_count=1
-            )
-        )
-
-        self.file_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.SqsDestination(upload_events_queue),
-            s3.NotificationKeyFilter(prefix="temp/image-upload/", suffix="/job.json")
-        )
-
-        # Add it to SSM
-        ssm.StringParameter(self, "UploadEventsQueueNameParam",
-                            parameter_name=f"/cvdms/{self.app_name}/upload/upload_events_queue_name",
-                            string_value=upload_events_queue.queue_name)
-
-        return upload_events_queue
 
     def make_dlq_assign_permissions(self):
         dlq_processor_env_vars = {

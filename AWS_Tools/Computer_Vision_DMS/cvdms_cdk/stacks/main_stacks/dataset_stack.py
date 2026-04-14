@@ -14,9 +14,7 @@ from aws_cdk import (
     aws_iam as iam,
     aws_sqs as sqs,
     aws_dynamodb as dynamodb,
-    aws_kinesisfirehose as firehose,
-    aws_s3_notifications as s3n,
-    aws_ssm as ssm
+    aws_kinesisfirehose as firehose
 )
 
 from config import CONFIG
@@ -38,6 +36,7 @@ class DatasetStack(Stack):
                  lock_table: dynamodb.Table,
                  iceberg_database_name: str,
                  firehose_delivery_stream: firehose.CfnDeliveryStream,
+                 dataset_events_queue: sqs.Queue,
                  **kwargs) -> None:
 
         super().__init__(scope, construct_id, **kwargs)
@@ -59,7 +58,7 @@ class DatasetStack(Stack):
         self.firehose_delivery_stream = firehose_delivery_stream
 
         # SQS queue receiving dataset submission events
-        self.dataset_events_queue = self.make_dataset_events_queue()
+        self.dataset_events_queue = dataset_events_queue
 
         # Workflow DLQ + processor
         self.dlq = self.make_dlq_assign_permissions()
@@ -98,15 +97,17 @@ class DatasetStack(Stack):
             error="InvalidTaskType"
         )
 
+        visualization_task.next(cleanup_task)
+
         workflow_definition = sfn.Chain.start(
             sfn.Choice(self, "RouteDatasetTaskType")
             .when(
                 sfn.Condition.string_equals("$.task_type", "create_dataset"),
-                    create_task.next(visualization_task).next(cleanup_task)
+                create_task.next(visualization_task)
             )
             .when(
                 sfn.Condition.string_equals("$.task_type", "update_dataset"),
-                update_task.next(visualization_task).next(cleanup_task)
+                update_task.next(visualization_task)
             )
             .when(
                 sfn.Condition.string_equals("$.task_type", "delete_dataset"),
@@ -133,42 +134,6 @@ class DatasetStack(Stack):
 
         # Kickoff lambda starts the workflow from SQS messages
         self._make_kickoff_lambda(dataset_state_machine, CONFIG.dataset.kickoff_lambda)
-
-    def make_dataset_events_queue(self):
-        dataset_events_dlq = sqs.Queue(
-            self,
-            "DatasetEventsDLQ",
-            retention_period=Duration.days(14)
-        )
-
-        dataset_events_queue = sqs.Queue(
-            self,
-            "DatasetEventsQueue",
-            visibility_timeout=Duration.minutes(CONFIG.dataset.events_queue.visibility_timeout_minutes),
-            retention_period=Duration.days(CONFIG.dataset.events_queue.retention_period_days),
-            dead_letter_queue=sqs.DeadLetterQueue(
-                queue=dataset_events_dlq,
-                max_receive_count=1
-            )
-        )
-
-        self.file_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.SqsDestination(dataset_events_queue),
-            s3.NotificationKeyFilter(
-                prefix="temp/dataset-ops/",
-                suffix="/submission.json"
-            )
-        )
-
-        ssm.StringParameter(
-            self,
-            "DatasetEventsQueueNameParam",
-            parameter_name=f"/cvdms/{self.app_name}/dataset/dataset_events_queue_name",
-            string_value=dataset_events_queue.queue_name
-        )
-
-        return dataset_events_queue
 
     def make_dlq_assign_permissions(self):
         dlq_processor_env_vars = {

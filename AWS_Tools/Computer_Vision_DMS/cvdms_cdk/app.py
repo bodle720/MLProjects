@@ -37,6 +37,7 @@ upload_stack = UploadStack(app,
                             lock_table=storage_stack.lock_table,
                             iceberg_database_name=storage_stack.iceberg_database_name,
                             firehose_delivery_stream=logging_stack.firehose_delivery_stream,
+                            upload_events_queue=storage_stack.upload_events_queue,
                             env=env)
 
 dataset_stack = DatasetStack(app,
@@ -52,6 +53,7 @@ dataset_stack = DatasetStack(app,
                                 lock_table=storage_stack.lock_table,
                                 iceberg_database_name=storage_stack.iceberg_database_name,
                                 firehose_delivery_stream=logging_stack.firehose_delivery_stream,
+                                dataset_events_queue=storage_stack.dataset_events_queue,
                                 env=env)
 
 app.synth()
