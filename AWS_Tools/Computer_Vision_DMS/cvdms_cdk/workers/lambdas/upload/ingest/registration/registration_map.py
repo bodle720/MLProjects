@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import os
 import json
+from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Iterable, Set, Optional
+
 import boto3
 
 from common.general_utils.logging_utils import log
@@ -29,6 +31,7 @@ ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[REG_INGEST_MAP]"
+STAGE_NAME = "registration-ingest"
 CHUNK_SIZE = 200
 
 LABEL_TABLES = {
@@ -38,6 +41,35 @@ LABEL_TABLES = {
 }
 
 athena = boto3.client("athena")
+s3 = boto3.client("s3")
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _marker_suffix(kind: str, shard: str) -> str:
+    return f"{kind}-{shard}"
+
+def _active_marker_key(job_id: str, kind: str, shard: str) -> str:
+    suffix = _marker_suffix(kind, shard)
+    return f"temp/image-upload/{job_id}/worker-markers/{STAGE_NAME}/active/{suffix}.json"
+
+def _completed_marker_key(job_id: str, kind: str, shard: str) -> str:
+    suffix = _marker_suffix(kind, shard)
+    return f"temp/image-upload/{job_id}/worker-markers/{STAGE_NAME}/completed/{suffix}.json"
+
+def _write_json_marker(key: str, payload: dict) -> None:
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=key,
+        Body=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+def _delete_marker_best_effort(key: str) -> None:
+    try:
+        s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
+    except Exception:
+        pass
 
 def _escape_sql_string(s: str) -> str:
     return s.replace("'", "''")
@@ -231,8 +263,13 @@ def _ingest_label_owner_shard(
     """
     label_keys = _list_owner_label_jsonl_keys(owner_prefix)
     if not label_keys:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Owner shard={shard} empty (no jsonl parts)")
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Owner shard={shard} empty (no jsonl parts)",
+        )
         return {
             "job_id": job_id,
             "shard": shard,
@@ -328,7 +365,6 @@ def _ingest_target_shard(
     """
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Start kind=target shard={shard}")
 
-    # 0a) Load image_labels rows and compute existing/new
     incoming_image_labels: List[Dict[str, str]] = []
     incoming_label_keys: Set[Tuple[str, str, str]] = set()
     incoming_image_ids_for_labels: Set[str] = set()
@@ -365,7 +401,6 @@ def _ingest_target_shard(
 
     new_label_keys = incoming_label_keys - existing_label_keys
 
-    # 0b) Load image_source_membership rows and compute existing/new/conflicts
     incoming_source_memberships: List[Dict[str, Optional[str]]] = []
     incoming_source_key_to_split: Dict[Tuple[str, str], Optional[str]] = {}
     incoming_image_ids_for_sources: Set[str] = set()
@@ -414,14 +449,12 @@ def _ingest_target_shard(
         if existing_split != incoming_split:
             conflicting_source_membership_keys[key] = (existing_split, incoming_split)
 
-    # Candidate-new source membership rows for rollback + insert
     memberships_to_insert = [
         r for r in incoming_source_memberships
         if (r["image_id"], r["data_source"]) in new_source_membership_keys
         and (r["image_id"], r["data_source"]) not in conflicting_source_membership_keys
     ]
 
-    # Persist rollback plan BEFORE insert-only writes.
     rollback_plan_key = _write_target_rollback_plan(
         job_id=job_id,
         shard=shard,
@@ -429,7 +462,6 @@ def _ingest_target_shard(
         image_source_memberships_to_delete=memberships_to_insert,
     )
 
-    # 1) Load upload_staging rows, compute external_duplicate status using new labels + new source memberships
     upload_rows: List[Dict] = []
     enriched_count = 0
     noop_count = 0
@@ -521,7 +553,6 @@ def _ingest_target_shard(
 
         upload_rows.append(row)
 
-    # upload_staging (delete-then-insert)
     if upload_rows:
         ok, err = chunked_insert(
             upload_rows,
@@ -535,7 +566,6 @@ def _ingest_target_shard(
         if not ok:
             raise RuntimeError(f"{TASK_NAME} upload_staging chunked_insert failed: {err}")
 
-    # 2) canonical_imagery (delete-then-insert)
     canon_img_rows: List[Dict] = []
     for row in _iter_jsonl_keys([canonical_imagery_key], f"{TASK_NAME}.read_canonical_imagery"):
         canon_img_rows.append(row)
@@ -553,7 +583,6 @@ def _ingest_target_shard(
         if not ok:
             raise RuntimeError(f"{TASK_NAME} canonical_imagery chunked_insert failed: {err}")
 
-    # 3) image_labels (insert-only)
     if incoming_image_labels:
         ok, err = chunked_insert_where_not_exists(
             incoming_image_labels,
@@ -567,7 +596,6 @@ def _ingest_target_shard(
         if not ok:
             raise RuntimeError(f"{TASK_NAME} image_labels insert-only failed: {err}")
 
-    # 4) image_source_membership (insert-only, excluding conflicts)
     if memberships_to_insert:
         ok, err = chunked_insert_where_not_exists(
             memberships_to_insert,
@@ -640,39 +668,93 @@ def handler(event, context):
         raise RuntimeError(f"{TASK_NAME} missing job_id")
     if not shard:
         raise RuntimeError(f"{TASK_NAME} missing shard")
+    if not isinstance(kind, str) or not kind.strip():
+        raise RuntimeError(f"{TASK_NAME} missing kind")
+    kind = kind.strip()
 
-    if kind == "label_owner":
-        if not isinstance(canonical_labels_key, str) or not canonical_labels_key.strip():
-            raise RuntimeError(f"{TASK_NAME} kind=label_owner requires canonical_labels_key (owner prefix)")
-        return _ingest_label_owner_shard(
-            job_id=job_id,
-            user=user,
-            event_type=event_type,
-            shard=shard,
-            owner_prefix=canonical_labels_key,
-        )
-    elif kind != "target":
-        raise RuntimeError(f"{TASK_NAME} unsupported kind={kind}")
+    active_key = _active_marker_key(job_id, kind, shard)
+    completed_key = _completed_marker_key(job_id, kind, shard)
 
-    if not isinstance(label_type, str) or not label_type.strip():
-        raise RuntimeError(f"{TASK_NAME} kind=target requires label_type")
-    if not upload_staging_key:
-        raise RuntimeError(f"{TASK_NAME} kind=target missing upload_staging_key")
-    if not canonical_imagery_key:
-        raise RuntimeError(f"{TASK_NAME} kind=target missing canonical_imagery_key")
-    if not image_labels_key:
-        raise RuntimeError(f"{TASK_NAME} kind=target missing image_labels_key")
-    if not image_source_membership_key:
-        raise RuntimeError(f"{TASK_NAME} kind=target missing image_source_membership_key")
-
-    return _ingest_target_shard(
-        job_id=job_id,
-        user=user,
-        event_type=event_type,
-        label_type=label_type.strip(),
-        shard=shard,
-        upload_staging_key=upload_staging_key,
-        canonical_imagery_key=canonical_imagery_key,
-        image_labels_key=image_labels_key,
-        image_source_membership_key=image_source_membership_key,
+    _write_json_marker(
+        active_key,
+        {
+            "job_id": job_id,
+            "stage": STAGE_NAME,
+            "kind": kind,
+            "shard": shard,
+            "request_id": getattr(context, "aws_request_id", None),
+            "started_at": _iso_now(),
+            "upload_staging_key": upload_staging_key,
+            "canonical_imagery_key": canonical_imagery_key,
+            "canonical_labels_key": canonical_labels_key,
+            "image_labels_key": image_labels_key,
+            "image_source_membership_key": image_source_membership_key,
+        },
     )
+
+    try:
+        if kind == "label_owner":
+            if not isinstance(canonical_labels_key, str) or not canonical_labels_key.strip():
+                raise RuntimeError(f"{TASK_NAME} kind=label_owner requires canonical_labels_key (owner prefix)")
+            result = _ingest_label_owner_shard(
+                job_id=job_id,
+                user=user,
+                event_type=event_type,
+                shard=shard,
+                owner_prefix=canonical_labels_key,
+            )
+        elif kind == "target":
+            if not isinstance(label_type, str) or not label_type.strip():
+                raise RuntimeError(f"{TASK_NAME} kind=target requires label_type")
+            if not upload_staging_key:
+                raise RuntimeError(f"{TASK_NAME} kind=target missing upload_staging_key")
+            if not canonical_imagery_key:
+                raise RuntimeError(f"{TASK_NAME} kind=target missing canonical_imagery_key")
+            if not image_labels_key:
+                raise RuntimeError(f"{TASK_NAME} kind=target missing image_labels_key")
+            if not image_source_membership_key:
+                raise RuntimeError(f"{TASK_NAME} kind=target missing image_source_membership_key")
+
+            result = _ingest_target_shard(
+                job_id=job_id,
+                user=user,
+                event_type=event_type,
+                label_type=label_type.strip(),
+                shard=shard,
+                upload_staging_key=upload_staging_key,
+                canonical_imagery_key=canonical_imagery_key,
+                image_labels_key=image_labels_key,
+                image_source_membership_key=image_source_membership_key,
+            )
+        else:
+            raise RuntimeError(f"{TASK_NAME} unsupported kind={kind}")
+
+        _write_json_marker(
+            completed_key,
+            {
+                "job_id": job_id,
+                "stage": STAGE_NAME,
+                "kind": kind,
+                "shard": shard,
+                "request_id": getattr(context, "aws_request_id", None),
+                "completed_at": _iso_now(),
+            },
+        )
+
+        result["active_marker_key"] = active_key
+        result["completed_marker_key"] = completed_key
+        return result
+
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed kind={kind} shard={shard}: {e}",
+            level="error",
+        )
+        raise
+
+    finally:
+        _delete_marker_best_effort(active_key)

@@ -321,3 +321,32 @@ def build_owner_label_output_key(
 
     src = (source_target_shard or "shard").strip()
     return f"{processed_prefix}/canonical_labels_by_fingerprint/owner-{owner}/part-{src}.jsonl"
+
+def rollback_dest_keys_from_copy_plan(
+    copy_plan: List[Tuple[str, str, str, str]],
+    *,
+    dst_bucket: str,
+) -> List[str]:
+    out: List[str] = []
+    seen = set()
+
+    for _src_bucket, _src_key, actual_dst_bucket, dst_key in copy_plan:
+        if actual_dst_bucket != dst_bucket:
+            continue
+        if dst_key in seen:
+            continue
+        seen.add(dst_key)
+        out.append(dst_key)
+
+    return out
+
+def sha_mapping_row(*, sha256_hash: str, image_id: str) -> Dict[str, str]:
+    if not isinstance(sha256_hash, str) or not sha256_hash.strip():
+        raise RuntimeError(f"{TASK_NAME} Missing/invalid sha256_hash for rollback mapping")
+    if not isinstance(image_id, str) or not image_id.strip():
+        raise RuntimeError(f"{TASK_NAME} Missing/invalid image_id for rollback mapping")
+
+    return {
+        "sha256": sha256_hash.strip(),
+        "image_id": image_id.strip(),
+    }

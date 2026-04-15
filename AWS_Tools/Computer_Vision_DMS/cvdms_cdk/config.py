@@ -37,7 +37,7 @@ CONFIG = AppConfig(
             dlq_processor=LambdaConfig(
                     path="workers/lambdas/upload",
                     handler="dlq_processor_upload.handler",
-                    memory_size=512,
+                    memory_size=1024,
                     timeout_sec=900
                 ),
             sqs_queue=SQSConfig(
@@ -107,7 +107,7 @@ CONFIG = AppConfig(
                 memory_size=3008,
                 timeout_sec=900
             ),
-            map_max_concurrency=5, # max 40
+            map_max_concurrency=1,
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/validation",
                 handler="validation_post.handler",
@@ -128,7 +128,7 @@ CONFIG = AppConfig(
                 memory_size=3008,
                 timeout_sec=900
             ),
-            map_max_concurrency=5,
+            map_max_concurrency=1,
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/deduplication",
                 handler="deduplication_post.handler",
@@ -149,7 +149,7 @@ CONFIG = AppConfig(
                         memory_size=3008,
                         timeout_sec=900
                     ),
-            map_max_concurrency=5,
+            map_max_concurrency=1,
             post_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/registration",
                 handler="registration_post.handler",

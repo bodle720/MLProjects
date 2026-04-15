@@ -2,6 +2,7 @@
 import os
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 import boto3
@@ -11,11 +12,11 @@ from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
     write_s3_obj,
     parse_s3_uri,
-    s3_read_json
+    s3_read_json,
 )
 from common.general_utils.s3fs_utils import (
     read_parquet_rows_from_s3_uris,
-    jsonl_stream_to_s3
+    jsonl_stream_to_s3,
 )
 
 from helpers import (
@@ -28,6 +29,7 @@ from helpers import (
     copy_objects_or_raise,
     fingerprint_owner_shard_id,
     build_owner_label_output_key,
+    sha_mapping_row
 )
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
@@ -51,6 +53,7 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
 TASK_NAME = "[REG_JOB_DEF]"
+STAGE_NAME = "registration-batch"
 
 if not MANIFEST_S3_URI:
     raise RuntimeError(f"{TASK_NAME} MANIFEST_S3_URI not set")
@@ -67,6 +70,64 @@ MAX_ROWS_IN_MEMORY = 200000
 OWNER_SHARDS = 512  # keep aligned with batching MAX_SHARDS
 
 ddb = boto3.client("dynamodb")
+s3 = boto3.client("s3")
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _active_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
+
+def _completed_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
+def _write_json_marker(key: str, payload: dict) -> None:
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=key,
+        Body=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+def _delete_marker_best_effort(key: str) -> None:
+    try:
+        s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
+    except Exception:
+        pass
+
+def _rollback_seed_key(shard_name: str) -> str:
+    return f"{PROCESSED_PREFIX}/rollback-batch/shard-{shard_name}.json"
+
+def _write_batch_rollback_seed(
+    *,
+    shard_name: str,
+    new_image_ids: List[str],
+    canonical_image_keys_to_delete: List[str],
+    canonical_label_keys_to_delete: List[str],
+    sha256_mappings_to_delete: List[Dict[str, str]],
+) -> str:
+    payload = {
+        "job_id": JOB_ID,
+        "shard": shard_name,
+        "kind": "registration_batch",
+        "new_image_ids": sorted(set(new_image_ids)),
+        "canonical_image_keys_to_delete": sorted(set(canonical_image_keys_to_delete)),
+        "canonical_label_keys_to_delete": sorted(set(canonical_label_keys_to_delete)),
+        "sha256_mappings_to_delete": sorted(
+            sha256_mappings_to_delete,
+            key=lambda r: (r["sha256"], r["image_id"]),
+        ),
+    }
+
+    key = _rollback_seed_key(shard_name)
+    write_s3_obj(
+        FILE_BUCKET_NAME,
+        key,
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n",
+        "application/json",
+        TASK_NAME,
+    )
+    return key
 
 def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
     """
@@ -111,22 +172,35 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
             f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}"
         )
 
-def process_manifest(manifest: Dict[str, Any]) -> Tuple[
+def _execute_side_effects(
+    *,
+    copy_plan_all: List[Tuple[str, str, str, str]],
+    sha_mappings_to_put: List[Dict[str, str]],
+) -> None:
+    if copy_plan_all:
+        copy_objects_or_raise(copy_plan_all)
+
+    for row in sha_mappings_to_put:
+        put_sha256_mapping_idempotent(
+            sha256_hash=row["sha256"],
+            image_id=row["image_id"],
+        )
+
+def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
-    Dict[str, List[Dict[str, Any]]],   # canonical label rows by owner shard
+    Dict[str, List[Dict[str, Any]]],
     List[Dict[str, Any]],
     List[Dict[str, Any]],
     Dict[str, Any],
+    List[Tuple[str, str, str, str]],   # copy_plan_all
+    List[Dict[str, str]],              # sha_mappings_to_put
+    List[str],                         # new_image_ids
+    List[str],                         # canonical_image_keys_to_delete
+    List[str],                         # canonical_label_keys_to_delete
 ]:
     """
-    Returns:
-      - updated_upload_rows
-      - canonical_imagery_rows
-      - canonical_label_rows_by_owner
-      - image_labels_rows
-      - image_source_membership_rows
-      - summary
+    Planning only. NO side effects here.
     """
     files = manifest.get("files", []) or []
     shard_name = manifest.get("shard_prefix", "shard")
@@ -145,11 +219,21 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
 
     canonical_label_rows_by_owner: Dict[str, List[Dict[str, Any]]] = {}
 
+    copy_plan_all: List[Tuple[str, str, str, str]] = []
+    sha_mappings_to_put: List[Dict[str, str]] = []
+
+    new_image_ids: List[str] = []
+    rollback_canonical_image_keys: List[str] = []
+    rollback_canonical_label_keys: List[str] = []
+
     seen_canonical_images: set[str] = set()
+    seen_new_image_ids: set[str] = set()
     seen_image_labels: set[Tuple[str, str, str]] = set()
     seen_fingerprints: set[str] = set()
+    seen_copy_ops: set[Tuple[str, str, str, str]] = set()
+    seen_sha_mappings: set[Tuple[str, str]] = set()
 
-    # one upload job has one data_source/source_split, but dedupe anyway
+    # One upload job has one data_source/source_split, but dedupe membership rows anyway.
     seen_source_memberships: Dict[Tuple[str, str], Any] = {}
 
     for row in read_parquet_rows_from_s3_uris(files):
@@ -230,6 +314,11 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                 copy_plan: List[Tuple[str, str, str, str]] = []
                 src_b, src_k = parse_s3_uri(temp_image_uri, TASK_NAME)
                 copy_plan.append((src_b, src_k, FILE_BUCKET_NAME, canonical_image_key))
+                rollback_canonical_image_keys.append(canonical_image_key)
+
+                if image_id not in seen_new_image_ids:
+                    seen_new_image_ids.add(image_id)
+                    new_image_ids.append(image_id)
 
                 fingerprint = row.get("label_fingerprint")
 
@@ -239,7 +328,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             f"{TASK_NAME} Missing label_fingerprint for label-type requiring label files"
                         )
 
-                    _, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
+                    label_dst_keys, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
                         file_bucket=FILE_BUCKET_NAME,
                         label_type=LABEL_TYPE,
                         fingerprint=fingerprint,
@@ -251,6 +340,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                     )
 
                     copy_plan.extend(label_copy_plan)
+                    rollback_canonical_label_keys.extend(label_dst_keys)
 
                     if fingerprint not in seen_fingerprints:
                         label_row = build_canonical_label_table_row(
@@ -263,8 +353,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             owner = fingerprint_owner_shard_id(fingerprint, OWNER_SHARDS)
                             canonical_label_rows_by_owner.setdefault(owner, []).append(label_row)
                             seen_fingerprints.add(fingerprint)
-
-                copy_objects_or_raise(copy_plan)
 
                 if image_id not in seen_canonical_images:
                     canon_img_row = build_canonical_imagery_row(
@@ -286,7 +374,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                         image_labels_rows.append(ilr)
                         seen_image_labels.add(key)
 
-                # new provenance membership row
                 membership_row = build_image_source_membership_row(
                     image_id=image_id,
                     data_source=DATA_SOURCE,
@@ -306,7 +393,17 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                     image_source_membership_rows.append(membership_row)
                     seen_source_memberships[membership_key] = membership_split
 
-                put_sha256_mapping_idempotent(sha256_hash=sha256_hash, image_id=image_id)
+                for cp in copy_plan:
+                    if cp not in seen_copy_ops:
+                        seen_copy_ops.add(cp)
+                        copy_plan_all.append(cp)
+
+                sha_key = (sha256_hash, image_id)
+                if sha_key not in seen_sha_mappings:
+                    seen_sha_mappings.add(sha_key)
+                    sha_mappings_to_put.append(
+                        sha_mapping_row(sha256_hash=sha256_hash, image_id=image_id)
+                    )
 
                 row["registration_status"] = "passed"
                 row["registration_error"] = None
@@ -338,7 +435,7 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             f"{TASK_NAME} Missing label_fingerprint for external_duplicate structured label"
                         )
 
-                    _, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
+                    label_dst_keys, label_dst_uris, label_copy_plan = build_canonical_label_dests_by_fingerprint(
                         file_bucket=FILE_BUCKET_NAME,
                         label_type=LABEL_TYPE,
                         fingerprint=fingerprint,
@@ -349,7 +446,12 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                         temp_instance_meta_uri=row.get("temp_source_ref_instance_meta"),
                     )
 
-                    copy_objects_or_raise(label_copy_plan)
+                    rollback_canonical_label_keys.extend(label_dst_keys)
+
+                    for cp in label_copy_plan:
+                        if cp not in seen_copy_ops:
+                            seen_copy_ops.add(cp)
+                            copy_plan_all.append(cp)
 
                     if fingerprint not in seen_fingerprints:
                         label_row = build_canonical_label_table_row(
@@ -363,7 +465,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                             canonical_label_rows_by_owner.setdefault(owner, []).append(label_row)
                             seen_fingerprints.add(fingerprint)
 
-                # provenance membership row for existing canonical image
                 membership_row = build_image_source_membership_row(
                     image_id=target_image_id,
                     data_source=DATA_SOURCE,
@@ -383,7 +484,6 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
                     image_source_membership_rows.append(membership_row)
                     seen_source_memberships[membership_key] = membership_split
 
-                # keep registration_status unset here; ingest decides enriched vs no_op
             else:
                 skipped_rows += 1
 
@@ -419,6 +519,11 @@ def process_manifest(manifest: Dict[str, Any]) -> Tuple[
         image_labels_rows,
         image_source_membership_rows,
         summary,
+        copy_plan_all,
+        sha_mappings_to_put,
+        new_image_ids,
+        rollback_canonical_image_keys,
+        rollback_canonical_label_keys,
     )
 
 def write_outputs(
@@ -473,6 +578,23 @@ def main():
     manifest = s3_read_json(mb, mk, TASK_NAME)
 
     shard_name = manifest.get("shard_prefix", "shard")
+    active_key = _active_marker_key(shard_name)
+    completed_key = _completed_marker_key(shard_name)
+
+    _write_json_marker(
+        active_key,
+        {
+            "job_id": JOB_ID,
+            "stage": STAGE_NAME,
+            "shard": shard_name,
+            "request_id": None,
+            "started_at": _iso_now(),
+            "manifest_s3_uri": MANIFEST_S3_URI,
+            "label_type": LABEL_TYPE,
+            "data_source": DATA_SOURCE,
+            "source_split": SOURCE_SPLIT,
+        },
+    )
 
     log(
         JOB_ID,
@@ -490,7 +612,25 @@ def main():
             image_labels_rows,
             image_source_membership_rows,
             summary,
-        ) = process_manifest(manifest)
+            copy_plan_all,
+            sha_mappings_to_put,
+            new_image_ids,
+            rollback_canonical_image_keys,
+            rollback_canonical_label_keys,
+        ) = plan_manifest(manifest)
+
+        rollback_seed_key = _write_batch_rollback_seed(
+            shard_name=shard_name,
+            new_image_ids=new_image_ids,
+            canonical_image_keys_to_delete=rollback_canonical_image_keys,
+            canonical_label_keys_to_delete=rollback_canonical_label_keys,
+            sha256_mappings_to_delete=sha_mappings_to_put,
+        )
+
+        _execute_side_effects(
+            copy_plan_all=copy_plan_all,
+            sha_mappings_to_put=sha_mappings_to_put,
+        )
 
         write_outputs(
             shard_name,
@@ -500,6 +640,17 @@ def main():
             image_labels_rows,
             image_source_membership_rows,
             summary,
+        )
+
+        _write_json_marker(
+            completed_key,
+            {
+                "job_id": JOB_ID,
+                "stage": STAGE_NAME,
+                "shard": shard_name,
+                "completed_at": _iso_now(),
+                "rollback_seed_key": rollback_seed_key,
+            },
         )
 
         elapsed = time.time() - start
@@ -517,6 +668,8 @@ def main():
             f"image_source_membership={summary['image_source_membership_rows']} "
             f"canon_label_rows={summary['canonical_label_rows_total']} "
             f"owner_shards={len(summary['canonical_label_owner_shards_touched'])} "
+            f"new_image_ids={len(new_image_ids)} "
+            f"rollback_seed=s3://{FILE_BUCKET_NAME}/{rollback_seed_key} "
             f"time_s={elapsed:.1f}",
         )
 
@@ -530,6 +683,9 @@ def main():
             level="error",
         )
         raise
+
+    finally:
+        _delete_marker_best_effort(active_key)
 
 if __name__ == "__main__":
     main()
