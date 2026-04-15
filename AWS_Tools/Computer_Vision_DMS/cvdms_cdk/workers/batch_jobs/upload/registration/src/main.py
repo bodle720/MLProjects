@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
+from common.general_utils.testing import maybe_fail
+
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
     write_s3_obj,
@@ -626,6 +628,8 @@ def main():
             canonical_label_keys_to_delete=rollback_canonical_label_keys,
             sha256_mappings_to_delete=sha_mappings_to_put,
         )
+
+        maybe_fail("after_batch_rollback_seed", shard_name)
 
         _execute_side_effects(
             copy_plan_all=copy_plan_all,

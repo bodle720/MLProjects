@@ -6,6 +6,8 @@ from typing import Dict, List, Tuple, Iterable, Set, Optional
 
 import boto3
 
+from common.general_utils.testing import maybe_fail
+
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
     s3_read_jsonl_list,
@@ -462,6 +464,8 @@ def _ingest_target_shard(
         image_source_memberships_to_delete=memberships_to_insert,
     )
 
+    maybe_fail("after_target_rollback_plan", shard)
+
     upload_rows: List[Dict] = []
     enriched_count = 0
     noop_count = 0
@@ -582,6 +586,8 @@ def _ingest_target_shard(
         )
         if not ok:
             raise RuntimeError(f"{TASK_NAME} canonical_imagery chunked_insert failed: {err}")
+
+    maybe_fail("after_canonical_imagery_insert", shard)
 
     if incoming_image_labels:
         ok, err = chunked_insert_where_not_exists(
