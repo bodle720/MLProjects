@@ -119,32 +119,14 @@ def _run_athena_with_commit_retry(
 
     raise RuntimeError(f"{TASK_NAME} unexpected rollback Athena failure in {op_name}")
 
-def delete_s3_keys_best_effort(bucket: str, keys: List[str], batch_size: int = 1000) -> Tuple[int, int]:
-    if not keys:
-        return 0, 0
-    deleted = 0
-    errors_total = 0
-    for chunk in chunked(keys, batch_size):
-        try:
-            resp = s3.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": [{"Key": k} for k in chunk]},
-            )
-            deleted += len(chunk)
-            errors = resp.get("Errors", []) or []
-            errors_total += len(errors)
-        except Exception:
-            errors_total += len(chunk)
-    return deleted, errors_total
-
 def _safe_s3_key_from_uri(uri: str) -> Optional[str]:
     if not isinstance(uri, str) or not uri.startswith("s3://"):
         return None
     try:
-        b, k = parse_s3_uri(uri, TASK_NAME)
-        if b != FILE_BUCKET_NAME:
+        bucket, key = parse_s3_uri(uri, TASK_NAME)
+        if bucket != FILE_BUCKET_NAME:
             return None
-        return k
+        return key
     except Exception:
         return None
 
@@ -199,7 +181,7 @@ def _wait_for_worker_quiescence_or_raise(job_id: str, user: str, event_type: str
                 user,
                 event_type,
                 LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Waiting for worker quiescence; fresh active markers={len(fresh)}",
+                f"{TASK_NAME} Waiting for worker quiescence; fresh active markers={len(fresh)} sample={fresh[:5]}",
                 level="warning",
             )
         else:
@@ -210,7 +192,7 @@ def _wait_for_worker_quiescence_or_raise(job_id: str, user: str, event_type: str
                     user,
                     event_type,
                     LOG_FIREHOSE_STREAM_NAME,
-                    f"{TASK_NAME} Proceeding with stale active markers only; stale_count={len(stale)}",
+                    f"{TASK_NAME} Proceeding with stale active markers only; stale_count={len(stale)} sample={stale[:5]}",
                     level="warning",
                 )
             if empty_polls >= QUIESCENCE_REQUIRED_EMPTY_POLLS:
@@ -295,6 +277,41 @@ def _query_new_sha_mappings_from_upload_staging(job_id: str) -> List[Tuple[str, 
     rows = _athena_fetch_rows_2col(qid)
     return sorted(set(rows))
 
+def _query_canonical_image_keys_for_image_ids(image_ids: List[str]) -> List[str]:
+    """
+    Third authoritative source of canonical image object keys:
+    query live canonical_imagery rows for the new image_ids before deleting those rows.
+    """
+    if not image_ids:
+        return []
+
+    out: Set[str] = set()
+
+    for chunk in chunked(sorted(set(image_ids)), 500):
+        in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
+        sql = f"""
+        SELECT source_ref
+        FROM "{ICEBERG_DATABASE_NAME}"."{CANONICAL_IMAGERY_TABLE_NAME}"
+        WHERE image_id IN ({in_list})
+          AND source_ref IS NOT NULL
+          AND source_ref <> ''
+        """
+        qid, _ = run_athena(
+            sql,
+            f"{TASK_NAME} query_canonical_image_keys_for_image_ids",
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+            poll=2.0,
+            timeout=300,
+        )
+        uris = _athena_fetch_rows_1col(qid)
+        for uri in uris:
+            key = _safe_s3_key_from_uri(uri)
+            if key:
+                out.add(key)
+
+    return sorted(out)
+
 def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int, int, int]:
     """
     Delete sha256 entries only if they still point at the image_id created by THIS job.
@@ -363,6 +380,26 @@ def _load_batch_rollback_seeds(
                 sha_mappings.add((sha.strip(), iid.strip()))
 
     return sorted(new_image_ids), sorted(canonical_image_keys), sorted(sha_mappings)
+
+def _load_canonical_image_object_keys_from_processed_rows(processed_keys: List[str]) -> List[str]:
+    """
+    Secondary source of canonical image object keys:
+    read processed canonical_imagery shard outputs and extract source_ref URIs.
+    """
+    imagery_jsonls = [k for k in processed_keys if "/canonical_imagery/" in k and k.endswith(".jsonl")]
+    imagery_jsonls.sort()
+
+    keys: Set[str] = set()
+    if not imagery_jsonls:
+        return []
+
+    for row in s3_read_jsonl_list(FILE_BUCKET_NAME, imagery_jsonls, f"{TASK_NAME}.read_canonical_imagery"):
+        uri = row.get("source_ref")
+        key = _safe_s3_key_from_uri(uri) if isinstance(uri, str) else None
+        if key:
+            keys.add(key)
+
+    return sorted(keys)
 
 def _load_exact_rollback_targets(processed_keys: List[str]) -> Tuple[Set[Tuple[str, str, str]], List[Tuple[str, str]]]:
     """
@@ -585,6 +622,72 @@ def _normalize_error_message(error_msg: object) -> str:
         pass
     return msg
 
+def _s3_object_exists(bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+def delete_s3_keys_strict(bucket: str, keys: List[str], batch_size: int = 1000) -> Dict[str, object]:
+    """
+    Strict S3 cleanup:
+      1) issue delete_objects in batches
+      2) HEAD every key afterward
+      3) report survivors as critical rollback failures
+    """
+    unique_keys = sorted({k.strip() for k in keys if isinstance(k, str) and k.strip()})
+    if not unique_keys:
+        return {
+            "attempted": 0,
+            "api_error_count": 0,
+            "api_error_samples": [],
+            "survivor_count": 0,
+            "survivor_samples": [],
+            "verify_error_count": 0,
+            "verify_error_samples": [],
+        }
+
+    api_error_samples: List[str] = []
+
+    for chunk in chunked(unique_keys, batch_size):
+        try:
+            resp = s3.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": [{"Key": k} for k in chunk]},
+            )
+            for err in resp.get("Errors", []) or []:
+                key = str(err.get("Key", ""))
+                code = str(err.get("Code", ""))
+                msg = str(err.get("Message", ""))
+                api_error_samples.append(f"{key}:{code}:{msg}")
+        except Exception as e:
+            sample = chunk[:10]
+            api_error_samples.extend([f"{k}:delete_exception:{e}" for k in sample])
+
+    survivors: List[str] = []
+    verify_error_samples: List[str] = []
+
+    for key in unique_keys:
+        try:
+            if _s3_object_exists(bucket, key):
+                survivors.append(key)
+        except Exception as e:
+            verify_error_samples.append(f"{key}:verify_exception:{e}")
+
+    return {
+        "attempted": len(unique_keys),
+        "api_error_count": len(api_error_samples),
+        "api_error_samples": api_error_samples[:10],
+        "survivor_count": len(survivors),
+        "survivor_samples": survivors[:10],
+        "verify_error_count": len(verify_error_samples),
+        "verify_error_samples": verify_error_samples[:10],
+    }
+
 def _process_one_record(record: Dict[str, object]) -> None:
     try:
         body = json.loads(record["body"])
@@ -612,22 +715,76 @@ def _process_one_record(record: Dict[str, object]) -> None:
     processed_keys = _list_registration_processed_keys(job_id)
 
     batch_new_image_ids, batch_canonical_image_keys, batch_sha_mappings = _load_batch_rollback_seeds(processed_keys)
+    processed_canonical_image_keys = _load_canonical_image_object_keys_from_processed_rows(processed_keys)
     rollback_label_keys, rollback_source_membership_keys = _load_exact_rollback_targets(processed_keys)
 
     # Use rollback-batch new_image_ids as the primary authoritative source.
     # Also union with upload_staging query as a best-effort supplement.
     try:
         queried_new_image_ids = _query_new_image_ids_from_upload_staging(job_id)
-    except Exception:
+    except Exception as e:
         queried_new_image_ids = []
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} query_new_image_ids_from_upload_staging failed; continuing with seed-only source: {e}",
+            level="warning",
+        )
 
     try:
         queried_sha_mappings = _query_new_sha_mappings_from_upload_staging(job_id)
-    except Exception:
+    except Exception as e:
         queried_sha_mappings = []
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} query_new_sha_mappings_from_upload_staging failed; continuing with seed-only source: {e}",
+            level="warning",
+        )
 
     new_image_ids = sorted(set(batch_new_image_ids) | set(queried_new_image_ids))
     batch_sha_mappings = sorted(set(batch_sha_mappings) | set(queried_sha_mappings))
+
+    # Third authoritative source: live canonical_imagery rows, queried BEFORE deleting those rows.
+    try:
+        table_canonical_image_keys = _query_canonical_image_keys_for_image_ids(new_image_ids)
+    except Exception as e:
+        table_canonical_image_keys = []
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} query_canonical_image_keys_for_image_ids failed; continuing with other key sources: {e}",
+            level="warning",
+        )
+
+    canonical_image_keys_to_delete = sorted(
+        set(batch_canonical_image_keys)
+        | set(processed_canonical_image_keys)
+        | set(table_canonical_image_keys)
+    )
+
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        (
+            f"{TASK_NAME} Canonical image cleanup sources: "
+            f"batch_new_image_ids={len(batch_new_image_ids)} "
+            f"queried_new_image_ids={len(queried_new_image_ids)} "
+            f"rollback_seed_keys={len(batch_canonical_image_keys)} "
+            f"processed_row_keys={len(processed_canonical_image_keys)} "
+            f"table_row_keys={len(table_canonical_image_keys)} "
+            f"union_keys={len(canonical_image_keys_to_delete)} "
+            f"sample_union_keys={canonical_image_keys_to_delete[:5]}"
+        ),
+    )
 
     critical_failures: List[str] = []
 
@@ -658,38 +815,93 @@ def _process_one_record(record: Dict[str, object]) -> None:
         except Exception as e:
             critical_failures.append(f"exact image_source_membership rollback failed: {e}")
 
+    # Delete row-owned linkage for new images first.
     if new_image_ids:
         try:
             _delete_image_labels_for_images(new_image_ids)
             _delete_image_source_memberships_for_images(new_image_ids)
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Deleted image_labels + image_source_membership for {len(new_image_ids)} new image(s)",
+            )
+        except Exception as e:
+            critical_failures.append(f"new-image linkage rollback failed: {e}")
+
+    # Strict canonical image object cleanup BEFORE deleting canonical_imagery rows,
+    # so retries can still query live table rows if this step fails.
+    canonical_image_objects_ok = True
+    if canonical_image_keys_to_delete:
+        try:
+            s3_delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, canonical_image_keys_to_delete)
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} Canonical image object cleanup result: "
+                    f"attempted={s3_delete_result['attempted']} "
+                    f"api_error_count={s3_delete_result['api_error_count']} "
+                    f"survivor_count={s3_delete_result['survivor_count']} "
+                    f"verify_error_count={s3_delete_result['verify_error_count']} "
+                    f"api_error_samples={s3_delete_result['api_error_samples']} "
+                    f"survivor_samples={s3_delete_result['survivor_samples']} "
+                    f"verify_error_samples={s3_delete_result['verify_error_samples']}"
+                ),
+                level=(
+                    "warning"
+                    if (
+                        s3_delete_result["api_error_count"]
+                        or s3_delete_result["survivor_count"]
+                        or s3_delete_result["verify_error_count"]
+                    )
+                    else "info"
+                ),
+            )
+
+            if (
+                s3_delete_result["api_error_count"]
+                or s3_delete_result["survivor_count"]
+                or s3_delete_result["verify_error_count"]
+            ):
+                canonical_image_objects_ok = False
+                critical_failures.append(
+                    "canonical image object cleanup failed: "
+                    f"attempted={s3_delete_result['attempted']} "
+                    f"api_error_count={s3_delete_result['api_error_count']} "
+                    f"survivor_count={s3_delete_result['survivor_count']} "
+                    f"verify_error_count={s3_delete_result['verify_error_count']} "
+                    f"survivor_samples={s3_delete_result['survivor_samples']}"
+                )
+        except Exception as e:
+            canonical_image_objects_ok = False
+            critical_failures.append(f"canonical image object cleanup failed: {e}")
+
+    # Only delete canonical_imagery rows if object cleanup was clean.
+    if new_image_ids and canonical_image_objects_ok:
+        try:
             _delete_canonical_imagery_rows(new_image_ids)
             log(
                 job_id,
                 user,
                 event_type,
                 LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Deleted canonical_imagery + image_labels + image_source_membership for {len(new_image_ids)} new image(s)",
+                f"{TASK_NAME} Deleted canonical_imagery rows for {len(new_image_ids)} new image(s)",
             )
         except Exception as e:
-            critical_failures.append(f"new-image Iceberg rollback failed: {e}")
-
-    if batch_canonical_image_keys:
-        try:
-            deleted_est, errors = delete_s3_keys_best_effort(FILE_BUCKET_NAME, batch_canonical_image_keys)
-            log(
-                job_id,
-                user,
-                event_type,
-                LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Deleted canonical image objects: attempted={len(batch_canonical_image_keys)} deleted_est={deleted_est} errors={errors}",
-                level=("warning" if errors else "info"),
-            )
-            if errors:
-                critical_failures.append(
-                    f"canonical image object cleanup failed: attempted={len(batch_canonical_image_keys)} errors={errors}"
-                )
-        except Exception as e:
-            critical_failures.append(f"canonical image object cleanup failed: {e}")
+            critical_failures.append(f"canonical_imagery row rollback failed: {e}")
+    elif new_image_ids and not canonical_image_objects_ok:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Skipping canonical_imagery row deletion because canonical object cleanup was not clean; preserving table-based key discovery for retry.",
+            level="warning",
+        )
 
     owner_rows_by_table = _load_owner_label_rows(processed_keys)
     for table, rows in owner_rows_by_table.items():
@@ -715,19 +927,45 @@ def _process_one_record(record: Dict[str, object]) -> None:
                 deleted_id_set = set(deleted_ids)
                 rows_deleted = [r for r in rows if r.get(kcol) in deleted_id_set]
                 label_s3_keys = _extract_label_s3_keys(rows_deleted)
+
                 if label_s3_keys:
-                    deleted_est, errors = delete_s3_keys_best_effort(FILE_BUCKET_NAME, label_s3_keys)
+                    label_delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, label_s3_keys)
                     log(
                         job_id,
                         user,
                         event_type,
                         LOG_FIREHOSE_STREAM_NAME,
-                        f"{TASK_NAME} Deleted canonical label objects table={table}: attempted={len(label_s3_keys)} deleted_est={deleted_est} errors={errors}",
-                        level=("warning" if errors else "info"),
+                        (
+                            f"{TASK_NAME} Canonical label object cleanup table={table}: "
+                            f"attempted={label_delete_result['attempted']} "
+                            f"api_error_count={label_delete_result['api_error_count']} "
+                            f"survivor_count={label_delete_result['survivor_count']} "
+                            f"verify_error_count={label_delete_result['verify_error_count']} "
+                            f"survivor_samples={label_delete_result['survivor_samples']}"
+                        ),
+                        level=(
+                            "warning"
+                            if (
+                                label_delete_result["api_error_count"]
+                                or label_delete_result["survivor_count"]
+                                or label_delete_result["verify_error_count"]
+                            )
+                            else "info"
+                        ),
                     )
-                    if errors:
+
+                    if (
+                        label_delete_result["api_error_count"]
+                        or label_delete_result["survivor_count"]
+                        or label_delete_result["verify_error_count"]
+                    ):
                         critical_failures.append(
-                            f"canonical label object cleanup failed table={table}: attempted={len(label_s3_keys)} errors={errors}"
+                            f"canonical label object cleanup failed table={table}: "
+                            f"attempted={label_delete_result['attempted']} "
+                            f"api_error_count={label_delete_result['api_error_count']} "
+                            f"survivor_count={label_delete_result['survivor_count']} "
+                            f"verify_error_count={label_delete_result['verify_error_count']} "
+                            f"survivor_samples={label_delete_result['survivor_samples']}"
                         )
 
         except Exception as e:
