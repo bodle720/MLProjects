@@ -89,7 +89,7 @@ def handler(event, context):
         # Keep each item small; global fields stay in the Step Functions state.
         handoff_item = {
             "manifest": manifest_uri,
-            "shard": shard,
+            "shard": f"batch-{shard}",
         }
         handoff_lines.append(json.dumps(handoff_item, separators=(",", ":")))
 
