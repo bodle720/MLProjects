@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List
+from typing import Dict, List, Any
 
 from common.general_utils.logging_utils import log
-from common.general_utils.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
+from common.general_utils.s3_utils import (
+    s3_list_keys,
+    s3_read_json,
+    parse_s3_uri,
+    read_obj_with_retry,
+    write_s3_obj,
+)
+
 from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
 from common.upload_utils.upload_athena_utils import athena_count_job_rows
 from common.upload_utils.upload_iceberg_utils import delete_job_rows_from_table
@@ -14,22 +21,66 @@ ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+INGEST_HANDOFF_FILE_NAME = os.environ.get("INGEST_HANDOFF_FILE_NAME", "map-items.jsonl")
 
 TASK_NAME = "[DEDUP_INGEST_PRE]"
 
-def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
+def _require_event_key(event: dict, key: str):
+    if key not in event:
+        raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
+    return event[key]
+
+def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
+    resp = read_obj_with_retry(bucket, key, TASK_NAME)
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} Failed to read batch plan s3://{bucket}/{key}")
+
+    items: List[Dict[str, Any]] = []
+    for raw in resp["Body"].iter_lines():
+        if not raw:
+            continue
+
+        line = raw.decode("utf-8-sig").strip()
+        if not line:
+            continue
+
+        try:
+            obj = json.loads(line)
+        except Exception as e:
+            raise RuntimeError(f"{TASK_NAME} Invalid JSONL in batch plan s3://{bucket}/{key}: {e}")
+
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"{TASK_NAME} Expected dict items in batch plan, got {type(obj).__name__}")
+
+        manifest = obj.get("manifest")
+        if not isinstance(manifest, str) or not manifest.startswith("s3://"):
+            raise RuntimeError(f"{TASK_NAME} Batch plan item missing valid manifest URI: {obj}")
+
+        items.append(obj)
+
+    if not items:
+        raise RuntimeError(f"{TASK_NAME} Batch plan is empty: s3://{bucket}/{key}")
+
+    return items
+
+def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
-    Try to extract shard names from batching manifests.
-    Expected manifest pattern: .../manifest-shard-<name>.json
+    Prefer explicit shard from the batching handoff item.
+    Fallback to manifest filename:
+      .../manifest-shard-<name>.json -> <name>
     """
     expected: List[str] = []
-    for m in manifests:
-        try:
-            _, key = parse_s3_uri(m, TASK_NAME)
-        except Exception:
-            raise
 
+    for item in batch_items:
+        shard = item.get("shard")
+        if isinstance(shard, str) and shard.strip():
+            expected.append(shard.strip())
+            continue
+
+        manifest_uri = item["manifest"]
+        _, key = parse_s3_uri(manifest_uri, TASK_NAME)
         fname = key.split("/")[-1]
+
         if fname.startswith("manifest-shard-") and fname.endswith(".json"):
             shard_name = fname[len("manifest-shard-") : -len(".json")]
         else:
@@ -37,7 +88,6 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
 
         expected.append(shard_name)
 
-    # stable unique
     seen = set()
     out = []
     for s in expected:
@@ -46,27 +96,16 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             out.append(s)
     return out
 
-def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
+def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Locate per-shard dedup processed outputs
-    We expect for each shard:
+    Expect for each dedup shard:
       - shard-<shard>.jsonl
       - shard-<shard>-summary.json
       - shard-<shard>-SUCCESS
-
-    Returns:
-      {
-        missing_shards: [...],
-        shards: [
-          { shard, rows_read, processed_rows, upload_key, imagery_key, labels_key }
-        ],
-        total_rows_read: int,
-        total_processed_rows: int,
-      }
     """
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/processed"
-    expected_shards = extract_expected_shards_from_manifests(manifests)
+    expected_shards = extract_expected_shards_from_batch_items(batch_items)
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
 
     shard_jsonl: Dict[str, str] = {}
@@ -85,12 +124,11 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
             shard = name[len("shard-") : -len("-SUCCESS")]
             shard_success.add(shard)
 
-    # if manifest parsing failed, infer from discovered shards
     if not expected_shards:
         expected_shards = sorted(set(shard_jsonl) | set(shard_summary) | set(shard_success))
 
     missing: List[str] = []
-    shards: List[Dict] = []
+    shards: List[Dict[str, Any]] = []
     total_rows_read = 0
     total_processed_rows = 0
 
@@ -113,7 +151,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         shards.append(
             {
                 "shard": shard,
-                "kind": None,
+                "kind": "deduplication",
                 "rows_read": rows_read,
                 "processed_rows": processed_rows,
                 "canonical_imagery_rows": None,
@@ -122,7 +160,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
                 "canonical_imagery_key": None,
                 "canonical_labels_key": None,
                 "image_labels_key": None,
-                "image_source_membership_key": None
+                "image_source_membership_key": None,
             }
         )
 
@@ -134,26 +172,55 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "processed_prefix": processed_prefix,
     }
 
+def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str, Any]:
+    handoff_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/ingest-handoff/"
+    handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
+
+    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in shards) + "\n"
+    plan_s3_uri = write_s3_obj(
+        FILE_BUCKET_NAME,
+        handoff_key,
+        body,
+        "application/x-ndjson",
+        TASK_NAME,
+    )
+
+    return {
+        "plan_bucket": FILE_BUCKET_NAME,
+        "plan_key": handoff_key,
+        "plan_s3_uri": plan_s3_uri,
+        "item_count": len(shards),
+    }
+
 def handler(event, context):
-    # Validate input
-    try:
-        job_id = event["job_id"]
-        user = event["user"]
-        event_type = event["event_type"]
-        manifests = event["manifests"]
-    except KeyError as e:
-        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
+    job_id = _require_event_key(event, "job_id")
+    user = _require_event_key(event, "user")
+    event_type = _require_event_key(event, "event_type")
+    batch_plan_bucket = _require_event_key(event, "batch_plan_bucket")
+    batch_plan_key = _require_event_key(event, "batch_plan_key")
 
     if not job_id or job_id == "unknown":
         raise RuntimeError(f"{TASK_NAME} missing job_id in event")
-    if not manifests or not isinstance(manifests, list):
-        raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting dedup pre-ingest for job {job_id}")
 
-    # 1) Collect processed shard outputs and verify completeness
+    # 1) Read batching-stage handoff plan
     try:
-        collected = collect_processed_shards(job_id, manifests)
+        batch_items = read_batch_plan_items(batch_plan_bucket, batch_plan_key)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed reading batch handoff plan s3://{batch_plan_bucket}/{batch_plan_key}: {e}",
+            level="error",
+        )
+        raise
+
+    # 2) Collect processed shard outputs and verify completeness
+    try:
+        collected = collect_processed_shards(job_id, batch_items)
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed collecting processed shards: {e}", level="error")
         raise
@@ -168,17 +235,24 @@ def handler(event, context):
     total_rows_read = collected["total_rows_read"]
     total_processed_rows = collected["total_processed_rows"]
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}")
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, processed_rows={total_processed_rows}",
+    )
 
-    # 2) Verify original count via Athena (before deletion)
+    # 3) Verify original count via Athena before deletion
     try:
-        original_count = athena_count_job_rows(job_id,
-                                                TASK_NAME,
-                                                ICEBERG_DATABASE_NAME,
-                                                UPLOAD_STAGING_TABLE_NAME,
-                                                ATHENA_OUTPUT_S3,
-                                                ATHENA_WORKGROUP)
+        original_count = athena_count_job_rows(
+            job_id,
+            TASK_NAME,
+            ICEBERG_DATABASE_NAME,
+            UPLOAD_STAGING_TABLE_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+        )
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena count failed: {e}", level="error")
         raise
@@ -193,28 +267,39 @@ def handler(event, context):
     if total_processed_rows != total_rows_read:
         raise RuntimeError(f"{TASK_NAME} processed_rows({total_processed_rows}) != rows_read({total_rows_read})")
 
-    # 3) Delete original partition rows once (before Map inserts)
+    # 4) Delete original partition rows once, before map inserts
     try:
-        delete_result = delete_job_rows_from_table(job_id,
-                                                    TASK_NAME,
-                                                    ICEBERG_DATABASE_NAME,
-                                                    UPLOAD_STAGING_TABLE_NAME,
-                                                    ATHENA_OUTPUT_S3,
-                                                    ATHENA_WORKGROUP)
+        delete_result = delete_job_rows_from_table(
+            job_id,
+            TASK_NAME,
+            ICEBERG_DATABASE_NAME,
+            UPLOAD_STAGING_TABLE_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+        )
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")
         raise
 
-    # Return the per-shard plan for the Map state
+    # 5) Write ingest handoff JSONL for Distributed Map
+    try:
+        handoff = write_ingest_handoff(job_id, shards)
+    except Exception as e:
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed writing ingest handoff: {e}", level="error")
+        raise
+
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     ctas_table_name = f"dedup_export_{sanitized_job_id}"
 
     return {
-        "shards": shards,
-        "original_count": original_count,
-        "total_rows_read": total_rows_read,
-        "total_processed_rows": total_processed_rows,
+        "plan_bucket": handoff["plan_bucket"],
+        "plan_key": handoff["plan_key"],
+        "plan_s3_uri": handoff["plan_s3_uri"],
+        "item_count": handoff["item_count"],
+        "original_count": int(original_count),
+        "total_rows_read": int(total_rows_read),
+        "total_processed_rows": int(total_processed_rows),
         "processed_prefix": collected.get("processed_prefix"),
-        "ctas_table_name":ctas_table_name
+        "ctas_table_name": ctas_table_name,
     }

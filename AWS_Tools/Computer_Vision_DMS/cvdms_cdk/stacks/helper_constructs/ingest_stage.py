@@ -8,33 +8,36 @@ from aws_cdk import (
     aws_stepfunctions as sfn,
     aws_stepfunctions_tasks as tasks,
     aws_iam as iam,
-    aws_dynamodb as dynamodb
+    aws_dynamodb as dynamodb,
 )
 
 from config_models import IngestStageConfig
 
 class IngestStage(Construct):
-    def __init__(self,
-                 scope: Construct,
-                 construct_id: str,
-                 *,
-                 stage_name: str,
-                 config: IngestStageConfig,
-                 common_utils_layer: _lambda.LayerVersion,
-                 file_bucket: s3.Bucket,
-                 iceberg_bucket: s3.Bucket,
-                 job_table: dynamodb.Table,
-                 lock_table: dynamodb.Table,
-                 sha256_table: dynamodb.Table,
-                 iceberg_database_name: str,
-                 region: str,
-                 account: str,
-                 dlq_chain_factory: Callable[[], sfn.Chain],
-                 firehose_delivery_stream_name: str,
-                 firehose_delivery_stream_attr_arn: str,
-                 manifest_path: str,
-                 expected_count_path: str | None = None):
-
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        *,
+        stage_name: str,
+        config: IngestStageConfig,
+        common_utils_layer: _lambda.LayerVersion,
+        file_bucket: s3.Bucket,
+        iceberg_bucket: s3.Bucket,
+        job_table: dynamodb.Table,
+        lock_table: dynamodb.Table,
+        sha256_table: dynamodb.Table,
+        iceberg_database_name: str,
+        region: str,
+        account: str,
+        dlq_chain_factory: Callable[[], sfn.Chain],
+        firehose_delivery_stream_name: str,
+        firehose_delivery_stream_attr_arn: str,
+        batch_plan_bucket_path: str,
+        batch_plan_key_path: str,
+        batch_plan_s3_uri_path: str | None = None,
+        expected_count_path: str | None = None,
+    ):
         super().__init__(scope, construct_id)
 
         self.stage_name = stage_name
@@ -51,30 +54,34 @@ class IngestStage(Construct):
         self.dlq_chain_factory = dlq_chain_factory
         self.firehose_delivery_stream_name = firehose_delivery_stream_name
         self.firehose_delivery_stream_attr_arn = firehose_delivery_stream_attr_arn
-        self.manifest_path = manifest_path
+        self.batch_plan_bucket_path = batch_plan_bucket_path
+        self.batch_plan_key_path = batch_plan_key_path
+        self.batch_plan_s3_uri_path = batch_plan_s3_uri_path
         self.expected_count_path = expected_count_path
 
         lambda_env = {
-                "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
-                "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
-                "ATHENA_WORKGROUP": "primary",
-                "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
-                "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
-                "SHA256_TABLE_NAME": self.sha256_table.table_name
+            "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
+            "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
+            "ATHENA_WORKGROUP": "primary",
+            "ICEBERG_DATABASE_NAME": self.iceberg_database_name,
+            "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
+            "SHA256_TABLE_NAME": self.sha256_table.table_name,
+            "INGEST_HANDOFF_FILE_NAME": "map-items.jsonl",
         }
 
         # --------------------------------------
         # Form the 'pre' lambda task.
         # --------------------------------------
         pre_fn = _lambda.Function(
-            self, f"{stage_name}PreLambda",
+            self,
+            f"{stage_name}PreLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=config.pre_ingest_lambda.handler,
             code=_lambda.Code.from_asset(config.pre_ingest_lambda.path),
             layers=[common_utils_layer],
             memory_size=config.pre_ingest_lambda.memory_size,
             timeout=Duration.seconds(config.pre_ingest_lambda.timeout_sec),
-            environment=lambda_env
+            environment=lambda_env,
         )
 
         self.apply_ingest_permissions(pre_fn)
@@ -86,19 +93,23 @@ class IngestStage(Construct):
             "label_type.$": "$.label_type",
             "data_source.$": "$.data_source",
             "source_split.$": "$.source_split",
-            "manifests.$": self.manifest_path,
+            "batch_plan_bucket.$": self.batch_plan_bucket_path,
+            "batch_plan_key.$": self.batch_plan_key_path,
         }
+        if self.batch_plan_s3_uri_path:
+            payload_obj["batch_plan_s3_uri.$"] = self.batch_plan_s3_uri_path
         if self.expected_count_path:
             payload_obj["expected_count.$"] = self.expected_count_path
 
         pre_ingest_task = tasks.LambdaInvoke(
-            self, f"{stage_name}PreLambdaTask",
+            self,
+            f"{stage_name}PreLambdaTask",
             lambda_function=pre_fn,
             result_path=f"$.{stage_name}PreLambdaTask",
             output_path="$",
             task_timeout=sfn.Timeout.duration(Duration.seconds(config.pre_ingest_lambda.timeout_sec)),
             payload_response_only=True,
-            payload=sfn.TaskInput.from_object(payload_obj)
+            payload=sfn.TaskInput.from_object(payload_obj),
         )
 
         pre_ingest_task.add_catch(
@@ -108,33 +119,72 @@ class IngestStage(Construct):
         )
 
         # --------------------------------------
-        # Form the map task.
+        # Form the map lambda function.
         # --------------------------------------
         map_fn = _lambda.Function(
-            self, f"{stage_name}MapLambda",
+            self,
+            f"{stage_name}MapLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=config.map_ingest_lambda.handler,
             code=_lambda.Code.from_asset(config.map_ingest_lambda.path),
             layers=[common_utils_layer],
             memory_size=config.map_ingest_lambda.memory_size,
             timeout=Duration.seconds(config.map_ingest_lambda.timeout_sec),
-            environment=lambda_env
+            environment=lambda_env,
         )
 
         self.apply_ingest_permissions(map_fn)
 
-        map_task = tasks.LambdaInvoke(
-            self, f"{stage_name}MapLambdaTask",
-            lambda_function=map_fn,
-            result_path=sfn.JsonPath.DISCARD,
-            output_path="$",
-            task_timeout=sfn.Timeout.duration(Duration.seconds(config.map_ingest_lambda.timeout_sec)),
-            payload_response_only=True)
-
-        map_state = sfn.Map(
-            self, f"{stage_name}MapState",
-            items_path=f"$.{stage_name}PreLambdaTask.shards",
-            item_selector={
+        # --------------------------------------
+        # Distributed Map over an S3 JSONL handoff file produced by the pre-lambda.
+        # We use CustomState because Step Functions ASL supports dynamic Bucket.$ / Key.$
+        # for ItemReader.Parameters, while the current CDK S3JsonLItemReader convenience
+        # API only exposes dynamic bucket name, not a dynamic key path.
+        # --------------------------------------
+        map_state_json = {
+            "Type": "Map",
+            "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {
+                    "InputType": "JSONL",
+                },
+                "Parameters": {
+                    "Bucket.$": f"$.{stage_name}PreLambdaTask.plan_bucket",
+                    "Key.$": f"$.{stage_name}PreLambdaTask.plan_key",
+                },
+            },
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "DISTRIBUTED",
+                    "ExecutionType": "STANDARD",
+                },
+                "StartAt": f"{stage_name}MapLambdaInvoke",
+                "States": {
+                    f"{stage_name}MapLambdaInvoke": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "OutputPath": "$.Payload",
+                        "Parameters": {
+                            "FunctionName": map_fn.function_arn,
+                            "Payload.$": "$",
+                        },
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                ],
+                                "IntervalSeconds": 2,
+                                "MaxAttempts": 2,
+                                "BackoffRate": 2.0,
+                            }
+                        ],
+                        "End": True,
+                    }
+                },
+            },
+            "ItemSelector": {
                 "job_id.$": "$.job_id",
                 "user.$": "$.user",
                 "event_type.$": "$.event_type",
@@ -148,11 +198,17 @@ class IngestStage(Construct):
                 "canonical_imagery_key.$": "$$.Map.Item.Value.canonical_imagery_key",
                 "canonical_labels_key.$": "$$.Map.Item.Value.canonical_labels_key",
                 "image_labels_key.$": "$$.Map.Item.Value.image_labels_key",
-                "image_source_membership_key.$": "$$.Map.Item.Value.image_source_membership_key"
+                "image_source_membership_key.$": "$$.Map.Item.Value.image_source_membership_key",
             },
-            result_path=sfn.JsonPath.DISCARD,
-            output_path="$",
-            max_concurrency=config.map_max_concurrency
+            "MaxConcurrency": config.map_max_concurrency,
+            "ResultPath": None,
+            "OutputPath": "$",
+        }
+
+        map_state = sfn.CustomState(
+            self,
+            f"{stage_name}DistributedMapState",
+            state_json=map_state_json,
         )
 
         map_state.add_catch(
@@ -161,40 +217,42 @@ class IngestStage(Construct):
             result_path="$.errorInfo",
         )
 
-        map_state.item_processor(map_task)
-
         # --------------------------------------
         # Form the 'post' lambda task.
         # --------------------------------------
         post_fn = _lambda.Function(
-            self, f"{stage_name}PostLambda",
+            self,
+            f"{stage_name}PostLambda",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler=config.post_ingest_lambda.handler,
             code=_lambda.Code.from_asset(config.post_ingest_lambda.path),
             layers=[common_utils_layer],
             memory_size=config.post_ingest_lambda.memory_size,
             timeout=Duration.seconds(config.post_ingest_lambda.timeout_sec),
-            environment=lambda_env
+            environment=lambda_env,
         )
 
         self.apply_ingest_permissions(post_fn)
 
         post_ingest_task = tasks.LambdaInvoke(
-            self, f"{stage_name}PostLambdaTask",
+            self,
+            f"{stage_name}PostLambdaTask",
             lambda_function=post_fn,
             result_path=f"$.{stage_name}PostLambdaTask",
             output_path="$",
             task_timeout=sfn.Timeout.duration(Duration.seconds(config.post_ingest_lambda.timeout_sec)),
             payload_response_only=True,
-            payload=sfn.TaskInput.from_object({
-                "job_id.$": "$.job_id",
-                "user.$": "$.user",
-                "event_type.$": "$.event_type",
-                "label_type.$": "$.label_type",
-                "data_source.$": "$.data_source",
-                "source_split.$": "$.source_split",
-                "pre.$": f"$.{stage_name}PreLambdaTask"
-            })
+            payload=sfn.TaskInput.from_object(
+                {
+                    "job_id.$": "$.job_id",
+                    "user.$": "$.user",
+                    "event_type.$": "$.event_type",
+                    "label_type.$": "$.label_type",
+                    "data_source.$": "$.data_source",
+                    "source_split.$": "$.source_split",
+                    "pre.$": f"$.{stage_name}PreLambdaTask",
+                }
+            ),
         )
 
         post_ingest_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
@@ -205,12 +263,41 @@ class IngestStage(Construct):
             result_path="$.errorInfo",
         )
 
+        # These policies must be attached to the *state machine role* in upload_stack.py
+        # because the Distributed Map ItemReader and the custom Lambda invoke live in ASL,
+        # not in a typed CDK task that auto-grants them.
+        self.state_machine_policy_statements = [
+            iam.PolicyStatement(
+                actions=["lambda:InvokeFunction"],
+                resources=[map_fn.function_arn],
+            ),
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[f"arn:aws:s3:::{self.file_bucket.bucket_name}/temp/image-upload/*"],
+            ),
+            iam.PolicyStatement(
+                actions=["s3:ListBucket", "s3:GetBucketLocation"],
+                resources=[self.file_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}},
+            ),
+            iam.PolicyStatement(
+                actions=[
+                    "states:StartExecution",
+                    "states:DescribeExecution",
+                    "states:StopExecution",
+                ],
+                resources=["*"],
+            ),
+        ]
+
+        self.pre_fn = pre_fn
+        self.map_fn = map_fn
+        self.post_fn = post_fn
         self.pre_ingest_task = pre_ingest_task
         self.map_state = map_state
         self.post_ingest_task = post_ingest_task
 
     def apply_ingest_permissions(self, lambda_fn: _lambda.Function) -> None:
-
         # 1) DynamoDB
         self.lock_table.grant_read_write_data(lambda_fn)
         self.job_table.grant_read_write_data(lambda_fn)
@@ -241,7 +328,12 @@ class IngestStage(Construct):
         # 4) Athena: start and poll queries in the workgroup
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["athena:StartQueryExecution", "athena:GetQueryExecution", "athena:GetQueryResults", "athena:StopQueryExecution"],
+                actions=[
+                    "athena:StartQueryExecution",
+                    "athena:GetQueryExecution",
+                    "athena:GetQueryResults",
+                    "athena:StopQueryExecution",
+                ],
                 resources=[f"arn:aws:athena:{self.region}:{self.account}:workgroup/primary"],
             )
         )
@@ -258,10 +350,14 @@ class IngestStage(Construct):
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
-                    "glue:GetDatabase", "glue:GetDatabases",
-                    "glue:GetTable", "glue:GetTables",
-                    "glue:GetPartition", "glue:GetPartitions",
-                    "glue:GetTableVersion", "glue:GetTableVersions",
+                    "glue:GetDatabase",
+                    "glue:GetDatabases",
+                    "glue:GetTable",
+                    "glue:GetTables",
+                    "glue:GetPartition",
+                    "glue:GetPartitions",
+                    "glue:GetTableVersion",
+                    "glue:GetTableVersions",
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
@@ -272,12 +368,14 @@ class IngestStage(Construct):
         )
 
         # 7) Glue metadata write (Iceberg tables update via Athena INSERT/DELETE/OPTIMIZE)
-        # Use the broader registration scope (all tables in the DB), since it subsumes upload_staging-only.
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=[
-                    "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
-                    "glue:BatchCreatePartition", "glue:BatchDeletePartition",
+                    "glue:CreateTable",
+                    "glue:UpdateTable",
+                    "glue:DeleteTable",
+                    "glue:BatchCreatePartition",
+                    "glue:BatchDeletePartition",
                 ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
@@ -299,7 +397,6 @@ class IngestStage(Construct):
         )
 
         # 8) S3 (iceberg bucket): read/write/delete Iceberg files; list limited prefixes
-        # Use broad object-level access across bucket (registration needs canonical/*; dedup needs upload_staging/*).
         lambda_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:DeleteObject", "s3:PutObject"],
@@ -310,6 +407,10 @@ class IngestStage(Construct):
             iam.PolicyStatement(
                 actions=["s3:ListBucket"],
                 resources=[self.iceberg_bucket.bucket_arn],
-                conditions={"StringLike": {"s3:prefix": ["canonical/*", "upload_staging/*", "image_source_membership/*"]}},
+                conditions={
+                    "StringLike": {
+                        "s3:prefix": ["canonical/*", "upload_staging/*", "image_source_membership/*"]
+                    }
+                },
             )
         )

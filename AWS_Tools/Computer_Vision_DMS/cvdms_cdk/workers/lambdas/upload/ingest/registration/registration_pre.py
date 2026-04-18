@@ -1,24 +1,77 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List
+from typing import Dict, List, Any
 
 from common.general_utils.logging_utils import log
-from common.general_utils.s3_utils import s3_list_keys, s3_read_json, parse_s3_uri
+from common.general_utils.s3_utils import (
+    s3_list_keys,
+    s3_read_json,
+    parse_s3_uri,
+    read_obj_with_retry,
+    write_s3_obj,
+)
 
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+INGEST_HANDOFF_FILE_NAME = os.environ.get("INGEST_HANDOFF_FILE_NAME", "map-items.jsonl")
 
 TASK_NAME = "[REG_INGEST_PRE]"
 
-def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
+def _require_event_key(event: dict, key: str):
+    if key not in event:
+        raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
+    return event[key]
+
+def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
+    resp = read_obj_with_retry(bucket, key, TASK_NAME)
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} Failed to read batch plan s3://{bucket}/{key}")
+
+    items: List[Dict[str, Any]] = []
+    for raw in resp["Body"].iter_lines():
+        if not raw:
+            continue
+
+        line = raw.decode("utf-8-sig").strip()
+        if not line:
+            continue
+
+        try:
+            obj = json.loads(line)
+        except Exception as e:
+            raise RuntimeError(f"{TASK_NAME} Invalid JSONL in batch plan s3://{bucket}/{key}: {e}")
+
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"{TASK_NAME} Expected dict items in batch plan, got {type(obj).__name__}")
+
+        manifest = obj.get("manifest")
+        if not isinstance(manifest, str) or not manifest.startswith("s3://"):
+            raise RuntimeError(f"{TASK_NAME} Batch plan item missing valid manifest URI: {obj}")
+
+        items.append(obj)
+
+    if not items:
+        raise RuntimeError(f"{TASK_NAME} Batch plan is empty: s3://{bucket}/{key}")
+
+    return items
+
+def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
-    Try to extract shard names from batching manifests.
-    Expected manifest pattern: .../manifest-shard-<name>.json
+    Prefer explicit shard from the batching handoff item.
+    Fallback to manifest filename:
+      .../manifest-shard-<name>.json -> <name>
     """
     expected: List[str] = []
-    for m in manifests:
-        _, key = parse_s3_uri(m, TASK_NAME)
+
+    for item in batch_items:
+        shard = item.get("shard")
+        if isinstance(shard, str) and shard.strip():
+            expected.append(shard.strip())
+            continue
+
+        manifest_uri = item["manifest"]
+        _, key = parse_s3_uri(manifest_uri, TASK_NAME)
 
         fname = key.split("/")[-1]
         if fname.startswith("manifest-shard-") and fname.endswith(".json"):
@@ -37,17 +90,18 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
     return out
 
 def _extract_owner_shard_id_from_key(k: str) -> str:
-    # expects .../canonical_labels_by_fingerprint/owner-XXXXXX/part-....jsonl
-    parts = k.split("/")
-    for p in parts:
-        if p.startswith("owner-"):
-            return p[len("owner-") :]
+    for part in k.split("/"):
+        if part.startswith("owner-"):
+            return part[len("owner-") :]
     return ""
 
-def collect_processed_shards(job_id: str, manifests: List[str], user: str, event_type: str) -> Dict:
+def collect_processed_shards(
+    job_id: str,
+    batch_items: List[Dict[str, Any]],
+    user: str,
+    event_type: str,
+) -> Dict[str, Any]:
     """
-    Locate per-shard registration processed outputs.
-
     Target-image shards:
       - upload_staging/shard-<shard>.jsonl
       - canonical_imagery/shard-<shard>.jsonl
@@ -58,15 +112,13 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
 
     Canonical label rows are fingerprint-owner sharded:
       - canonical_labels_by_fingerprint/owner-<owner>/part-<targetShard>.jsonl
-      (no SUCCESS marker per owner shard)
     """
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"temp/image-upload/{job_id}/batches/registration-step/processed"
-    expected_target_shards = extract_expected_shards_from_manifests(manifests)
+    expected_target_shards = extract_expected_shards_from_batch_items(batch_items)
 
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
 
-    # ---- target-image shard outputs ----
     shard_upload: Dict[str, str] = {}
     shard_imagery: Dict[str, str] = {}
     shard_image_labels: Dict[str, str] = {}
@@ -74,20 +126,17 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
     shard_summary: Dict[str, str] = {}
     shard_success = set()
 
-    # ---- fingerprint-owner outputs ----
     owner_parts: Dict[str, List[str]] = {}
 
     for k in processed_keys:
         name = k.split("/")[-1]
 
-        # Canonical label owner-part jsonls
         if "/canonical_labels_by_fingerprint/" in k and name.endswith(".jsonl"):
             owner_id = _extract_owner_shard_id_from_key(k)
             if owner_id:
                 owner_parts.setdefault(owner_id, []).append(k)
             continue
 
-        # Per-table JSONLs live under subfolders (target shards)
         if name.startswith("shard-") and name.endswith(".jsonl"):
             shard = name[len("shard-") : -len(".jsonl")]
             if "/upload_staging/" in k:
@@ -99,7 +148,6 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
             elif "/image_source_membership/" in k:
                 shard_image_source_membership[shard] = k
 
-        # Summary/SUCCESS live at the processed_prefix root
         elif name.startswith("shard-") and name.endswith("-summary.json"):
             shard = name[len("shard-") : -len("-summary.json")]
             shard_summary[shard] = k
@@ -122,7 +170,7 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         owner_parts[owner_id] = sorted(owner_parts[owner_id])
 
     missing_target: List[str] = []
-    shards: List[Dict] = []
+    shards: List[Dict[str, Any]] = []
 
     total_rows_read = 0
     total_canon_imagery_rows = 0
@@ -132,7 +180,6 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
 
     expected_owner_shards_from_summaries = set()
 
-    # ---- build target-image shard items (Map kind=target) ----
     for shard in expected_target_shards:
         up_k = shard_upload.get(shard)
         img_k = shard_imagery.get(shard)
@@ -180,12 +227,10 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
             }
         )
 
-    # ---- build fingerprint-owner shard items (Map kind=label_owner) ----
     owner_shards: List[str] = sorted(owner_parts.keys())
 
     actual_owner_shards = set(owner_shards)
     missing_owner_shards = expected_owner_shards_from_summaries - actual_owner_shards
-
     if missing_owner_shards:
         raise RuntimeError(
             f"{TASK_NAME} Missing canonical label owner shard outputs: {sorted(missing_owner_shards)}. "
@@ -208,15 +253,15 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         parts = owner_parts.get(owner_id, [])
         if not parts:
             continue
-        total_owner_label_files += len(parts)
 
+        total_owner_label_files += len(parts)
         owner_prefix = f"{processed_prefix}/canonical_labels_by_fingerprint/owner-{owner_id}/"
 
         shards.append(
             {
                 "kind": "label_owner",
-                "rows_read": None,
                 "shard": f"owner-{owner_id}",
+                "rows_read": None,
                 "owner_shard_id": owner_id,
                 "owner_prefix": owner_prefix,
                 "parts_count": len(parts),
@@ -237,32 +282,46 @@ def collect_processed_shards(job_id: str, manifests: List[str], user: str, event
         "total_image_labels_rows": total_image_labels_rows,
         "total_image_source_membership_rows": total_image_source_membership_rows,
         "processed_prefix": processed_prefix,
-        "expected_target_shards": expected_target_shards,
-        "owner_shards": owner_shards,
+        "target_shard_count": len(expected_target_shards),
+        "owner_shard_count": len(owner_shards),
         "total_owner_label_files": total_owner_label_files,
     }
 
+def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str, Any]:
+    handoff_prefix = f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/"
+    handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
+
+    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in shards) + "\n"
+    plan_s3_uri = write_s3_obj(
+        FILE_BUCKET_NAME,
+        handoff_key,
+        body,
+        "application/x-ndjson",
+        TASK_NAME,
+    )
+
+    return {
+        "plan_bucket": FILE_BUCKET_NAME,
+        "plan_key": handoff_key,
+        "plan_s3_uri": plan_s3_uri,
+        "item_count": len(shards),
+    }
+
 def handler(event, context):
-    """
-    Expected input:
-      {
-        job_id, user, event_type, manifests,
-        total_rows
-      }
-    """
+    job_id = _require_event_key(event, "job_id")
+    user = _require_event_key(event, "user")
+    event_type = _require_event_key(event, "event_type")
+    batch_plan_bucket = _require_event_key(event, "batch_plan_bucket")
+    batch_plan_key = _require_event_key(event, "batch_plan_key")
+    expected_count = _require_event_key(event, "expected_count")
+
     try:
-        job_id = event["job_id"]
-        user = event["user"]
-        event_type = event["event_type"]
-        manifests = event["manifests"]
-        total_rows = int(event["expected_count"])
-    except KeyError as e:
-        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
+        total_rows = int(expected_count)
+    except Exception as e:
+        raise RuntimeError(f"{TASK_NAME} expected_count is not an int-like value ({expected_count}): {e}")
 
     if not job_id or job_id == "unknown":
         raise RuntimeError(f"{TASK_NAME} missing job_id")
-    if not manifests or not isinstance(manifests, list):
-        raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
     log(
         job_id,
@@ -272,7 +331,31 @@ def handler(event, context):
         f"{TASK_NAME} Starting registration pre-ingest for job {job_id}",
     )
 
-    collected = collect_processed_shards(job_id, manifests, user, event_type)
+    try:
+        batch_items = read_batch_plan_items(batch_plan_bucket, batch_plan_key)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed reading batch handoff plan s3://{batch_plan_bucket}/{batch_plan_key}: {e}",
+            level="error",
+        )
+        raise
+
+    try:
+        collected = collect_processed_shards(job_id, batch_items, user, event_type)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed collecting processed shards: {e}",
+            level="error",
+        )
+        raise
 
     missing = collected["missing_target_shards"]
     if missing:
@@ -289,7 +372,7 @@ def handler(event, context):
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
         f"{TASK_NAME} Collected {len(shards)} map items "
-        f"(target_shards={len(collected['expected_target_shards'])}, owner_shards={len(collected['owner_shards'])}). "
+        f"(target_shards={collected['target_shard_count']}, owner_shards={collected['owner_shard_count']}). "
         f"total_rows_read={total_rows_read} "
         f"canon_imagery_rows={collected['total_canon_imagery_rows']} "
         f"canon_label_rows_total={collected['total_canon_label_rows']} "
@@ -304,11 +387,27 @@ def handler(event, context):
             f"workers total_rows_read={total_rows_read}"
         )
 
+    try:
+        handoff = write_ingest_handoff(job_id, shards)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed writing ingest handoff: {e}",
+            level="error",
+        )
+        raise
+
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     ctas_table_name = f"reg_export_{sanitized_job_id}"
 
     return {
-        "shards": shards,
+        "plan_bucket": handoff["plan_bucket"],
+        "plan_key": handoff["plan_key"],
+        "plan_s3_uri": handoff["plan_s3_uri"],
+        "item_count": handoff["item_count"],
         "total_rows": total_rows,
         "total_rows_read": total_rows_read,
         "total_canon_imagery_rows": int(collected["total_canon_imagery_rows"]),
@@ -317,6 +416,7 @@ def handler(event, context):
         "total_image_source_membership_rows": int(collected["total_image_source_membership_rows"]),
         "processed_prefix": collected.get("processed_prefix"),
         "ctas_table_name": ctas_table_name,
-        "expected_target_shards": collected.get("expected_target_shards"),
-        "owner_shards": collected.get("owner_shards"),
+        "target_shard_count": int(collected["target_shard_count"]),
+        "owner_shard_count": int(collected["owner_shard_count"]),
+        "total_owner_label_files": int(collected["total_owner_label_files"]),
     }

@@ -129,7 +129,7 @@ class DLQOps(Construct):
             ]
         ))
 
-        dlq_processor.add_event_source(event_sources.SqsEventSource(self.dlq, batch_size=10))
+        dlq_processor.add_event_source(event_sources.SqsEventSource(self.dlq, batch_size=1))
         self.dlq.grant_consume_messages(dlq_processor)
 
         return dlq_processor

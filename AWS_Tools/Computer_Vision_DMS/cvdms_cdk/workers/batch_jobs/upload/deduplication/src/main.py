@@ -7,12 +7,14 @@ from typing import Any
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import boto3
+
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import parse_s3_uri, s3_read_json, write_s3_obj
 from common.upload_utils.upload_ddb_utils import batch_get_dynamodb_items
 from common.general_utils.s3fs_utils import (
     read_parquet_rows_from_s3_uris,
-    jsonl_stream_to_s3
+    jsonl_stream_to_s3,
 )
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
@@ -24,6 +26,7 @@ SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[DEDUP_JOB_DEF]"
+STAGE_NAME = "deduplication-batch"
 
 if not FILE_BUCKET_NAME:
     raise RuntimeError(f"{TASK_NAME} FILE_BUCKET_NAME not set")
@@ -37,6 +40,31 @@ DDB_BATCH_GET_MAX = 25
 MAX_ROWS_IN_MEMORY = 200000
 MAX_GROUP_SIZE = 10000
 
+s3 = boto3.client("s3")
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _active_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
+
+def _completed_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
+def _write_json_marker(key: str, payload: dict) -> None:
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=key,
+        Body=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+def _delete_marker_best_effort(key: str) -> None:
+    try:
+        s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
+    except Exception:
+        pass
+
 def ts_sortable(v: Any) -> str:
     """
     Return a sortable timestamp string.
@@ -48,14 +76,11 @@ def ts_sortable(v: Any) -> str:
         return "9999-12-31 23:59:59"
 
     if isinstance(v, datetime):
-        # Ensure tz-aware then convert to UTC
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
         v = v.astimezone(timezone.utc)
-        # keep same style you already use elsewhere
         return v.strftime("%Y-%m-%d %H:%M:%S")
 
-    # some parquet readers may return numbers or other types
     s = str(v).strip()
     return s if s else "9999-12-31 23:59:59"
 
@@ -75,6 +100,7 @@ def norm_string_labels(row: dict) -> list[str]:
         labels = row.get("classes_present")
     if not isinstance(labels, list):
         return []
+
     out = []
     seen = set()
     for x in labels:
@@ -84,6 +110,7 @@ def norm_string_labels(row: dict) -> list[str]:
         if s not in seen:
             seen.add(s)
             out.append(s)
+
     return sorted(out)
 
 def label_signature(row: dict) -> str:
@@ -101,7 +128,6 @@ def label_signature(row: dict) -> str:
         blob = ("|".join(labels)).encode("utf-8")
         return "str:" + hashlib.sha256(blob).hexdigest()
 
-    # Should not happen for validation_status=passed, but treat as conflict-ish
     return "__MISSING_LABEL_SIG__"
 
 def process_manifest(manifest):
@@ -131,13 +157,14 @@ def process_manifest(manifest):
         groups[sha].append(r)
 
         if total_rows > MAX_ROWS_IN_MEMORY:
-            raise RuntimeError(f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})")
+            raise RuntimeError(
+                f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})"
+            )
 
     processed_rows = []
     representatives = []  # list of (sha, rep_image_id)
     internal_dup_count = 0
-
-    warned_big_group = False  # cap warning to once per shard
+    warned_big_group = False
 
     for sha, group in groups.items():
         if sha.startswith("__MISSING_SHA__") or sha.startswith("__VAL_FAILED__"):
@@ -146,15 +173,24 @@ def process_manifest(manifest):
 
         if (not warned_big_group) and (len(group) > MAX_GROUP_SIZE):
             warned_big_group = True
-            log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+            log(
+                JOB_ID,
+                USER,
+                EVENT_TYPE,
+                LOG_FIREHOSE_STREAM_NAME,
                 f"{TASK_NAME} Shard {shard_name} has a large sha group: sha={sha} size={len(group)} exceeds MAX_GROUP_SIZE={MAX_GROUP_SIZE}",
-                level='warning')
+                level="warning",
+            )
 
         sigs = {label_signature(r) for r in group}
         if "__MISSING_LABEL_SIG__" in sigs or len(sigs) > 1:
             for r in group:
                 r["dedup_status"] = "failed"
-                error_msg = "string_labels or classes_present value must be a non-empty list" if "__MISSING_LABEL_SIG__" in sigs else "duplicate images with different labels not allowed"
+                error_msg = (
+                    "string_labels or classes_present value must be a non-empty list"
+                    if "__MISSING_LABEL_SIG__" in sigs
+                    else "duplicate images with different labels not allowed"
+                )
                 r["dedup_error"] = error_msg
                 r["matched_image_id"] = None
             processed_rows.extend(group)
@@ -178,7 +214,11 @@ def process_manifest(manifest):
     sha_list = list({s for s, _ in representatives})
 
     print(f"{TASK_NAME} unique SHA count = {len(sha_list)}")
-    ddb_map = batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, TASK_NAME) if sha_list else {}
+    ddb_map = (
+        batch_get_dynamodb_items(SHA256_TABLE_NAME, sha_list, DDB_BATCH_GET_MAX, TASK_NAME)
+        if sha_list
+        else {}
+    )
 
     external_dup_count = 0
     rep_index = {}
@@ -220,7 +260,6 @@ def write_processed_outputs(shard_name, processed_rows, summary):
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
     jsonl_stream_to_s3(bucket, jsonl_key, processed_rows)
-
     write_s3_obj(bucket, summary_key, json.dumps(summary), "application/json", TASK_NAME)
     write_s3_obj(bucket, success_key, "", "text/plain", TASK_NAME)
 
@@ -232,27 +271,73 @@ def write_processed_outputs(shard_name, processed_rows, summary):
 
 def main():
     start = time.time()
+
     if not MANIFEST_S3_URI:
         raise RuntimeError(f"{TASK_NAME} MANIFEST_S3_URI not set in environment")
 
     mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
     manifest = s3_read_json(mb, mk, TASK_NAME)
-
     shard_name = manifest.get("shard_prefix", "shard")
 
-    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI}")
+    active_key = _active_marker_key(shard_name)
+    completed_key = _completed_marker_key(shard_name)
+
+    _write_json_marker(
+        active_key,
+        {
+            "job_id": JOB_ID,
+            "stage": STAGE_NAME,
+            "shard": shard_name,
+            "request_id": None,
+            "started_at": _iso_now(),
+            "manifest_s3_uri": MANIFEST_S3_URI,
+        },
+    )
+
+    log(
+        JOB_ID,
+        USER,
+        EVENT_TYPE,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI}",
+    )
 
     try:
         processed_rows, summary = process_manifest(manifest)
         write_processed_outputs(shard_name, processed_rows, summary)
+
+        _write_json_marker(
+            completed_key,
+            {
+                "job_id": JOB_ID,
+                "stage": STAGE_NAME,
+                "shard": shard_name,
+                "completed_at": _iso_now(),
+                "manifest_s3_uri": MANIFEST_S3_URI,
+            },
+        )
+
     except Exception as e:
-        log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} error shard={shard_name} err={e}", level="error")
+        log(
+            JOB_ID,
+            USER,
+            EVENT_TYPE,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} error shard={shard_name} err={e}",
+            level="error",
+        )
         raise
+
+    finally:
+        _delete_marker_best_effort(active_key)
 
     elapsed = time.time() - start
 
     log(
-        JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
+        JOB_ID,
+        USER,
+        EVENT_TYPE,
+        LOG_FIREHOSE_STREAM_NAME,
         (
             f"{TASK_NAME} done shard={shard_name} "
             f"rows_read={summary['rows_read']} "
@@ -260,7 +345,7 @@ def main():
             f"external_duplicates={summary['external_duplicates']} "
             f"processed_rows={summary['processed_rows']} "
             f"time_s={elapsed:.1f}"
-        )
+        ),
     )
 
 if __name__ == "__main__":

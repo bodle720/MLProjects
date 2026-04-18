@@ -2,8 +2,9 @@ import os
 import json
 import time
 import random
+import traceback
 from datetime import datetime, timezone
-from typing import Dict, List, Iterable, Tuple, Optional, Set
+from typing import Dict, List, Iterable, Tuple, Optional, Set, Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -50,6 +51,10 @@ COMMIT_RETRY_ATTEMPTS = 4
 COMMIT_RETRY_BASE_SLEEP_SEC = 2.0
 COMMIT_RETRY_JITTER_SEC = 0.5
 
+# Low remaining-time guardrails for better logs and fewer opaque timeouts
+LOW_TIME_WARN_MS = 180_000
+LOW_TIME_ABORT_MS = 60_000
+
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
 
@@ -71,6 +76,55 @@ def chunked(lst: List, n: int) -> Iterable[List]:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+def _remaining_ms(context: Any) -> Optional[int]:
+    try:
+        return int(context.get_remaining_time_in_millis())
+    except Exception:
+        return None
+
+def _log_traceback(job_id: str, user: str, event_type: str, prefix: str, exc: Exception) -> None:
+    tb = traceback.format_exc()
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} {prefix}: {exc}; traceback={tb[:12000]}",
+        level="error",
+    )
+
+def _log_phase_start(job_id: str, user: str, event_type: str, phase: str, detail: str = "") -> float:
+    msg = f"{TASK_NAME} START phase={phase}"
+    if detail:
+        msg += f" {detail}"
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
+    return time.monotonic()
+
+def _log_phase_done(job_id: str, user: str, event_type: str, phase: str, started_at: float, detail: str = "") -> None:
+    elapsed = time.monotonic() - started_at
+    msg = f"{TASK_NAME} DONE phase={phase} elapsed_s={elapsed:.1f}"
+    if detail:
+        msg += f" {detail}"
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
+
+def _check_time_budget(context: Any, job_id: str, user: str, event_type: str, phase: str) -> None:
+    remaining = _remaining_ms(context)
+    if remaining is None:
+        return
+    if remaining <= LOW_TIME_ABORT_MS:
+        raise RuntimeError(
+            f"{TASK_NAME} aborting before phase={phase} due to low remaining time: remaining_ms={remaining}"
+        )
+    if remaining <= LOW_TIME_WARN_MS:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Low remaining time before phase={phase}: remaining_ms={remaining}",
+            level="warning",
+        )
 
 def _is_retryable_iceberg_commit_error(exc: Exception | str) -> bool:
     text = str(exc)
@@ -278,10 +332,6 @@ def _query_new_sha_mappings_from_upload_staging(job_id: str) -> List[Tuple[str, 
     return sorted(set(rows))
 
 def _query_canonical_image_keys_for_image_ids(image_ids: List[str]) -> List[str]:
-    """
-    Third authoritative source of canonical image object keys:
-    query live canonical_imagery rows for the new image_ids before deleting those rows.
-    """
     if not image_ids:
         return []
 
@@ -313,10 +363,6 @@ def _query_canonical_image_keys_for_image_ids(image_ids: List[str]) -> List[str]
     return sorted(out)
 
 def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int, int, int]:
-    """
-    Delete sha256 entries only if they still point at the image_id created by THIS job.
-    Returns (deleted, skipped_not_matching, errors).
-    """
     deleted = 0
     skipped = 0
     errors = 0
@@ -342,16 +388,6 @@ def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int,
 def _load_batch_rollback_seeds(
     processed_keys: List[str],
 ) -> Tuple[List[str], List[str], List[Tuple[str, str]]]:
-    """
-    Reads rollback seed JSONs written by the registration batch worker.
-    Returns:
-      - new_image_ids
-      - canonical_image_keys_to_delete
-      - sha256 mappings to delete: (sha256, image_id)
-
-    We intentionally do NOT blindly delete canonical label object keys from these
-    seeds because those fingerprint-addressed objects may be shared.
-    """
     rollback_seed_keys = [k for k in processed_keys if "/rollback-batch/" in k and k.endswith(".json")]
     rollback_seed_keys.sort()
 
@@ -382,10 +418,6 @@ def _load_batch_rollback_seeds(
     return sorted(new_image_ids), sorted(canonical_image_keys), sorted(sha_mappings)
 
 def _load_canonical_image_object_keys_from_processed_rows(processed_keys: List[str]) -> List[str]:
-    """
-    Secondary source of canonical image object keys:
-    read processed canonical_imagery shard outputs and extract source_ref URIs.
-    """
     imagery_jsonls = [k for k in processed_keys if "/canonical_imagery/" in k and k.endswith(".jsonl")]
     imagery_jsonls.sort()
 
@@ -402,11 +434,6 @@ def _load_canonical_image_object_keys_from_processed_rows(processed_keys: List[s
     return sorted(keys)
 
 def _load_exact_rollback_targets(processed_keys: List[str]) -> Tuple[Set[Tuple[str, str, str]], List[Tuple[str, str]]]:
-    """
-    Reads rollback plan JSONs written by registration ingest map lambda and returns:
-      - exact image_labels keys to delete: (image_id, label_type, label_id)
-      - exact image_source_membership keys to delete: (image_id, data_source)
-    """
     rollback_keys = [k for k in processed_keys if "/rollback/" in k and k.endswith(".json")]
     rollback_keys.sort()
 
@@ -543,25 +570,32 @@ def _label_ids_from_rows(table: str, rows: List[Dict]) -> List[str]:
             out.append(v.strip())
     return out
 
-def _is_label_id_referenced(label_type: str, label_id: str) -> bool:
-    lt = escape_sql_string(label_type)
-    lid = escape_sql_string(label_id)
-    sql = f"""
-    SELECT COUNT(*) AS c
-    FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}"
-    WHERE label_type = '{lt}'
-      AND label_id = '{lid}'
-    """
-    qid, _ = run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=300)
-    rows = athena_fetch_all_rows(qid)
-    for r in rows:
-        v = r.get("c") or r.get("_col0") or r.get("count") or r.get("count(*)")
-        try:
-            if int(v) > 0:
-                return True
-        except Exception:
-            continue
-    return False
+def _find_referenced_label_ids(label_type: str, label_ids: List[str]) -> Set[str]:
+    if not label_ids:
+        return set()
+
+    referenced: Set[str] = set()
+    safe_label_type = escape_sql_string(label_type)
+
+    for chunk in chunked(sorted(set(label_ids)), 500):
+        in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
+        sql = f"""
+        SELECT DISTINCT label_id
+        FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}"
+        WHERE label_type = '{safe_label_type}'
+          AND label_id IN ({in_list})
+        """
+        qid, _ = run_athena(
+            sql,
+            f"{TASK_NAME} find_referenced_label_ids:{label_type}",
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+            poll=2.0,
+            timeout=300,
+        )
+        referenced.update(_athena_fetch_rows_1col(qid))
+
+    return referenced
 
 def _delete_canonical_label_rows_if_orphaned(table: str, label_type: str, rows: List[Dict]) -> Tuple[List[str], int]:
     if not rows:
@@ -572,17 +606,9 @@ def _delete_canonical_label_rows_if_orphaned(table: str, label_type: str, rows: 
     if not ids:
         return [], 0
 
-    to_delete: List[str] = []
-    skipped = 0
-
-    for lid in ids:
-        try:
-            if _is_label_id_referenced(label_type, lid):
-                skipped += 1
-            else:
-                to_delete.append(lid)
-        except Exception:
-            skipped += 1
+    referenced = _find_referenced_label_ids(label_type, ids)
+    to_delete = [lid for lid in ids if lid not in referenced]
+    skipped = len(ids) - len(to_delete)
 
     for chunk in chunked(to_delete, 500):
         in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
@@ -633,12 +659,6 @@ def _s3_object_exists(bucket: str, key: str) -> bool:
         raise
 
 def delete_s3_keys_strict(bucket: str, keys: List[str], batch_size: int = 1000) -> Dict[str, object]:
-    """
-    Strict S3 cleanup:
-      1) issue delete_objects in batches
-      2) HEAD every key afterward
-      3) report survivors as critical rollback failures
-    """
     unique_keys = sorted({k.strip() for k in keys if isinstance(k, str) and k.strip()})
     if not unique_keys:
         return {
@@ -688,7 +708,128 @@ def delete_s3_keys_strict(bucket: str, keys: List[str], batch_size: int = 1000) 
         "verify_error_samples": verify_error_samples[:10],
     }
 
-def _process_one_record(record: Dict[str, object]) -> None:
+def _temp_job_prefix(job_id: str) -> str:
+    return f"temp/image-upload/{job_id}/"
+
+def _list_temp_job_keys(job_id: str) -> List[str]:
+    prefix = _temp_job_prefix(job_id)
+    keys = s3_list_keys(FILE_BUCKET_NAME, prefix)
+    return sorted(
+        k for k in keys
+        if isinstance(k, str) and k.strip() and not k.endswith("/")
+    )
+
+def _cleanup_temp_prefix_best_effort(
+    job_id: str,
+    user: str,
+    event_type: str,
+    context: Any = None,
+) -> None:
+    """
+    Best-effort cleanup of the entire temp/image-upload/<job_id>/ subtree.
+    This runs only after critical rollback succeeds and after job status is set
+    to FAILED. It must never raise, to avoid retry loops after correctness-
+    critical rollback already completed.
+    """
+    remaining = _remaining_ms(context)
+    if remaining is not None and remaining <= LOW_TIME_ABORT_MS:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Skipping temp prefix cleanup due to low remaining time: remaining_ms={remaining}",
+            level="warning",
+        )
+        return
+
+    prefix = _temp_job_prefix(job_id)
+    phase = _log_phase_start(
+        job_id,
+        user,
+        event_type,
+        "cleanup_temp_prefix",
+        detail=f"prefix=s3://{FILE_BUCKET_NAME}/{prefix}",
+    )
+
+    try:
+        temp_keys = _list_temp_job_keys(job_id)
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "list temp prefix keys failed (best-effort)", e)
+        _log_phase_done(
+            job_id,
+            user,
+            event_type,
+            "cleanup_temp_prefix",
+            phase,
+            detail="listed=0 skipped_due_to_list_error=true",
+        )
+        return
+
+    if not temp_keys:
+        _log_phase_done(
+            job_id,
+            user,
+            event_type,
+            "cleanup_temp_prefix",
+            phase,
+            detail="listed=0 attempted=0",
+        )
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Temp prefix cleanup found no keys under s3://{FILE_BUCKET_NAME}/{prefix}",
+        )
+        return
+
+    try:
+        delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, temp_keys)
+        _log_phase_done(
+            job_id,
+            user,
+            event_type,
+            "cleanup_temp_prefix",
+            phase,
+            detail=(
+                f"listed={len(temp_keys)} attempted={delete_result['attempted']} "
+                f"api_error_count={delete_result['api_error_count']} "
+                f"survivor_count={delete_result['survivor_count']} "
+                f"verify_error_count={delete_result['verify_error_count']}"
+            ),
+        )
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            (
+                f"{TASK_NAME} Temp prefix cleanup result: "
+                f"prefix=s3://{FILE_BUCKET_NAME}/{prefix} "
+                f"listed={len(temp_keys)} "
+                f"attempted={delete_result['attempted']} "
+                f"api_error_count={delete_result['api_error_count']} "
+                f"survivor_count={delete_result['survivor_count']} "
+                f"verify_error_count={delete_result['verify_error_count']} "
+                f"api_error_samples={delete_result['api_error_samples']} "
+                f"survivor_samples={delete_result['survivor_samples']} "
+                f"verify_error_samples={delete_result['verify_error_samples']}"
+            ),
+            level=(
+                "warning"
+                if (
+                    delete_result["api_error_count"]
+                    or delete_result["survivor_count"]
+                    or delete_result["verify_error_count"]
+                )
+                else "info"
+            ),
+        )
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "temp prefix cleanup failed (best-effort)", e)
+
+def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
     try:
         body = json.loads(record["body"])
     except Exception:
@@ -706,20 +847,24 @@ def _process_one_record(record: Dict[str, object]) -> None:
     if (job_id in (None, "unknown")) or (user is None) or (event_type is None):
         raise RuntimeError(f"{TASK_NAME} invalid job-shaped DLQ message: {body}")
 
+    total_started = time.monotonic()
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} DLQ received message: {body}")
 
     # 0) Wait for in-flight workers to quiesce before rollback.
+    _check_time_budget(context, job_id, user, event_type, "quiescence")
+    phase = _log_phase_start(job_id, user, event_type, "quiescence")
     _wait_for_worker_quiescence_or_raise(job_id, user, event_type)
+    _log_phase_done(job_id, user, event_type, "quiescence", phase)
 
     # 1) Gather rollback sources AFTER quiescence.
+    _check_time_budget(context, job_id, user, event_type, "gather_rollback_sources")
+    phase = _log_phase_start(job_id, user, event_type, "gather_rollback_sources")
     processed_keys = _list_registration_processed_keys(job_id)
 
     batch_new_image_ids, batch_canonical_image_keys, batch_sha_mappings = _load_batch_rollback_seeds(processed_keys)
     processed_canonical_image_keys = _load_canonical_image_object_keys_from_processed_rows(processed_keys)
     rollback_label_keys, rollback_source_membership_keys = _load_exact_rollback_targets(processed_keys)
 
-    # Use rollback-batch new_image_ids as the primary authoritative source.
-    # Also union with upload_staging query as a best-effort supplement.
     try:
         queried_new_image_ids = _query_new_image_ids_from_upload_staging(job_id)
     except Exception as e:
@@ -749,7 +894,6 @@ def _process_one_record(record: Dict[str, object]) -> None:
     new_image_ids = sorted(set(batch_new_image_ids) | set(queried_new_image_ids))
     batch_sha_mappings = sorted(set(batch_sha_mappings) | set(queried_sha_mappings))
 
-    # Third authoritative source: live canonical_imagery rows, queried BEFORE deleting those rows.
     try:
         table_canonical_image_keys = _query_canonical_image_keys_for_image_ids(new_image_ids)
     except Exception as e:
@@ -785,57 +929,89 @@ def _process_one_record(record: Dict[str, object]) -> None:
             f"sample_union_keys={canonical_image_keys_to_delete[:5]}"
         ),
     )
+    _log_phase_done(
+        job_id,
+        user,
+        event_type,
+        "gather_rollback_sources",
+        phase,
+        detail=(
+            f"processed_keys={len(processed_keys)} rollback_label_keys={len(rollback_label_keys)} "
+            f"rollback_source_membership_keys={len(rollback_source_membership_keys)} new_image_ids={len(new_image_ids)} "
+            f"sha_candidates={len(batch_sha_mappings)} canonical_image_keys={len(canonical_image_keys_to_delete)}"
+        ),
+    )
 
     critical_failures: List[str] = []
 
     # 2) Registration-side rollback
     if rollback_label_keys:
         try:
+            _check_time_budget(context, job_id, user, event_type, "delete_exact_image_labels")
+            phase = _log_phase_start(job_id, user, event_type, "delete_exact_image_labels", detail=f"count={len(rollback_label_keys)}")
             _delete_exact_image_labels(rollback_label_keys)
-            log(
-                job_id,
-                user,
-                event_type,
-                LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Deleted exact image_labels rollback keys count={len(rollback_label_keys)}",
-            )
+            _log_phase_done(job_id, user, event_type, "delete_exact_image_labels", phase, detail=f"count={len(rollback_label_keys)}")
         except Exception as e:
+            _log_traceback(job_id, user, event_type, "delete_exact_image_labels failed", e)
             critical_failures.append(f"exact image_labels rollback failed: {e}")
 
     if rollback_source_membership_keys:
         try:
-            _delete_exact_image_source_memberships(rollback_source_membership_keys)
-            log(
+            _check_time_budget(context, job_id, user, event_type, "delete_exact_image_source_memberships")
+            phase = _log_phase_start(
                 job_id,
                 user,
                 event_type,
-                LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Deleted exact image_source_membership rollback keys count={len(rollback_source_membership_keys)}",
+                "delete_exact_image_source_memberships",
+                detail=f"count={len(rollback_source_membership_keys)}",
+            )
+            _delete_exact_image_source_memberships(rollback_source_membership_keys)
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_exact_image_source_memberships",
+                phase,
+                detail=f"count={len(rollback_source_membership_keys)}",
             )
         except Exception as e:
+            _log_traceback(job_id, user, event_type, "delete_exact_image_source_memberships failed", e)
             critical_failures.append(f"exact image_source_membership rollback failed: {e}")
 
-    # Delete row-owned linkage for new images first.
     if new_image_ids:
         try:
+            _check_time_budget(context, job_id, user, event_type, "delete_new_image_linkage")
+            phase = _log_phase_start(job_id, user, event_type, "delete_new_image_linkage", detail=f"count={len(new_image_ids)}")
             _delete_image_labels_for_images(new_image_ids)
             _delete_image_source_memberships_for_images(new_image_ids)
-            log(
-                job_id,
-                user,
-                event_type,
-                LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Deleted image_labels + image_source_membership for {len(new_image_ids)} new image(s)",
-            )
+            _log_phase_done(job_id, user, event_type, "delete_new_image_linkage", phase, detail=f"count={len(new_image_ids)}")
         except Exception as e:
+            _log_traceback(job_id, user, event_type, "delete_new_image_linkage failed", e)
             critical_failures.append(f"new-image linkage rollback failed: {e}")
 
-    # Strict canonical image object cleanup BEFORE deleting canonical_imagery rows,
-    # so retries can still query live table rows if this step fails.
     canonical_image_objects_ok = True
     if canonical_image_keys_to_delete:
         try:
+            _check_time_budget(context, job_id, user, event_type, "delete_canonical_image_objects")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                "delete_canonical_image_objects",
+                detail=f"count={len(canonical_image_keys_to_delete)}",
+            )
             s3_delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, canonical_image_keys_to_delete)
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_canonical_image_objects",
+                phase,
+                detail=(
+                    f"attempted={s3_delete_result['attempted']} api_error_count={s3_delete_result['api_error_count']} "
+                    f"survivor_count={s3_delete_result['survivor_count']} verify_error_count={s3_delete_result['verify_error_count']}"
+                ),
+            )
             log(
                 job_id,
                 user,
@@ -878,12 +1054,15 @@ def _process_one_record(record: Dict[str, object]) -> None:
                 )
         except Exception as e:
             canonical_image_objects_ok = False
+            _log_traceback(job_id, user, event_type, "delete_canonical_image_objects failed", e)
             critical_failures.append(f"canonical image object cleanup failed: {e}")
 
-    # Only delete canonical_imagery rows if object cleanup was clean.
     if new_image_ids and canonical_image_objects_ok:
         try:
+            _check_time_budget(context, job_id, user, event_type, "delete_canonical_imagery_rows")
+            phase = _log_phase_start(job_id, user, event_type, "delete_canonical_imagery_rows", detail=f"count={len(new_image_ids)}")
             _delete_canonical_imagery_rows(new_image_ids)
+            _log_phase_done(job_id, user, event_type, "delete_canonical_imagery_rows", phase, detail=f"count={len(new_image_ids)}")
             log(
                 job_id,
                 user,
@@ -892,6 +1071,7 @@ def _process_one_record(record: Dict[str, object]) -> None:
                 f"{TASK_NAME} Deleted canonical_imagery rows for {len(new_image_ids)} new image(s)",
             )
         except Exception as e:
+            _log_traceback(job_id, user, event_type, "delete_canonical_imagery_rows failed", e)
             critical_failures.append(f"canonical_imagery row rollback failed: {e}")
     elif new_image_ids and not canonical_image_objects_ok:
         log(
@@ -903,7 +1083,24 @@ def _process_one_record(record: Dict[str, object]) -> None:
             level="warning",
         )
 
-    owner_rows_by_table = _load_owner_label_rows(processed_keys)
+    owner_rows_by_table: Dict[str, List[Dict]] = {t: [] for t in LABEL_TABLES}
+    try:
+        _check_time_budget(context, job_id, user, event_type, "load_owner_label_rows")
+        phase = _log_phase_start(job_id, user, event_type, "load_owner_label_rows")
+        owner_rows_by_table = _load_owner_label_rows(processed_keys)
+        owner_summary = {table: len(rows) for table, rows in owner_rows_by_table.items() if rows}
+        _log_phase_done(
+            job_id,
+            user,
+            event_type,
+            "load_owner_label_rows",
+            phase,
+            detail=f"tables={owner_summary} total={sum(owner_summary.values())}",
+        )
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "load_owner_label_rows failed", e)
+        critical_failures.append(f"load owner label rows failed: {e}")
+
     for table, rows in owner_rows_by_table.items():
         if not rows:
             continue
@@ -913,7 +1110,23 @@ def _process_one_record(record: Dict[str, object]) -> None:
             continue
 
         try:
+            _check_time_budget(context, job_id, user, event_type, f"canonical_label_orphan_check:{table}")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                f"canonical_label_orphan_check:{table}",
+                detail=f"rows={len(rows)} label_type={label_type}",
+            )
             deleted_ids, skipped_rows = _delete_canonical_label_rows_if_orphaned(table, label_type, rows)
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                f"canonical_label_orphan_check:{table}",
+                phase,
+                detail=f"deleted={len(deleted_ids)} skipped={skipped_rows}",
+            )
             log(
                 job_id,
                 user,
@@ -923,13 +1136,32 @@ def _process_one_record(record: Dict[str, object]) -> None:
             )
 
             if deleted_ids:
+                _check_time_budget(context, job_id, user, event_type, f"delete_canonical_label_objects:{table}")
                 kcol = _label_key_col(table)
                 deleted_id_set = set(deleted_ids)
                 rows_deleted = [r for r in rows if r.get(kcol) in deleted_id_set]
                 label_s3_keys = _extract_label_s3_keys(rows_deleted)
 
                 if label_s3_keys:
+                    phase = _log_phase_start(
+                        job_id,
+                        user,
+                        event_type,
+                        f"delete_canonical_label_objects:{table}",
+                        detail=f"count={len(label_s3_keys)}",
+                    )
                     label_delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, label_s3_keys)
+                    _log_phase_done(
+                        job_id,
+                        user,
+                        event_type,
+                        f"delete_canonical_label_objects:{table}",
+                        phase,
+                        detail=(
+                            f"attempted={label_delete_result['attempted']} api_error_count={label_delete_result['api_error_count']} "
+                            f"survivor_count={label_delete_result['survivor_count']} verify_error_count={label_delete_result['verify_error_count']}"
+                        ),
+                    )
                     log(
                         job_id,
                         user,
@@ -969,11 +1201,14 @@ def _process_one_record(record: Dict[str, object]) -> None:
                         )
 
         except Exception as e:
+            _log_traceback(job_id, user, event_type, f"canonical label rollback failed table={table}", e)
             critical_failures.append(f"canonical label rollback failed table={table}: {e}")
 
-    # 3) SHA rollback
     try:
+        _check_time_budget(context, job_id, user, event_type, "sha256_rollback")
+        phase = _log_phase_start(job_id, user, event_type, "sha256_rollback", detail=f"candidates={len(batch_sha_mappings)}")
         d, s, e = delete_sha256_entries_for_job(batch_sha_mappings)
+        _log_phase_done(job_id, user, event_type, "sha256_rollback", phase, detail=f"deleted={d} skipped={s} errors={e}")
         log(
             job_id,
             user,
@@ -984,15 +1219,17 @@ def _process_one_record(record: Dict[str, object]) -> None:
         if e:
             critical_failures.append(f"sha256 rollback errors={e}")
     except Exception as e:
+        _log_traceback(job_id, user, event_type, "sha256 rollback failed", e)
         critical_failures.append(f"sha256 rollback failed: {e}")
 
-    # 4) Non-critical cleanup
     try:
+        _check_time_budget(context, job_id, user, event_type, "drop_ctas_tables")
+        phase = _log_phase_start(job_id, user, event_type, "drop_ctas_tables")
         _drop_ctas_tables_best_effort(job_id)
-    except Exception:
-        pass
+        _log_phase_done(job_id, user, event_type, "drop_ctas_tables", phase)
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "drop_ctas_tables failed", e)
 
-    # 5) If any critical rollback step failed, raise so SQS retries later.
     if critical_failures:
         joined = " | ".join(critical_failures[:8])
         log(
@@ -1005,42 +1242,72 @@ def _process_one_record(record: Dict[str, object]) -> None:
         )
         raise RuntimeError(f"{TASK_NAME} Critical rollback failures: {joined}")
 
-    # 6) Mark job FAILED only after rollback succeeds.
-    update_success, update_msg = update_job_status(
-        job_id,
-        "FAILED",
-        JOB_TABLE_NAME,
-        LOG_FIREHOSE_STREAM_NAME,
-        user=user,
-        event_type=event_type,
-        error_msg=(error_msg or "")[:512],
-    )
-    if not update_success:
-        raise RuntimeError(f"{TASK_NAME} Failed to set job FAILED: {update_msg}")
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job status to FAILED.")
+    try:
+        _check_time_budget(context, job_id, user, event_type, "update_job_failed")
+        phase = _log_phase_start(job_id, user, event_type, "update_job_failed")
+        update_success, update_msg = update_job_status(
+            job_id,
+            "FAILED",
+            JOB_TABLE_NAME,
+            LOG_FIREHOSE_STREAM_NAME,
+            user=user,
+            event_type=event_type,
+            error_msg=(error_msg or "")[:512],
+        )
+        if not update_success:
+            raise RuntimeError(f"{TASK_NAME} Failed to set job FAILED: {update_msg}")
+        _log_phase_done(job_id, user, event_type, "update_job_failed", phase)
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Updated job status to FAILED.")
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "update_job_failed failed", e)
+        raise
 
-    # 7) Release lock only after rollback + status update succeed.
-    release_success, release_msg = release_lock(
-        job_id,
-        LOCK_TABLE_NAME,
-        LOG_FIREHOSE_STREAM_NAME,
+    # Best-effort only: do not raise from temp cleanup. The correctness-critical
+    # rollback above has already completed successfully at this point.
+    _cleanup_temp_prefix_best_effort(
+        job_id=job_id,
         user=user,
         event_type=event_type,
+        context=context,
     )
-    if not release_success:
-        if str(release_msg).startswith("lock_not_held_by_job_id:"):
-            log(
-                job_id,
-                user,
-                event_type,
-                LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Proceeding because lock already not held by this job: {release_msg}",
-                level="warning",
-            )
+
+    try:
+        _check_time_budget(context, job_id, user, event_type, "release_lock")
+        phase = _log_phase_start(job_id, user, event_type, "release_lock")
+        release_success, release_msg = release_lock(
+            job_id,
+            LOCK_TABLE_NAME,
+            LOG_FIREHOSE_STREAM_NAME,
+            user=user,
+            event_type=event_type,
+        )
+        if not release_success:
+            if str(release_msg).startswith("lock_not_held_by_job_id:"):
+                log(
+                    job_id,
+                    user,
+                    event_type,
+                    LOG_FIREHOSE_STREAM_NAME,
+                    f"{TASK_NAME} Proceeding because lock already not held by this job: {release_msg}",
+                    level="warning",
+                )
+            else:
+                raise RuntimeError(f"{TASK_NAME} Release lock failed: {release_msg}")
         else:
-            raise RuntimeError(f"{TASK_NAME} Release lock failed: {release_msg}")
-    else:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Released lock.")
+            log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Released lock.")
+        _log_phase_done(job_id, user, event_type, "release_lock", phase)
+    except Exception as e:
+        _log_traceback(job_id, user, event_type, "release_lock failed", e)
+        raise
+
+    total_elapsed = time.monotonic() - total_started
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Rollback complete for job {job_id}. total_elapsed_s={total_elapsed:.1f}",
+    )
 
 def handler(event, context):
     total_records = 0
@@ -1049,23 +1316,15 @@ def handler(event, context):
     for record in event.get("Records", []):
         total_records += 1
         try:
-            _process_one_record(record)
+            _process_one_record(record, context=context)
             num_processed_successfully += 1
         except Exception as e:
-            # Raise so the SQS-triggered Lambda retries later.
             try:
                 body = json.loads(record.get("body", "{}"))
                 job_id = body.get("job_id") or "unknown"
                 user = body.get("user") or "unknown"
                 event_type = body.get("event_type") or "IMAGE_UPLOAD"
-                log(
-                    job_id,
-                    user,
-                    event_type,
-                    LOG_FIREHOSE_STREAM_NAME,
-                    f"{TASK_NAME} Record processing failed and will be retried: {e}",
-                    level="error",
-                )
+                _log_traceback(job_id, user, event_type, "Record processing failed and will be retried", e)
             except Exception:
                 pass
             raise

@@ -42,7 +42,7 @@ CONFIG = AppConfig(
                 ),
             sqs_queue=SQSConfig(
                     retention_period_days=14,
-                    visibility_timeout_minutes=15
+                    visibility_timeout_minutes=90
             )
         ),
         events_queue=SQSConfig(
@@ -56,7 +56,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
-            map_max_concurrency=7,
+            map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
                 memory_limit_mib=2048,
@@ -71,7 +71,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
-            map_max_concurrency=7,
+            map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
                 memory_limit_mib=2048,
@@ -86,7 +86,7 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
-            map_max_concurrency=7,
+            map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=2,
                 memory_limit_mib=4096,

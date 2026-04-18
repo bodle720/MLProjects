@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List
-
-import boto3
+from typing import Dict, List, Any
 
 from common.general_utils.logging_utils import log
-from common.general_utils.s3_utils import s3_list_keys, parse_s3_uri, s3_read_json, read_obj_with_retry
+from common.general_utils.s3_utils import (
+    s3_list_keys,
+    parse_s3_uri,
+    s3_read_json,
+    read_obj_with_retry,
+    write_s3_obj,
+)
 from common.general_utils.table_schemas import UPLOAD_STAGING_TABLE_NAME
 from common.upload_utils.upload_iceberg_utils import delete_job_rows_from_table
 
@@ -15,17 +19,54 @@ ATHENA_OUTPUT_S3 = os.environ["ATHENA_OUTPUT_S3"]
 ATHENA_WORKGROUP = os.environ["ATHENA_WORKGROUP"]
 ICEBERG_DATABASE_NAME = os.environ["ICEBERG_DATABASE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
+INGEST_HANDOFF_FILE_NAME = os.environ.get("INGEST_HANDOFF_FILE_NAME", "map-items.jsonl")
 
 TASK_NAME = "[VAL_INGEST_PRE]"
 
-s3 = boto3.client("s3")
+def _require_event_key(event: dict, key: str):
+    if key not in event:
+        raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
+    return event[key]
 
-def count_manifest_lines(manifests: List[str]) -> int:
+def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
+    resp = read_obj_with_retry(bucket, key, TASK_NAME)
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} Failed to read batch plan s3://{bucket}/{key}")
+
+    items: List[Dict[str, Any]] = []
+    for raw in resp["Body"].iter_lines():
+        if not raw:
+            continue
+        line = raw.decode("utf-8-sig").strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception as e:
+            raise RuntimeError(f"{TASK_NAME} Invalid JSONL in batch plan s3://{bucket}/{key}: {e}")
+
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"{TASK_NAME} Expected dict items in batch plan, got {type(obj).__name__}")
+
+        manifest = obj.get("manifest")
+        if not isinstance(manifest, str) or not manifest.startswith("s3://"):
+            raise RuntimeError(f"{TASK_NAME} Batch plan item missing valid manifest URI: {obj}")
+
+        items.append(obj)
+
+    if not items:
+        raise RuntimeError(f"{TASK_NAME} Batch plan is empty: s3://{bucket}/{key}")
+
+    return items
+
+def count_manifest_lines(batch_items: List[Dict[str, Any]]) -> int:
     """
-    Fallback: Count non-empty lines across all batching manifests (JSONL).
+    Fallback: count non-empty lines across all validation shard manifests referenced
+    by the batching-stage handoff plan.
     """
     total = 0
-    for uri in manifests:
+    for item in batch_items:
+        uri = item["manifest"]
         try:
             b, k = parse_s3_uri(uri, TASK_NAME)
         except Exception as e:
@@ -35,33 +76,35 @@ def count_manifest_lines(manifests: List[str]) -> int:
         if resp is None:
             raise RuntimeError(f"{TASK_NAME} Failed to read {uri}, parsed bucket and key are {b} and {k}")
 
-        body = resp["Body"]
-        for line in body.iter_lines():
+        for line in resp["Body"].iter_lines():
             if not line:
                 continue
             if line.decode("utf-8-sig").strip():
                 total += 1
     return total
 
-def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
+def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
-    For validation, manifests are JSONL files named like batch-001.jsonl.
-    Use the filename stem as shard name (batch-001).
+    Prefer explicit shard from the batching handoff item.
+    Fallback to manifest filename stem (e.g. batch-001.jsonl -> batch-001).
     """
     expected: List[str] = []
-    for m in manifests:
 
-        try:
-            _, key = parse_s3_uri(m, TASK_NAME)
-        except Exception as e:
-            raise ValueError(f"{TASK_NAME} Unable to parse s3 uri: {m}, reason: {e}")
-
-        try:
-            fname = key.split("/")[-1]
-            shard_name = fname[:-len(".jsonl")] if fname.endswith(".jsonl") else fname.rsplit(".", 1)[0]
-            expected.append(shard_name)
-        except Exception:
+    for item in batch_items:
+        shard = item.get("shard")
+        if isinstance(shard, str) and shard.strip():
+            expected.append(shard.strip())
             continue
+
+        manifest_uri = item["manifest"]
+        try:
+            _, key = parse_s3_uri(manifest_uri, TASK_NAME)
+        except Exception as e:
+            raise ValueError(f"{TASK_NAME} Unable to parse s3 uri: {manifest_uri}, reason: {e}")
+
+        fname = key.split("/")[-1]
+        shard_name = fname[:-len(".jsonl")] if fname.endswith(".jsonl") else fname.rsplit(".", 1)[0]
+        expected.append(shard_name)
 
     # stable unique preserve order
     seen = set()
@@ -72,7 +115,7 @@ def extract_expected_shards_from_manifests(manifests: List[str]) -> List[str]:
             out.append(s)
     return out
 
-def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
+def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Validation worker output layout:
       {processed_prefix}/upload_staging/shard-<shard>.jsonl
@@ -81,7 +124,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
     """
     bucket = FILE_BUCKET_NAME
     processed_prefix = f"temp/image-upload/{job_id}/batches/validation-step/processed"
-    expected_shards = extract_expected_shards_from_manifests(manifests)
+    expected_shards = extract_expected_shards_from_batch_items(batch_items)
     processed_keys = s3_list_keys(bucket, processed_prefix + "/")
 
     shard_jsonl: Dict[str, str] = {}
@@ -92,20 +135,20 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         name = k.split("/")[-1]
 
         if k.endswith(".jsonl") and "/upload_staging/" in k and name.startswith("shard-"):
-            shard = name[len("shard-") : -len(".jsonl")]
+            shard = name[len("shard-"):-len(".jsonl")]
             shard_jsonl[shard] = k
         elif name.startswith("shard-") and name.endswith("-summary.json"):
-            shard = name[len("shard-") : -len("-summary.json")]
+            shard = name[len("shard-"):-len("-summary.json")]
             shard_summary[shard] = k
         elif name.startswith("shard-") and name.endswith("-SUCCESS"):
-            shard = name[len("shard-") : -len("-SUCCESS")]
+            shard = name[len("shard-"):-len("-SUCCESS")]
             shard_success.add(shard)
 
     if not expected_shards:
         expected_shards = sorted(set(shard_jsonl) | set(shard_summary) | set(shard_success))
 
     missing: List[str] = []
-    shards: List[Dict] = []
+    shards: List[Dict[str, Any]] = []
     total_rows_read = 0
     total_failed_rows = 0
 
@@ -129,7 +172,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         shards.append(
             {
                 "shard": shard,
-                "kind": None,
+                "kind": "validation",
                 "rows_read": rows_read,
                 "failed_rows": failed_rows,
                 "processed_rows": processed_rows,
@@ -139,7 +182,7 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
                 "canonical_imagery_key": None,
                 "canonical_labels_key": None,
                 "image_labels_key": None,
-                "image_source_membership_key": None
+                "image_source_membership_key": None,
             }
         )
 
@@ -151,24 +194,54 @@ def collect_processed_shards(job_id: str, manifests: List[str]) -> Dict:
         "processed_prefix": processed_prefix,
     }
 
+def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str, Any]:
+    handoff_prefix = f"temp/image-upload/{job_id}/batches/validation-step/ingest-handoff/"
+    handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
+
+    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in shards) + "\n"
+    plan_s3_uri = write_s3_obj(
+        FILE_BUCKET_NAME,
+        handoff_key,
+        body,
+        "application/x-ndjson",
+        TASK_NAME,
+    )
+
+    return {
+        "plan_bucket": FILE_BUCKET_NAME,
+        "plan_key": handoff_key,
+        "plan_s3_uri": plan_s3_uri,
+        "item_count": len(shards),
+    }
+
 def handler(event, context):
-    try:
-        job_id = event["job_id"]
-        user = event["user"]
-        event_type = event["event_type"]
-        manifests = event["manifests"]
-        expected_count_in = event.get("expected_count")
-    except KeyError as e:
-        raise RuntimeError(f"{TASK_NAME} Missing key: {e}, event={json.dumps(event)}")
+    job_id = _require_event_key(event, "job_id")
+    user = _require_event_key(event, "user")
+    event_type = _require_event_key(event, "event_type")
+    batch_plan_bucket = _require_event_key(event, "batch_plan_bucket")
+    batch_plan_key = _require_event_key(event, "batch_plan_key")
+    expected_count_in = event.get("expected_count")
 
     if not job_id or job_id == "unknown":
         raise RuntimeError(f"{TASK_NAME} missing job_id in event")
-    if not manifests or not isinstance(manifests, list):
-        raise RuntimeError(f"{TASK_NAME} manifests must be a non-empty list of s3 URIs")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Starting validation pre-ingest for job {job_id}")
+    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Starting validation pre-ingest for job {job_id}")
 
-    # 0) Determine expected_count
+    # 0) Read batching-stage handoff plan
+    try:
+        batch_items = read_batch_plan_items(batch_plan_bucket, batch_plan_key)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed reading batch handoff plan s3://{batch_plan_bucket}/{batch_plan_key}: {e}",
+            level="error",
+        )
+        raise
+
+    # 1) Determine expected_count
     expected_count = None
     if isinstance(expected_count_in, int):
         expected_count = expected_count_in
@@ -176,25 +249,24 @@ def handler(event, context):
         expected_count = int(expected_count_in.strip())
 
     if expected_count is None:
-        # fallback: count manifest lines
         try:
-            expected_count = count_manifest_lines(manifests)
+            expected_count = count_manifest_lines(batch_items)
         except Exception as e:
             log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed counting manifest lines: {e}", level="error")
             raise
 
     if expected_count <= 0:
-        err = f"{TASK_NAME} expected_count is {expected_count} (manifests empty?)"
+        err = f"{TASK_NAME} expected_count is {expected_count} (batch plan/manifests empty?)"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} expected_count={expected_count}")
 
-    # 1) Collect processed outputs + verify completeness
+    # 2) Collect processed outputs + verify completeness
     try:
-        collected = collect_processed_shards(job_id, manifests)
+        collected = collect_processed_shards(job_id, batch_items)
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Failed collecting processed shards: {e}", level="error")
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed collecting processed shards: {e}", level="error")
         raise
 
     missing = collected["missing_shards"]
@@ -207,31 +279,48 @@ def handler(event, context):
     total_rows_read = collected["total_rows_read"]
     total_failed_rows = collected["total_failed_rows"]
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}")
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Collected {len(shards)} shard outputs. rows_read={total_rows_read}, failed_rows={total_failed_rows}",
+    )
 
-    # 2) Verify counts: workers rows_read must equal expected_count
+    # 3) Verify counts
     if total_rows_read != expected_count:
         err = f"{TASK_NAME} Row count mismatch: expected_count={expected_count}, workers rows_read={total_rows_read}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    # 3) Delete upload_staging partition once (safe even if empty)
+    # 4) Delete upload_staging partition once
     try:
-        delete_result = delete_job_rows_from_table(job_id,
-                                                    TASK_NAME,
-                                                    ICEBERG_DATABASE_NAME,
-                                                    UPLOAD_STAGING_TABLE_NAME,
-                                                    ATHENA_OUTPUT_S3,
-                                                    ATHENA_WORKGROUP)
+        delete_result = delete_job_rows_from_table(
+            job_id,
+            TASK_NAME,
+            ICEBERG_DATABASE_NAME,
+            UPLOAD_STAGING_TABLE_NAME,
+            ATHENA_OUTPUT_S3,
+            ATHENA_WORKGROUP,
+        )
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Deleted upload_staging partition, result={delete_result}")
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")
         raise
 
+    # 5) Write ingest handoff JSONL for Distributed Map
+    try:
+        handoff = write_ingest_handoff(job_id, shards)
+    except Exception as e:
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed writing ingest handoff: {e}", level="error")
+        raise
+
     return {
-        "shards": shards,
-        "original_count": int(expected_count),  # keep same field name used by post lambda
+        "plan_bucket": handoff["plan_bucket"],
+        "plan_key": handoff["plan_key"],
+        "plan_s3_uri": handoff["plan_s3_uri"],
+        "item_count": handoff["item_count"],
+        "original_count": int(expected_count),
         "total_rows_read": int(total_rows_read),
         "total_failed_rows": int(total_failed_rows),
         "processed_prefix": collected.get("processed_prefix"),

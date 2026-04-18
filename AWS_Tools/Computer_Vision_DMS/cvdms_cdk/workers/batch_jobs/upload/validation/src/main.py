@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-'''
-Memory is O(batch size), not O(1), because process_image accumulates the whole shard in memory. We can change to a more strategic
-processing and writing strategy, but as long as shard size and memory size are reasonable, we will keep it this way. Note for future change.
-'''
+"""
+Memory is O(batch size), not O(1), because process_image accumulates the whole shard in memory.
+We can change to a more strategic processing and writing strategy, but as long as shard size and
+memory size are reasonable, we will keep it this way. Note for future change.
+"""
 
 import os
 import io
@@ -11,6 +12,7 @@ import re
 import json
 import time
 import hashlib
+from datetime import datetime, timezone
 
 import boto3
 from PIL import Image
@@ -41,9 +43,33 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
 TASK_NAME = "[VAL_JOB_DEF]"
+STAGE_NAME = "validation-batch"
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processed"
 
 s3 = boto3.client("s3")
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _active_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
+
+def _completed_marker_key(shard_name: str) -> str:
+    return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
+def _write_json_marker(key: str, payload: dict) -> None:
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=key,
+        Body=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        ContentType="application/json",
+    )
+
+def _delete_marker_best_effort(key: str) -> None:
+    try:
+        s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
+    except Exception:
+        pass
 
 def manifest_shard_name(manifest_s3_uri: str) -> str:
     try:
@@ -57,14 +83,13 @@ def manifest_shard_name(manifest_s3_uri: str) -> str:
     return m.group(1) if m else fname
 
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
-
     # derive deterministic image uuid from job + source-ref
     temp_source_ref = line.get("source_ref")
 
     # Deterministic per-occurrence ID (unique even for duplicates)
     image_id = stable_uuid5(f"{JOB_ID}|{shard_name}|{line_idx}")
 
-    if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://") or line.get('issue'):
+    if not isinstance(temp_source_ref, str) or not temp_source_ref.startswith("s3://") or line.get("issue"):
         # malformed line -> failed row
         error_msg = line.get("issue") or f"missing/invalid temp source-ref: {temp_source_ref}"
         return {
@@ -232,7 +257,7 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         line=line,
         label_type=LABEL_TYPE,
         job_id=JOB_ID,
-        file_bucket_name=FILE_BUCKET_NAME
+        file_bucket_name=FILE_BUCKET_NAME,
     )
 
     if error_msg:
@@ -262,7 +287,6 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
         row["label_fingerprint"] = label_fingerprint
 
     row["validation_status"] = "passed"
-
     return row
 
 def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary: dict) -> None:
@@ -271,86 +295,151 @@ def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
 
     body = "\n".join(json.dumps(r) for r in processed_rows) + "\n"
-    write_s3_obj(FILE_BUCKET_NAME,
-                  jsonl_key,
-                  body,
-                  "application/x-ndjson",
-                 TASK_NAME)
-    write_s3_obj(FILE_BUCKET_NAME,
-                  summary_key,
-                  json.dumps(summary),
-                  "application/json",
-                  TASK_NAME)
+
+    write_s3_obj(
+        FILE_BUCKET_NAME,
+        jsonl_key,
+        body,
+        "application/x-ndjson",
+        TASK_NAME,
+    )
+    write_s3_obj(
+        FILE_BUCKET_NAME,
+        summary_key,
+        json.dumps(summary),
+        "application/json",
+        TASK_NAME,
+    )
     # write SUCCESS last
-    write_s3_obj(FILE_BUCKET_NAME,
-                  success_key,
-                  "",
-                  "text/plain",
-                  TASK_NAME)
+    write_s3_obj(
+        FILE_BUCKET_NAME,
+        success_key,
+        "",
+        "text/plain",
+        TASK_NAME,
+    )
 
 def main():
     start = time.time()
-
     shard_name = manifest_shard_name(MANIFEST_S3_URI)
 
-    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}")
+    active_key = _active_marker_key(shard_name)
+    completed_key = _completed_marker_key(shard_name)
+
+    _write_json_marker(
+        active_key,
+        {
+            "job_id": JOB_ID,
+            "stage": STAGE_NAME,
+            "shard": shard_name,
+            "request_id": None,
+            "started_at": _iso_now(),
+            "manifest_s3_uri": MANIFEST_S3_URI,
+            "label_type": LABEL_TYPE,
+            "data_source": DATA_SOURCE,
+            "source_split": SOURCE_SPLIT,
+        },
+    )
+
+    log(
+        JOB_ID,
+        USER,
+        EVENT_TYPE,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
+    )
 
     try:
-        mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
-    except ValueError as e:
-        raise RuntimeError(f"{TASK_NAME} Invalid MANIFEST_S3_URI: {e}")
-
-    obj = read_obj_with_retry(mb, mk, TASK_NAME)
-    if not obj:
-        raise RuntimeError(f"{TASK_NAME} Could not read manifest: {MANIFEST_S3_URI}")
-
-    processed_rows = []
-    total = 0
-    failed = 0
-    for line_idx, line_bytes in enumerate(obj["Body"].iter_lines(), start = 0):
-        if not line_bytes:
-            continue
-
-        s = line_bytes.decode("utf-8-sig").strip()
-        if not s:
-            continue
-
         try:
-            line = parse_json_object_line(s)
-        except Exception as e:
-            # malformed JSON -> failed row
-            line = {"issue": f"invalid JSON: {e}, raw =  {s}"}
+            mb, mk = parse_s3_uri(MANIFEST_S3_URI, TASK_NAME)
+        except ValueError as e:
+            raise RuntimeError(f"{TASK_NAME} Invalid MANIFEST_S3_URI: {e}")
 
-        if not isinstance(line, dict):
-            # non-dict JSON -> failed row (still preserves line count)
-            line = {"issue": f"expected dict, got {type(line).__name__}, raw =  {s}"}
+        obj = read_obj_with_retry(mb, mk, TASK_NAME)
+        if not obj:
+            raise RuntimeError(f"{TASK_NAME} Could not read manifest: {MANIFEST_S3_URI}")
 
-        row = process_image(line, shard_name=shard_name, line_idx=line_idx)
+        processed_rows = []
+        total = 0
+        failed = 0
 
-        total += 1
-        if row["validation_status"] != "passed":
-            failed += 1
-        processed_rows.append(row)
+        for line_idx, line_bytes in enumerate(obj["Body"].iter_lines(), start=0):
+            if not line_bytes:
+                continue
 
-    if total == 0:
-        raise RuntimeError(f"{TASK_NAME} No images found in manifest for shard={shard_name}")
+            s = line_bytes.decode("utf-8-sig").strip()
+            if not s:
+                continue
 
-    summary = {
-        "job_id": JOB_ID,
-        "shard_name": shard_name,
-        "label_type": LABEL_TYPE,
-        "rows_read": total,
-        "failed_rows": failed,
-        "processed_rows": len(processed_rows),
-        "manifest": MANIFEST_S3_URI,
-    }
+            try:
+                line = parse_json_object_line(s)
+            except Exception as e:
+                # malformed JSON -> failed row
+                line = {"issue": f"invalid JSON: {e}, raw = {s}"}
 
-    write_processed_outputs(shard_name, processed_rows, summary)
+            if not isinstance(line, dict):
+                # non-dict JSON -> failed row (still preserves line count)
+                line = {"issue": f"expected dict, got {type(line).__name__}, raw = {s}"}
 
-    elapsed = time.time() - start
-    log(JOB_ID, USER, EVENT_TYPE, LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} done shard={shard_name} rows_read={total} failed={failed} processed_rows={len(processed_rows)} time_s={elapsed:.1f}")
+            row = process_image(line, shard_name=shard_name, line_idx=line_idx)
+
+            total += 1
+            if row["validation_status"] != "passed":
+                failed += 1
+            processed_rows.append(row)
+
+        if total == 0:
+            raise RuntimeError(f"{TASK_NAME} No images found in manifest for shard={shard_name}")
+
+        summary = {
+            "job_id": JOB_ID,
+            "shard_name": shard_name,
+            "label_type": LABEL_TYPE,
+            "rows_read": total,
+            "failed_rows": failed,
+            "processed_rows": len(processed_rows),
+            "manifest": MANIFEST_S3_URI,
+        }
+
+        write_processed_outputs(shard_name, processed_rows, summary)
+
+        _write_json_marker(
+            completed_key,
+            {
+                "job_id": JOB_ID,
+                "stage": STAGE_NAME,
+                "shard": shard_name,
+                "completed_at": _iso_now(),
+                "rows_read": total,
+                "failed_rows": failed,
+                "processed_rows": len(processed_rows),
+                "manifest_s3_uri": MANIFEST_S3_URI,
+            },
+        )
+
+        elapsed = time.time() - start
+        log(
+            JOB_ID,
+            USER,
+            EVENT_TYPE,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} done shard={shard_name} rows_read={total} failed={failed} "
+            f"processed_rows={len(processed_rows)} time_s={elapsed:.1f}",
+        )
+
+    except Exception as e:
+        log(
+            JOB_ID,
+            USER,
+            EVENT_TYPE,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
+            level="error",
+        )
+        raise
+
+    finally:
+        _delete_marker_best_effort(active_key)
 
 if __name__ == "__main__":
     main()
