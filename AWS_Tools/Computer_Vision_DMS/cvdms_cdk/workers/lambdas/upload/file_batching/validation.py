@@ -116,6 +116,9 @@ def handler(event, context):
     if handoff_lines:
         handoff_content = "\n".join(handoff_lines) + "\n"
 
+    if total_images == 0:
+        raise RuntimeError(f"{TASK_NAME} original manifest contained zero images for job_id={job_id}")
+
     plan_s3_uri = write_s3_obj(
         FILE_BUCKET_NAME,
         handoff_key,

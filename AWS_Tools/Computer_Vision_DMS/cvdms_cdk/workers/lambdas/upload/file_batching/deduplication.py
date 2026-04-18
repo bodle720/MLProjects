@@ -225,6 +225,9 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise
 
+    if total_rows <= 0:
+        raise RuntimeError(f"{TASK_NAME} no upload_staging rows found for job {job_id}")
+
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Estimated total rows for job {job_id} = {total_rows} rows")
 
     prefix_len, target_rows = choose_prefix_length(

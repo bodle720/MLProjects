@@ -234,14 +234,6 @@ class UploadStack(Stack):
 
         upload_state_machine.apply_removal_policy(RemovalPolicy.DESTROY)
 
-        # Helpful for distributed map runs and safe cleanup of Batch work.
-        upload_state_machine.role.add_to_principal_policy(
-            iam.PolicyStatement(
-                actions=["batch:TerminateJob"],
-                resources=["*"],
-            )
-        )
-
         # Distributed Map child workflow permissions. The ingest helper already exposes
         # these as required state machine policies, but adding this once globally is safe
         # and also covers the batching Distributed Maps.

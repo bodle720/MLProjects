@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Any
 from constructs import Construct
 
 from aws_cdk import (
@@ -16,6 +16,7 @@ from aws_cdk import (
 )
 
 from config_models import BatchingStageConfig
+
 
 class BatchingStage(Construct):
     def __init__(
@@ -59,11 +60,21 @@ class BatchingStage(Construct):
               }
         - Step Functions Distributed Map reads the JSONL plan directly from S3, so large
           per-stage manifest arrays are never carried inline in execution state.
+
+        Important implementation note:
+        - We intentionally store the Map result under a named field like
+          $.validationStageBatchMapResults instead of relying on ResultPath: null.
+          In practice, preserving a non-null string ResultPath is more robust here
+          than depending on null surviving CustomState synthesis.
+        - We also shrink each child Batch result to just $.JobId so the stored array
+          stays small.
         """
         super().__init__(scope, construct_id)
 
         # kept for signature compatibility with existing callers
         _ = ce_maxv_cpus
+
+        batch_map_result_path = f"$.{stage_name}BatchMapResults"
 
         # ------------------------------------------------------------------
         # Batching lambda
@@ -343,28 +354,9 @@ class BatchingStage(Construct):
             timeout={"attemptDurationSeconds": int(Duration.hours(2).to_seconds())},
         )
 
-        container_env = {
-            "MANIFEST_S3_URI": sfn.JsonPath.string_at("$.manifest"),
-            "JOB_ID": sfn.JsonPath.string_at("$.job_id"),
-            "USER": sfn.JsonPath.string_at("$.user"),
-            "LABEL_TYPE": sfn.JsonPath.string_at("$.label_type"),
-            "DATA_SOURCE": sfn.JsonPath.string_at("$.data_source"),
-            "SOURCE_SPLIT": sfn.JsonPath.string_at("$.source_split"),
-            "PATH_PREFIX": sfn.JsonPath.string_at("$.path_prefix"),
-            "EVENT_TYPE": sfn.JsonPath.string_at("$.event_type"),
-            "FILE_BUCKET_NAME": file_bucket.bucket_name,
-            "SHA256_TABLE_NAME": sha256_table.table_name,
-            "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
-            "ATHENA_WORKGROUP": "primary",
-            "ICEBERG_DATABASE_NAME": iceberg_database_name,
-            "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
-            "AWS_REGION": region,
-            "AWS_DEFAULT_REGION": region,
-            "REGISTRATION_TIME": sfn.JsonPath.string_at("$.registration_time"),
-        }
-        if extra_container_env:
-            container_env.update(extra_container_env)
-
+        # --------------------------------------
+        # Map item selector
+        # --------------------------------------
         params = {
             "manifest.$": "$$.Map.Item.Value.manifest",
             "job_id.$": "$.job_id",
@@ -379,6 +371,36 @@ class BatchingStage(Construct):
         if extra_map_state_params:
             params.update(extra_map_state_params)
 
+        # --------------------------------------
+        # Container environment for raw ASL batch task
+        # --------------------------------------
+        batch_env_map: dict[str, Any] = {
+            "MANIFEST_S3_URI": "$.manifest",
+            "JOB_ID": "$.job_id",
+            "USER": "$.user",
+            "LABEL_TYPE": "$.label_type",
+            "DATA_SOURCE": "$.data_source",
+            "SOURCE_SPLIT": "$.source_split",
+            "PATH_PREFIX": "$.path_prefix",
+            "EVENT_TYPE": "$.event_type",
+            "FILE_BUCKET_NAME": file_bucket.bucket_name,
+            "SHA256_TABLE_NAME": sha256_table.table_name,
+            "ATHENA_OUTPUT_S3": f"s3://{file_bucket.bucket_name}/athena-results/",
+            "ATHENA_WORKGROUP": "primary",
+            "ICEBERG_DATABASE_NAME": iceberg_database_name,
+            "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
+            "AWS_REGION": region,
+            "AWS_DEFAULT_REGION": region,
+            "REGISTRATION_TIME": "$.registration_time",
+        }
+        if extra_container_env:
+            batch_env_map.update(extra_container_env)
+
+        batch_env_list = self._render_env_list(batch_env_map)
+
+        # --------------------------------------
+        # Distributed Map over S3 JSONL handoff plan
+        # --------------------------------------
         map_state_json = {
             "Type": "Map",
             "ItemReader": {
@@ -402,31 +424,14 @@ class BatchingStage(Construct):
                     f"{stage_name}BatchTask": {
                         "Type": "Task",
                         "Resource": "arn:aws:states:::batch:submitJob.sync",
+                        # Keep the stored map result tiny: each iteration returns only JobId.
+                        "OutputPath": "$.JobId",
                         "Parameters": {
                             "JobDefinition": job_def.attr_job_definition_arn,
                             "JobName": f"{stage_name.lower()}-batch",
                             "JobQueue": job_queue.job_queue_arn,
                             "ContainerOverrides": {
-                                "Environment": [
-                                    {"Name": "MANIFEST_S3_URI", "Value.$": "$.manifest"},
-                                    {"Name": "JOB_ID", "Value.$": "$.job_id"},
-                                    {"Name": "USER", "Value.$": "$.user"},
-                                    {"Name": "LABEL_TYPE", "Value.$": "$.label_type"},
-                                    {"Name": "DATA_SOURCE", "Value.$": "$.data_source"},
-                                    {"Name": "SOURCE_SPLIT", "Value.$": "$.source_split"},
-                                    {"Name": "PATH_PREFIX", "Value.$": "$.path_prefix"},
-                                    {"Name": "EVENT_TYPE", "Value.$": "$.event_type"},
-                                    {"Name": "FILE_BUCKET_NAME", "Value": file_bucket.bucket_name},
-                                    {"Name": "SHA256_TABLE_NAME", "Value": sha256_table.table_name},
-                                    {"Name": "ATHENA_OUTPUT_S3",
-                                     "Value": f"s3://{file_bucket.bucket_name}/athena-results/"},
-                                    {"Name": "ATHENA_WORKGROUP", "Value": "primary"},
-                                    {"Name": "ICEBERG_DATABASE_NAME", "Value": iceberg_database_name},
-                                    {"Name": "LOG_FIREHOSE_STREAM_NAME", "Value": firehose_delivery_stream_name},
-                                    {"Name": "AWS_REGION", "Value": region},
-                                    {"Name": "AWS_DEFAULT_REGION", "Value": region},
-                                    {"Name": "REGISTRATION_TIME", "Value.$": "$.registration_time"},
-                                ]
+                                "Environment": batch_env_list,
                             },
                         },
                         "Retry": [
@@ -442,7 +447,8 @@ class BatchingStage(Construct):
                 },
             },
             "MaxConcurrency": config.map_max_concurrency,
-            "ResultPath": None,
+            # Preserve the original workflow input and stash the small map result array here.
+            "ResultPath": batch_map_result_path,
             "OutputPath": "$",
         }
 
@@ -459,6 +465,7 @@ class BatchingStage(Construct):
         )
 
         # Explicit state machine permissions needed for the Distributed Map plan reader.
+        # Batch/EventBridge/PassRole permissions can be attached in UploadStack.
         self.state_machine_policy_statements = [
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
@@ -476,3 +483,26 @@ class BatchingStage(Construct):
         self.distributed_map = distributed_map
         self.job_def = job_def
         self.job_role = job_role
+
+    @staticmethod
+    def _render_env_list(env_map: dict[str, Any]) -> list[dict[str, str]]:
+        """
+        Render Step Functions Batch ContainerOverrides.Environment entries.
+
+        Convention:
+        - strings starting with '$.' or '$$.' are treated as JSONPath and rendered as Value.$
+        - all other values are rendered as literal Value strings
+        - None values are skipped
+        """
+        out: list[dict[str, str]] = []
+
+        for name, value in env_map.items():
+            if value is None:
+                continue
+
+            if isinstance(value, str) and (value.startswith("$.") or value.startswith("$$.")):
+                out.append({"Name": name, "Value.$": value})
+            else:
+                out.append({"Name": name, "Value": str(value)})
+
+        return out

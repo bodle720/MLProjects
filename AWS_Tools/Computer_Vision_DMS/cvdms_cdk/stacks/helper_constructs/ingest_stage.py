@@ -13,6 +13,7 @@ from aws_cdk import (
 
 from config_models import IngestStageConfig
 
+
 class IngestStage(Construct):
     def __init__(
         self,
@@ -58,6 +59,8 @@ class IngestStage(Construct):
         self.batch_plan_key_path = batch_plan_key_path
         self.batch_plan_s3_uri_path = batch_plan_s3_uri_path
         self.expected_count_path = expected_count_path
+
+        ingest_map_result_path = f"$.{stage_name}MapResults"
 
         lambda_env = {
             "FILE_BUCKET_NAME": self.file_bucket.bucket_name,
@@ -137,9 +140,8 @@ class IngestStage(Construct):
 
         # --------------------------------------
         # Distributed Map over an S3 JSONL handoff file produced by the pre-lambda.
-        # We use CustomState because Step Functions ASL supports dynamic Bucket.$ / Key.$
-        # for ItemReader.Parameters, while the current CDK S3JsonLItemReader convenience
-        # API only exposes dynamic bucket name, not a dynamic key path.
+        # We intentionally store the map result under a named field instead of relying
+        # on ResultPath: null / DISCARD semantics for CustomState.
         # --------------------------------------
         map_state_json = {
             "Type": "Map",
@@ -201,7 +203,7 @@ class IngestStage(Construct):
                 "image_source_membership_key.$": "$$.Map.Item.Value.image_source_membership_key",
             },
             "MaxConcurrency": config.map_max_concurrency,
-            "ResultPath": None,
+            "ResultPath": ingest_map_result_path,
             "OutputPath": "$",
         }
 
@@ -255,7 +257,11 @@ class IngestStage(Construct):
             ),
         )
 
-        post_ingest_task.add_retry(backoff_rate=2.0, max_attempts=2, interval=Duration.seconds(2))
+        post_ingest_task.add_retry(
+            backoff_rate=2.0,
+            max_attempts=2,
+            interval=Duration.seconds(2),
+        )
 
         post_ingest_task.add_catch(
             handler=self.dlq_chain_factory(),
