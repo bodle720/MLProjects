@@ -70,18 +70,22 @@ LABEL_TYPE_BY_TABLE = {
     CANONICAL_INSTANCE_TABLE_NAME: "instance-segmentation",
 }
 
+
 def chunked(lst: List, n: int) -> Iterable[List]:
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
 
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _remaining_ms(context: Any) -> Optional[int]:
     try:
         return int(context.get_remaining_time_in_millis())
     except Exception:
         return None
+
 
 def _log_traceback(job_id: str, user: str, event_type: str, prefix: str, exc: Exception) -> None:
     tb = traceback.format_exc()
@@ -94,6 +98,7 @@ def _log_traceback(job_id: str, user: str, event_type: str, prefix: str, exc: Ex
         level="error",
     )
 
+
 def _log_phase_start(job_id: str, user: str, event_type: str, phase: str, detail: str = "") -> float:
     msg = f"{TASK_NAME} START phase={phase}"
     if detail:
@@ -101,12 +106,14 @@ def _log_phase_start(job_id: str, user: str, event_type: str, phase: str, detail
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
     return time.monotonic()
 
+
 def _log_phase_done(job_id: str, user: str, event_type: str, phase: str, started_at: float, detail: str = "") -> None:
     elapsed = time.monotonic() - started_at
     msg = f"{TASK_NAME} DONE phase={phase} elapsed_s={elapsed:.1f}"
     if detail:
         msg += f" {detail}"
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg)
+
 
 def _check_time_budget(context: Any, job_id: str, user: str, event_type: str, phase: str) -> None:
     remaining = _remaining_ms(context)
@@ -126,6 +133,7 @@ def _check_time_budget(context: Any, job_id: str, user: str, event_type: str, ph
             level="warning",
         )
 
+
 def _is_retryable_iceberg_commit_error(exc: Exception | str) -> bool:
     text = str(exc)
     return (
@@ -133,10 +141,12 @@ def _is_retryable_iceberg_commit_error(exc: Exception | str) -> bool:
         or "Failed to commit Iceberg update" in text
     )
 
+
 def _sleep_with_backoff(attempt_index: int) -> None:
     delay = COMMIT_RETRY_BASE_SLEEP_SEC * (2 ** attempt_index)
     delay += random.uniform(0.0, COMMIT_RETRY_JITTER_SEC)
     time.sleep(delay)
+
 
 def _run_athena_with_commit_retry(
     sql: str,
@@ -173,6 +183,7 @@ def _run_athena_with_commit_retry(
 
     raise RuntimeError(f"{TASK_NAME} unexpected rollback Athena failure in {op_name}")
 
+
 def _safe_s3_key_from_uri(uri: str) -> Optional[str]:
     if not isinstance(uri, str) or not uri.startswith("s3://"):
         return None
@@ -184,10 +195,12 @@ def _safe_s3_key_from_uri(uri: str) -> Optional[str]:
     except Exception:
         return None
 
+
 def _read_json_key(key: str) -> Dict:
     resp = s3.get_object(Bucket=FILE_BUCKET_NAME, Key=key)
     body = resp["Body"].read().decode("utf-8")
     return json.loads(body)
+
 
 def _list_registration_processed_keys(job_id: str) -> List[str]:
     prefix = f"temp/image-upload/{job_id}/batches/registration-step/processed/"
@@ -195,6 +208,7 @@ def _list_registration_processed_keys(job_id: str) -> List[str]:
         return s3_list_keys(FILE_BUCKET_NAME, prefix)
     except Exception:
         return []
+
 
 def _list_active_worker_markers(job_id: str) -> List[Tuple[str, datetime]]:
     prefix = f"temp/image-upload/{job_id}/worker-markers/"
@@ -210,6 +224,7 @@ def _list_active_worker_markers(job_id: str) -> List[Tuple[str, datetime]]:
             if isinstance(last_modified, datetime):
                 out.append((key, last_modified))
     return out
+
 
 def _wait_for_worker_quiescence_or_raise(job_id: str, user: str, event_type: str) -> None:
     start = time.time()
@@ -262,6 +277,7 @@ def _wait_for_worker_quiescence_or_raise(job_id: str, user: str, event_type: str
 
         time.sleep(QUIESCENCE_POLL_SEC)
 
+
 def _athena_fetch_rows_1col(qid: str) -> List[str]:
     out: List[str] = []
     rows = athena_fetch_all_rows(qid)
@@ -273,6 +289,7 @@ def _athena_fetch_rows_1col(qid: str) -> List[str]:
                 out.append(value.strip())
                 break
     return out
+
 
 def _athena_fetch_rows_2col(qid: str) -> List[Tuple[str, str]]:
     out: List[Tuple[str, str]] = []
@@ -288,6 +305,7 @@ def _athena_fetch_rows_2col(qid: str) -> List[Tuple[str, str]]:
         if a and b:
             out.append((a, b))
     return out
+
 
 def _query_new_image_ids_from_upload_staging(job_id: str) -> List[str]:
     safe_job_id = escape_sql_string(job_id)
@@ -307,6 +325,7 @@ def _query_new_image_ids_from_upload_staging(job_id: str) -> List[str]:
     )
     vals = _athena_fetch_rows_1col(qid)
     return sorted(set(vals))
+
 
 def _query_new_sha_mappings_from_upload_staging(job_id: str) -> List[Tuple[str, str]]:
     safe_job_id = escape_sql_string(job_id)
@@ -330,6 +349,7 @@ def _query_new_sha_mappings_from_upload_staging(job_id: str) -> List[Tuple[str, 
     )
     rows = _athena_fetch_rows_2col(qid)
     return sorted(set(rows))
+
 
 def _query_canonical_image_keys_for_image_ids(image_ids: List[str]) -> List[str]:
     if not image_ids:
@@ -362,6 +382,7 @@ def _query_canonical_image_keys_for_image_ids(image_ids: List[str]) -> List[str]
 
     return sorted(out)
 
+
 def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int, int, int]:
     deleted = 0
     skipped = 0
@@ -385,14 +406,23 @@ def delete_sha256_entries_for_job(mappings: List[Tuple[str, str]]) -> Tuple[int,
 
     return deleted, skipped, errors
 
+
 def _load_batch_rollback_seeds(
     processed_keys: List[str],
-) -> Tuple[List[str], List[str], List[Tuple[str, str]]]:
+) -> Tuple[List[str], List[str], List[str], List[Tuple[str, str]]]:
+    """
+    Returns:
+      new_image_ids,
+      canonical_image_keys_to_delete,
+      canonical_label_keys_to_delete,   # safe because reg worker only writes NEW-ONLY label object keys
+      sha256_mappings_to_delete
+    """
     rollback_seed_keys = [k for k in processed_keys if "/rollback-batch/" in k and k.endswith(".json")]
     rollback_seed_keys.sort()
 
     new_image_ids: Set[str] = set()
     canonical_image_keys: Set[str] = set()
+    canonical_label_keys: Set[str] = set()
     sha_mappings: Set[Tuple[str, str]] = set()
 
     for key in rollback_seed_keys:
@@ -409,13 +439,23 @@ def _load_batch_rollback_seeds(
             if isinstance(image_key, str) and image_key.strip():
                 canonical_image_keys.add(image_key.strip())
 
+        for label_key in payload.get("canonical_label_keys_to_delete", []) or []:
+            if isinstance(label_key, str) and label_key.strip():
+                canonical_label_keys.add(label_key.strip())
+
         for row in payload.get("sha256_mappings_to_delete", []) or []:
             sha = row.get("sha256")
             iid = row.get("image_id")
             if isinstance(sha, str) and sha.strip() and isinstance(iid, str) and iid.strip():
                 sha_mappings.add((sha.strip(), iid.strip()))
 
-    return sorted(new_image_ids), sorted(canonical_image_keys), sorted(sha_mappings)
+    return (
+        sorted(new_image_ids),
+        sorted(canonical_image_keys),
+        sorted(canonical_label_keys),
+        sorted(sha_mappings),
+    )
+
 
 def _load_canonical_image_object_keys_from_processed_rows(processed_keys: List[str]) -> List[str]:
     imagery_jsonls = [k for k in processed_keys if "/canonical_imagery/" in k and k.endswith(".jsonl")]
@@ -432,6 +472,7 @@ def _load_canonical_image_object_keys_from_processed_rows(processed_keys: List[s
             keys.add(key)
 
     return sorted(keys)
+
 
 def _load_exact_rollback_targets(processed_keys: List[str]) -> Tuple[Set[Tuple[str, str, str]], List[Tuple[str, str]]]:
     rollback_keys = [k for k in processed_keys if "/rollback/" in k and k.endswith(".json")]
@@ -465,6 +506,7 @@ def _load_exact_rollback_targets(processed_keys: List[str]) -> Tuple[Set[Tuple[s
 
     return image_label_keys, sorted(image_source_membership_keys)
 
+
 def _delete_canonical_imagery_rows(image_ids: List[str]) -> None:
     if not image_ids:
         return
@@ -472,6 +514,7 @@ def _delete_canonical_imagery_rows(image_ids: List[str]) -> None:
         in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{CANONICAL_IMAGERY_TABLE_NAME}" WHERE image_id IN ({in_list})'
         _run_athena_with_commit_retry(sql, op_name=f"{TASK_NAME} delete_canonical_imagery")
+
 
 def _delete_image_labels_for_images(image_ids: List[str]) -> None:
     if not image_ids:
@@ -481,6 +524,7 @@ def _delete_image_labels_for_images(image_ids: List[str]) -> None:
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}" WHERE image_id IN ({in_list})'
         _run_athena_with_commit_retry(sql, op_name=f"{TASK_NAME} delete_image_labels_for_images")
 
+
 def _delete_image_source_memberships_for_images(image_ids: List[str]) -> None:
     if not image_ids:
         return
@@ -488,6 +532,7 @@ def _delete_image_source_memberships_for_images(image_ids: List[str]) -> None:
         in_list = ", ".join(f"'{escape_sql_string(i)}'" for i in chunk)
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME}" WHERE image_id IN ({in_list})'
         _run_athena_with_commit_retry(sql, op_name=f"{TASK_NAME} delete_image_source_memberships_for_images")
+
 
 def _delete_exact_image_labels(keys: Set[Tuple[str, str, str]]) -> None:
     if not keys:
@@ -506,6 +551,7 @@ def _delete_exact_image_labels(keys: Set[Tuple[str, str, str]]) -> None:
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_LABELS_TABLE_NAME}" WHERE {where_sql}'
         _run_athena_with_commit_retry(sql, op_name=f"{TASK_NAME} delete_exact_image_labels")
 
+
 def _delete_exact_image_source_memberships(keys: List[Tuple[str, str]]) -> None:
     if not keys:
         return
@@ -520,6 +566,7 @@ def _delete_exact_image_source_memberships(keys: List[Tuple[str, str]]) -> None:
         where_sql = " OR ".join(clauses)
         sql = f'DELETE FROM "{ICEBERG_DATABASE_NAME}"."{IMAGE_SOURCE_MEMBERSHIP_TABLE_NAME}" WHERE {where_sql}'
         _run_athena_with_commit_retry(sql, op_name=f"{TASK_NAME} delete_exact_image_source_memberships")
+
 
 def _load_owner_label_rows(processed_keys: List[str]) -> Dict[str, List[Dict]]:
     owner_jsonls = [k for k in processed_keys if "/canonical_labels_by_fingerprint/" in k and k.endswith(".jsonl")]
@@ -539,6 +586,7 @@ def _load_owner_label_rows(processed_keys: List[str]) -> Dict[str, List[Dict]]:
 
     return out
 
+
 def _extract_label_s3_keys(rows: List[Dict]) -> List[str]:
     keys: List[str] = []
     seen = set()
@@ -551,6 +599,7 @@ def _extract_label_s3_keys(rows: List[Dict]) -> List[str]:
                 keys.append(k)
     return keys
 
+
 def _label_key_col(table: str) -> str:
     schema = TABLES.get(table)
     if not schema or not schema.key_cols:
@@ -558,6 +607,7 @@ def _label_key_col(table: str) -> str:
     if len(schema.key_cols) != 1:
         raise RuntimeError(f"{TASK_NAME} expected single key col for table={table}, got {schema.key_cols}")
     return schema.key_cols[0]
+
 
 def _label_ids_from_rows(table: str, rows: List[Dict]) -> List[str]:
     kcol = _label_key_col(table)
@@ -569,6 +619,7 @@ def _label_ids_from_rows(table: str, rows: List[Dict]) -> List[str]:
             seen.add(v.strip())
             out.append(v.strip())
     return out
+
 
 def _find_referenced_label_ids(label_type: str, label_ids: List[str]) -> Set[str]:
     if not label_ids:
@@ -597,6 +648,7 @@ def _find_referenced_label_ids(label_type: str, label_ids: List[str]) -> Set[str
 
     return referenced
 
+
 def _delete_canonical_label_rows_if_orphaned(table: str, label_type: str, rows: List[Dict]) -> Tuple[List[str], int]:
     if not rows:
         return [], 0
@@ -620,6 +672,7 @@ def _delete_canonical_label_rows_if_orphaned(table: str, label_type: str, rows: 
 
     return to_delete, skipped
 
+
 def _drop_ctas_tables_best_effort(job_id: str) -> None:
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     candidates = [
@@ -632,6 +685,7 @@ def _drop_ctas_tables_best_effort(job_id: str) -> None:
             run_athena(sql, TASK_NAME, ATHENA_OUTPUT_S3, ATHENA_WORKGROUP, poll=2.0, timeout=300)
         except Exception:
             pass
+
 
 def _normalize_error_message(error_msg: object) -> str:
     if not isinstance(error_msg, str):
@@ -648,6 +702,7 @@ def _normalize_error_message(error_msg: object) -> str:
         pass
     return msg
 
+
 def _s3_object_exists(bucket: str, key: str) -> bool:
     try:
         s3.head_object(Bucket=bucket, Key=key)
@@ -657,6 +712,7 @@ def _s3_object_exists(bucket: str, key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
 
 def delete_s3_keys_strict(bucket: str, keys: List[str], batch_size: int = 1000) -> Dict[str, object]:
     unique_keys = sorted({k.strip() for k in keys if isinstance(k, str) and k.strip()})
@@ -708,8 +764,10 @@ def delete_s3_keys_strict(bucket: str, keys: List[str], batch_size: int = 1000) 
         "verify_error_samples": verify_error_samples[:10],
     }
 
+
 def _temp_job_prefix(job_id: str) -> str:
     return f"temp/image-upload/{job_id}/"
+
 
 def _list_temp_job_keys(job_id: str) -> List[str]:
     prefix = _temp_job_prefix(job_id)
@@ -718,6 +776,7 @@ def _list_temp_job_keys(job_id: str) -> List[str]:
         k for k in keys
         if isinstance(k, str) and k.strip() and not k.endswith("/")
     )
+
 
 def _cleanup_temp_prefix_best_effort(
     job_id: str,
@@ -829,6 +888,7 @@ def _cleanup_temp_prefix_best_effort(
     except Exception as e:
         _log_traceback(job_id, user, event_type, "temp prefix cleanup failed (best-effort)", e)
 
+
 def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
     try:
         body = json.loads(record["body"])
@@ -861,7 +921,13 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
     phase = _log_phase_start(job_id, user, event_type, "gather_rollback_sources")
     processed_keys = _list_registration_processed_keys(job_id)
 
-    batch_new_image_ids, batch_canonical_image_keys, batch_sha_mappings = _load_batch_rollback_seeds(processed_keys)
+    (
+        batch_new_image_ids,
+        batch_canonical_image_keys,
+        batch_canonical_label_keys,
+        batch_sha_mappings,
+    ) = _load_batch_rollback_seeds(processed_keys)
+
     processed_canonical_image_keys = _load_canonical_image_object_keys_from_processed_rows(processed_keys)
     rollback_label_keys, rollback_source_membership_keys = _load_exact_rollback_targets(processed_keys)
 
@@ -913,6 +979,8 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
         | set(table_canonical_image_keys)
     )
 
+    canonical_label_seed_keys_to_delete = sorted(set(batch_canonical_label_keys))
+
     log(
         job_id,
         user,
@@ -929,6 +997,17 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
             f"sample_union_keys={canonical_image_keys_to_delete[:5]}"
         ),
     )
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        (
+            f"{TASK_NAME} Canonical label object seed cleanup sources: "
+            f"seed_only_keys={len(canonical_label_seed_keys_to_delete)} "
+            f"sample_seed_keys={canonical_label_seed_keys_to_delete[:5]}"
+        ),
+    )
     _log_phase_done(
         job_id,
         user,
@@ -938,19 +1017,34 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
         detail=(
             f"processed_keys={len(processed_keys)} rollback_label_keys={len(rollback_label_keys)} "
             f"rollback_source_membership_keys={len(rollback_source_membership_keys)} new_image_ids={len(new_image_ids)} "
-            f"sha_candidates={len(batch_sha_mappings)} canonical_image_keys={len(canonical_image_keys_to_delete)}"
+            f"sha_candidates={len(batch_sha_mappings)} canonical_image_keys={len(canonical_image_keys_to_delete)} "
+            f"canonical_label_seed_keys={len(canonical_label_seed_keys_to_delete)}"
         ),
     )
 
     critical_failures: List[str] = []
 
     # 2) Registration-side rollback
+
     if rollback_label_keys:
         try:
             _check_time_budget(context, job_id, user, event_type, "delete_exact_image_labels")
-            phase = _log_phase_start(job_id, user, event_type, "delete_exact_image_labels", detail=f"count={len(rollback_label_keys)}")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                "delete_exact_image_labels",
+                detail=f"count={len(rollback_label_keys)}",
+            )
             _delete_exact_image_labels(rollback_label_keys)
-            _log_phase_done(job_id, user, event_type, "delete_exact_image_labels", phase, detail=f"count={len(rollback_label_keys)}")
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_exact_image_labels",
+                phase,
+                detail=f"count={len(rollback_label_keys)}",
+            )
         except Exception as e:
             _log_traceback(job_id, user, event_type, "delete_exact_image_labels failed", e)
             critical_failures.append(f"exact image_labels rollback failed: {e}")
@@ -981,10 +1075,23 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
     if new_image_ids:
         try:
             _check_time_budget(context, job_id, user, event_type, "delete_new_image_linkage")
-            phase = _log_phase_start(job_id, user, event_type, "delete_new_image_linkage", detail=f"count={len(new_image_ids)}")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                "delete_new_image_linkage",
+                detail=f"count={len(new_image_ids)}",
+            )
             _delete_image_labels_for_images(new_image_ids)
             _delete_image_source_memberships_for_images(new_image_ids)
-            _log_phase_done(job_id, user, event_type, "delete_new_image_linkage", phase, detail=f"count={len(new_image_ids)}")
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_new_image_linkage",
+                phase,
+                detail=f"count={len(new_image_ids)}",
+            )
         except Exception as e:
             _log_traceback(job_id, user, event_type, "delete_new_image_linkage failed", e)
             critical_failures.append(f"new-image linkage rollback failed: {e}")
@@ -1060,9 +1167,22 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
     if new_image_ids and canonical_image_objects_ok:
         try:
             _check_time_budget(context, job_id, user, event_type, "delete_canonical_imagery_rows")
-            phase = _log_phase_start(job_id, user, event_type, "delete_canonical_imagery_rows", detail=f"count={len(new_image_ids)}")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                "delete_canonical_imagery_rows",
+                detail=f"count={len(new_image_ids)}",
+            )
             _delete_canonical_imagery_rows(new_image_ids)
-            _log_phase_done(job_id, user, event_type, "delete_canonical_imagery_rows", phase, detail=f"count={len(new_image_ids)}")
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_canonical_imagery_rows",
+                phase,
+                detail=f"count={len(new_image_ids)}",
+            )
             log(
                 job_id,
                 user,
@@ -1101,6 +1221,7 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
         _log_traceback(job_id, user, event_type, "load_owner_label_rows failed", e)
         critical_failures.append(f"load owner label rows failed: {e}")
 
+    # Keep row deletion safety exactly as before: orphan-check only.
     for table, rows in owner_rows_by_table.items():
         if not rows:
             continue
@@ -1203,6 +1324,75 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
         except Exception as e:
             _log_traceback(job_id, user, event_type, f"canonical label rollback failed table={table}", e)
             critical_failures.append(f"canonical label rollback failed table={table}: {e}")
+
+    # NEW: delete seed-listed canonical label OBJECTS even when owner rows are absent.
+    # These keys are safe because the registration worker now records only NEW-ONLY keys.
+    if canonical_label_seed_keys_to_delete:
+        try:
+            _check_time_budget(context, job_id, user, event_type, "delete_seed_canonical_label_objects")
+            phase = _log_phase_start(
+                job_id,
+                user,
+                event_type,
+                "delete_seed_canonical_label_objects",
+                detail=f"count={len(canonical_label_seed_keys_to_delete)}",
+            )
+            label_seed_delete_result = delete_s3_keys_strict(FILE_BUCKET_NAME, canonical_label_seed_keys_to_delete)
+            _log_phase_done(
+                job_id,
+                user,
+                event_type,
+                "delete_seed_canonical_label_objects",
+                phase,
+                detail=(
+                    f"attempted={label_seed_delete_result['attempted']} "
+                    f"api_error_count={label_seed_delete_result['api_error_count']} "
+                    f"survivor_count={label_seed_delete_result['survivor_count']} "
+                    f"verify_error_count={label_seed_delete_result['verify_error_count']}"
+                ),
+            )
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} Canonical label object seed cleanup result: "
+                    f"attempted={label_seed_delete_result['attempted']} "
+                    f"api_error_count={label_seed_delete_result['api_error_count']} "
+                    f"survivor_count={label_seed_delete_result['survivor_count']} "
+                    f"verify_error_count={label_seed_delete_result['verify_error_count']} "
+                    f"api_error_samples={label_seed_delete_result['api_error_samples']} "
+                    f"survivor_samples={label_seed_delete_result['survivor_samples']} "
+                    f"verify_error_samples={label_seed_delete_result['verify_error_samples']}"
+                ),
+                level=(
+                    "warning"
+                    if (
+                        label_seed_delete_result["api_error_count"]
+                        or label_seed_delete_result["survivor_count"]
+                        or label_seed_delete_result["verify_error_count"]
+                    )
+                    else "info"
+                ),
+            )
+
+            if (
+                label_seed_delete_result["api_error_count"]
+                or label_seed_delete_result["survivor_count"]
+                or label_seed_delete_result["verify_error_count"]
+            ):
+                critical_failures.append(
+                    "canonical label seed object cleanup failed: "
+                    f"attempted={label_seed_delete_result['attempted']} "
+                    f"api_error_count={label_seed_delete_result['api_error_count']} "
+                    f"survivor_count={label_seed_delete_result['survivor_count']} "
+                    f"verify_error_count={label_seed_delete_result['verify_error_count']} "
+                    f"survivor_samples={label_seed_delete_result['survivor_samples']}"
+                )
+        except Exception as e:
+            _log_traceback(job_id, user, event_type, "delete_seed_canonical_label_objects failed", e)
+            critical_failures.append(f"canonical label seed object cleanup failed: {e}")
 
     try:
         _check_time_budget(context, job_id, user, event_type, "sha256_rollback")
@@ -1308,6 +1498,7 @@ def _process_one_record(record: Dict[str, object], context: Any = None) -> None:
         LOG_FIREHOSE_STREAM_NAME,
         f"{TASK_NAME} Rollback complete for job {job_id}. total_elapsed_s={total_elapsed:.1f}",
     )
+
 
 def handler(event, context):
     total_records = 0

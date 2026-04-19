@@ -31,7 +31,7 @@ from helpers import (
     copy_objects_or_raise,
     fingerprint_owner_shard_id,
     build_owner_label_output_key,
-    sha_mapping_row
+    sha_mapping_row,
 )
 
 MANIFEST_S3_URI = os.environ["MANIFEST_S3_URI"].strip()
@@ -74,14 +74,18 @@ OWNER_SHARDS = 512  # keep aligned with batching MAX_SHARDS
 ddb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
+
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -91,14 +95,17 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
+
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
 
+
 def _rollback_seed_key(shard_name: str) -> str:
     return f"{PROCESSED_PREFIX}/rollback-batch/shard-{shard_name}.json"
+
 
 def _write_batch_rollback_seed(
     *,
@@ -108,6 +115,10 @@ def _write_batch_rollback_seed(
     canonical_label_keys_to_delete: List[str],
     sha256_mappings_to_delete: List[Dict[str, str]],
 ) -> str:
+    """
+    canonical_label_keys_to_delete must contain only canonical label object keys
+    that were newly created by this job (not preexisting keys reused by fingerprint).
+    """
     payload = {
         "job_id": JOB_ID,
         "shard": shard_name,
@@ -130,6 +141,49 @@ def _write_batch_rollback_seed(
         TASK_NAME,
     )
     return key
+
+
+def _s3_object_exists(bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def _filter_new_s3_keys_for_rollback(
+    *,
+    bucket: str,
+    keys: List[str],
+    existence_cache: Dict[str, bool],
+) -> List[str]:
+    """
+    Return only destination keys that did not already exist before this job.
+
+    This is the critical safety rule for canonical label objects:
+    - if a fingerprint-backed object already existed from a prior run, do NOT put it
+      in rollback seeds
+    - if it did not exist before this job, it is safe to include for rollback
+    """
+    out: List[str] = []
+
+    for key in keys:
+        if not isinstance(key, str) or not key.strip():
+            continue
+        norm_key = key.strip()
+
+        if norm_key not in existence_cache:
+            existence_cache[norm_key] = _s3_object_exists(bucket, norm_key)
+
+        existed_before = existence_cache[norm_key]
+        if not existed_before:
+            out.append(norm_key)
+
+    return out
+
 
 def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
     """
@@ -174,6 +228,7 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
             f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}"
         )
 
+
 def _execute_side_effects(
     *,
     copy_plan_all: List[Tuple[str, str, str, str]],
@@ -188,6 +243,7 @@ def _execute_side_effects(
             image_id=row["image_id"],
         )
 
+
 def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
@@ -199,10 +255,16 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, str]],              # sha_mappings_to_put
     List[str],                         # new_image_ids
     List[str],                         # canonical_image_keys_to_delete
-    List[str],                         # canonical_label_keys_to_delete
+    List[str],                         # canonical_label_keys_to_delete (ONLY newly created objects)
 ]:
     """
     Planning only. NO side effects here.
+
+    Important rollback behavior:
+    - canonical_image_keys_to_delete: safe because dstat='passed' images are newly canonicalized
+    - canonical_label_keys_to_delete: include ONLY label object keys that did not already exist
+      before this job. This prevents rollback from deleting preexisting fingerprint-backed label
+      objects created by earlier runs.
     """
     files = manifest.get("files", []) or []
     shard_name = manifest.get("shard_prefix", "shard")
@@ -237,6 +299,9 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
 
     # One upload job has one data_source/source_split, but dedupe membership rows anyway.
     seen_source_memberships: Dict[Tuple[str, str], Any] = {}
+
+    # Cache "did this canonical label object already exist before this job?" checks.
+    label_object_existence_cache: Dict[str, bool] = {}
 
     for row in read_parquet_rows_from_s3_uris(files):
         total_rows += 1
@@ -342,7 +407,14 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
                     )
 
                     copy_plan.extend(label_copy_plan)
-                    rollback_canonical_label_keys.extend(label_dst_keys)
+
+                    # Only mark truly new canonical label objects for rollback.
+                    newly_created_label_keys = _filter_new_s3_keys_for_rollback(
+                        bucket=FILE_BUCKET_NAME,
+                        keys=label_dst_keys,
+                        existence_cache=label_object_existence_cache,
+                    )
+                    rollback_canonical_label_keys.extend(newly_created_label_keys)
 
                     if fingerprint not in seen_fingerprints:
                         label_row = build_canonical_label_table_row(
@@ -448,7 +520,13 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
                         temp_instance_meta_uri=row.get("temp_source_ref_instance_meta"),
                     )
 
-                    rollback_canonical_label_keys.extend(label_dst_keys)
+                    # Only mark truly new canonical label objects for rollback.
+                    newly_created_label_keys = _filter_new_s3_keys_for_rollback(
+                        bucket=FILE_BUCKET_NAME,
+                        keys=label_dst_keys,
+                        existence_cache=label_object_existence_cache,
+                    )
+                    rollback_canonical_label_keys.extend(newly_created_label_keys)
 
                     for cp in label_copy_plan:
                         if cp not in seen_copy_ops:
@@ -512,6 +590,8 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
         "image_source_membership_rows": len(image_source_membership_rows),
         "canonical_label_owner_shards_touched": owner_shards_touched,
         "canonical_label_rows_total": sum(len(v) for v in canonical_label_rows_by_owner.values()),
+        "rollback_canonical_image_keys": len(set(rollback_canonical_image_keys)),
+        "rollback_canonical_label_keys_new_only": len(set(rollback_canonical_label_keys)),
     }
 
     return (
@@ -527,6 +607,7 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
         rollback_canonical_image_keys,
         rollback_canonical_label_keys,
     )
+
 
 def write_outputs(
     shard_name: str,
@@ -572,6 +653,7 @@ def write_outputs(
         TASK_NAME,
     )
     write_s3_obj(bucket, success_key, b"", "text/plain", TASK_NAME)
+
 
 def main():
     start = time.time()
@@ -673,6 +755,8 @@ def main():
             f"canon_label_rows={summary['canonical_label_rows_total']} "
             f"owner_shards={len(summary['canonical_label_owner_shards_touched'])} "
             f"new_image_ids={len(new_image_ids)} "
+            f"rollback_canonical_image_keys={summary['rollback_canonical_image_keys']} "
+            f"rollback_canonical_label_keys_new_only={summary['rollback_canonical_label_keys_new_only']} "
             f"rollback_seed=s3://{FILE_BUCKET_NAME}/{rollback_seed_key} "
             f"time_s={elapsed:.1f}",
         )
@@ -690,6 +774,7 @@ def main():
 
     finally:
         _delete_marker_best_effort(active_key)
+
 
 if __name__ == "__main__":
     main()
