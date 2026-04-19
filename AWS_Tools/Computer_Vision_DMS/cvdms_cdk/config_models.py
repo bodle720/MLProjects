@@ -57,9 +57,16 @@ class StateMachineConfig:
     duration_hours: int
 
 @dataclass
+class BatchSizingConfig:
+    estimated_item_size_kb: int
+    memory_safety_factor: float
+    min_items_per_shard: int
+    max_items_per_shard: int
+
+@dataclass
 class BatchTaskJobDefConfig:
     vcpus: int
-    memory_limit_mib: int
+    worker_memory_mb: int
     directory: str
     file: str
 
@@ -68,6 +75,7 @@ class BatchingStageConfig:
     file_batching: LambdaConfig
     map_max_concurrency: int
     batch_task_job_def: BatchTaskJobDefConfig
+    batch_sizing: BatchSizingConfig
 
 @dataclass
 class IngestStageConfig:

@@ -21,14 +21,36 @@ BATCH_HANDOFF_FILE_NAME = os.environ.get("BATCH_HANDOFF_FILE_NAME", "map-items.j
 
 TASK_NAME = "[REG_FILE_BATCHING]"
 
-# Tunables
-AVG_ROW_KB = 2.0
-MEMORY_SAFETY_FACTOR = 0.5
-MIN_ROWS_PER_SHARD = 250
-MAX_ROWS_PER_SHARD = 500
-JOB_MEMORY_MB = 4096
+# Tunables from config/env
+WORKER_MEMORY_MB = int(os.environ.get("WORKER_MEMORY_MB", "4096"))
+ESTIMATED_ITEM_SIZE_KB = float(os.environ.get("ESTIMATED_ITEM_SIZE_KB", "2"))
+MEMORY_SAFETY_FACTOR = float(os.environ.get("MEMORY_SAFETY_FACTOR", "0.5"))
+MIN_ITEMS_PER_SHARD = int(os.environ.get("MIN_ITEMS_PER_SHARD", "500"))
+MAX_ITEMS_PER_SHARD = int(os.environ.get("MAX_ITEMS_PER_SHARD", "1000"))
 
+if WORKER_MEMORY_MB <= 0:
+    raise RuntimeError(f"{TASK_NAME} WORKER_MEMORY_MB must be > 0, got {WORKER_MEMORY_MB}")
+if ESTIMATED_ITEM_SIZE_KB <= 0:
+    raise RuntimeError(f"{TASK_NAME} ESTIMATED_ITEM_SIZE_KB must be > 0, got {ESTIMATED_ITEM_SIZE_KB}")
+if not (0 < MEMORY_SAFETY_FACTOR <= 1):
+    raise RuntimeError(
+        f"{TASK_NAME} MEMORY_SAFETY_FACTOR must be in (0, 1], got {MEMORY_SAFETY_FACTOR}"
+    )
+if MIN_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MIN_ITEMS_PER_SHARD must be > 0, got {MIN_ITEMS_PER_SHARD}")
+if MAX_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MAX_ITEMS_PER_SHARD must be > 0, got {MAX_ITEMS_PER_SHARD}")
+if MIN_ITEMS_PER_SHARD > MAX_ITEMS_PER_SHARD:
+    raise RuntimeError(
+        f"{TASK_NAME} MIN_ITEMS_PER_SHARD ({MIN_ITEMS_PER_SHARD}) cannot exceed "
+        f"MAX_ITEMS_PER_SHARD ({MAX_ITEMS_PER_SHARD})"
+    )
+
+# Keep separate for now unless we later add it to config/env
 MAX_SHARDS = 512
+
+if MAX_SHARDS <= 0:
+    raise RuntimeError(f"{TASK_NAME} MAX_SHARDS must be > 0, got {MAX_SHARDS}")
 
 s3 = boto3.client("s3")
 
@@ -38,11 +60,13 @@ def _require_event_key(event: dict, key: str):
     return event[key]
 
 def choose_target_rows_per_shard() -> int:
-    usable_mb = JOB_MEMORY_MB * MEMORY_SAFETY_FACTOR
-    usable_kb = usable_mb * 1024.0
-    avg_row_kb = AVG_ROW_KB if AVG_ROW_KB > 0 else 2.0
-    estimated_rows = int(usable_kb / avg_row_kb)
-    target = max(MIN_ROWS_PER_SHARD, min(estimated_rows, MAX_ROWS_PER_SHARD))
+    usable_kb = WORKER_MEMORY_MB * 1024.0 * MEMORY_SAFETY_FACTOR
+    estimated_rows_from_memory = int(usable_kb / ESTIMATED_ITEM_SIZE_KB)
+
+    target = max(
+        MIN_ITEMS_PER_SHARD,
+        min(estimated_rows_from_memory, MAX_ITEMS_PER_SHARD),
+    )
     return max(1, target)
 
 def compute_num_shards(total_rows: int, target_rows: int) -> int:

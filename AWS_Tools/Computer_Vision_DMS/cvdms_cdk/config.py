@@ -2,7 +2,7 @@ from config_models import (
     AppConfig, ComputeEnvConfig, StateMachineConfig,
     BatchingStageConfig, BatchTaskJobDefConfig, StorageConfig,
     LoggingConfig, LambdaConfig, IngestStageConfig, UploadConfig,
-    DLQOpsConfig, SQSConfig, DatasetConfig
+    DLQOpsConfig, SQSConfig, DatasetConfig, BatchSizingConfig
 )
 
 CONFIG = AppConfig(
@@ -42,7 +42,7 @@ CONFIG = AppConfig(
                 ),
             sqs_queue=SQSConfig(
                     retention_period_days=14,
-                    visibility_timeout_minutes=90
+                    visibility_timeout_minutes=20
             )
         ),
         events_queue=SQSConfig(
@@ -59,9 +59,15 @@ CONFIG = AppConfig(
             map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
-                memory_limit_mib=2048,
+                worker_memory_mb=2048,
                 directory="workers",
                 file="batch_jobs/upload/validation/Dockerfile"
+            ),
+            batch_sizing=BatchSizingConfig(
+                estimated_item_size_kb=3072,
+                memory_safety_factor=0.5,
+                min_items_per_shard=50,
+                max_items_per_shard=300
             )
         ),
         deduplication=BatchingStageConfig(
@@ -74,9 +80,15 @@ CONFIG = AppConfig(
             map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=1,
-                memory_limit_mib=2048,
+                worker_memory_mb=2048,
                 directory="workers",
                 file="batch_jobs/upload/deduplication/Dockerfile"
+            ),
+            batch_sizing=BatchSizingConfig(
+                estimated_item_size_kb=2,
+                memory_safety_factor=0.5,
+                min_items_per_shard=2000,
+                max_items_per_shard=30000
             )
         ),
         registration=BatchingStageConfig(
@@ -89,9 +101,15 @@ CONFIG = AppConfig(
             map_max_concurrency=12,
             batch_task_job_def=BatchTaskJobDefConfig(
                 vcpus=2,
-                memory_limit_mib=4096,
+                worker_memory_mb=4096,
                 directory="workers",
                 file="batch_jobs/upload/registration/Dockerfile"
+            ),
+            batch_sizing=BatchSizingConfig(
+                estimated_item_size_kb=2,
+                memory_safety_factor=0.5,
+                min_items_per_shard=500,
+                max_items_per_shard=1000
             )
         ),
         validation_ingest=IngestStageConfig(

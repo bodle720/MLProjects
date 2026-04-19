@@ -35,7 +35,7 @@
 # TEST_FAIL_SHARD = ""
 
 TEST_FAIL_ENABLED = False # Keep False when not testing dlq and triggering failures
-TEST_FAILPOINT = "after_canonical_imagery_insert"
+TEST_FAILPOINT = "after_batch_rollback_seed"
 TEST_FAIL_SHARD = "000001"
 
 def maybe_fail(failpoint: str, shard_name: str) -> None:

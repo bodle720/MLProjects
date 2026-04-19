@@ -20,13 +20,36 @@ BATCH_HANDOFF_FILE_NAME = os.environ.get("BATCH_HANDOFF_FILE_NAME", "map-items.j
 
 TASK_NAME = "[DEDUP_FILE_BATCHING]"
 
-# Tunables
-AVG_ROW_KB = 2.0
-MEMORY_SAFETY_FACTOR = 0.5
-MIN_ROWS_PER_SHARD = 1000
-MAX_ROWS_PER_SHARD = 20000
+# Tunables from config/env
+WORKER_MEMORY_MB = int(os.environ.get("WORKER_MEMORY_MB", "2048"))
+ESTIMATED_ITEM_SIZE_KB = float(os.environ.get("ESTIMATED_ITEM_SIZE_KB", "2"))
+MEMORY_SAFETY_FACTOR = float(os.environ.get("MEMORY_SAFETY_FACTOR", "0.5"))
+MIN_ITEMS_PER_SHARD = int(os.environ.get("MIN_ITEMS_PER_SHARD", "2000"))
+MAX_ITEMS_PER_SHARD = int(os.environ.get("MAX_ITEMS_PER_SHARD", "30000"))
+
+if WORKER_MEMORY_MB <= 0:
+    raise RuntimeError(f"{TASK_NAME} WORKER_MEMORY_MB must be > 0, got {WORKER_MEMORY_MB}")
+if ESTIMATED_ITEM_SIZE_KB <= 0:
+    raise RuntimeError(f"{TASK_NAME} ESTIMATED_ITEM_SIZE_KB must be > 0, got {ESTIMATED_ITEM_SIZE_KB}")
+if not (0 < MEMORY_SAFETY_FACTOR <= 1):
+    raise RuntimeError(
+        f"{TASK_NAME} MEMORY_SAFETY_FACTOR must be in (0, 1], got {MEMORY_SAFETY_FACTOR}"
+    )
+if MIN_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MIN_ITEMS_PER_SHARD must be > 0, got {MIN_ITEMS_PER_SHARD}")
+if MAX_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MAX_ITEMS_PER_SHARD must be > 0, got {MAX_ITEMS_PER_SHARD}")
+if MIN_ITEMS_PER_SHARD > MAX_ITEMS_PER_SHARD:
+    raise RuntimeError(
+        f"{TASK_NAME} MIN_ITEMS_PER_SHARD ({MIN_ITEMS_PER_SHARD}) cannot exceed "
+        f"MAX_ITEMS_PER_SHARD ({MAX_ITEMS_PER_SHARD})"
+    )
+
+# Still a separate policy knob for dedup partition fanout.
 MAX_PREFIX_LENGTH = 3
-JOB_MEMORY_MB = 2048
+
+if MAX_PREFIX_LENGTH <= 0:
+    raise RuntimeError(f"{TASK_NAME} MAX_PREFIX_LENGTH must be > 0, got {MAX_PREFIX_LENGTH}")
 
 s3 = boto3.client("s3")
 
@@ -166,20 +189,17 @@ def write_manifest(job_id: str, shard_name: str, files: list[str], manifest_pref
 
 def choose_prefix_length(
     total_rows: int,
-    job_memory_mb: int = JOB_MEMORY_MB,
-    avg_row_kb: float = AVG_ROW_KB,
+    worker_memory_mb: int = WORKER_MEMORY_MB,
+    estimated_item_size_kb: float = ESTIMATED_ITEM_SIZE_KB,
     safety_factor: float = MEMORY_SAFETY_FACTOR,
-    min_rows: int = MIN_ROWS_PER_SHARD,
-    max_rows: int = MAX_ROWS_PER_SHARD,
+    min_items_per_shard: int = MIN_ITEMS_PER_SHARD,
+    max_items_per_shard: int = MAX_ITEMS_PER_SHARD,
     max_prefix_len: int = MAX_PREFIX_LENGTH,
 ):
-    usable_mb = job_memory_mb * safety_factor
-    usable_kb = usable_mb * 1024.0
-    if avg_row_kb <= 0:
-        avg_row_kb = 2.0
+    usable_kb = worker_memory_mb * 1024.0 * safety_factor
 
-    estimated_rows = int(usable_kb / avg_row_kb)
-    target = max(min_rows, min(estimated_rows, max_rows))
+    estimated_rows_from_memory = int(usable_kb / estimated_item_size_kb)
+    target = max(min_items_per_shard, min(estimated_rows_from_memory, max_items_per_shard))
 
     if total_rows <= 0:
         return 1, target
@@ -232,11 +252,11 @@ def handler(event, context):
 
     prefix_len, target_rows = choose_prefix_length(
         total_rows,
-        job_memory_mb=JOB_MEMORY_MB,
-        avg_row_kb=AVG_ROW_KB,
+        worker_memory_mb=WORKER_MEMORY_MB,
+        estimated_item_size_kb=ESTIMATED_ITEM_SIZE_KB,
         safety_factor=MEMORY_SAFETY_FACTOR,
-        min_rows=MIN_ROWS_PER_SHARD,
-        max_rows=MAX_ROWS_PER_SHARD,
+        min_items_per_shard=MIN_ITEMS_PER_SHARD,
+        max_items_per_shard=MAX_ITEMS_PER_SHARD,
         max_prefix_len=MAX_PREFIX_LENGTH,
     )
 

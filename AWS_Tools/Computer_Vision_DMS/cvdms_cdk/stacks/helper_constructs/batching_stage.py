@@ -87,6 +87,12 @@ class BatchingStage(Construct):
             "LOG_FIREHOSE_STREAM_NAME": firehose_delivery_stream_name,
             "BATCH_STAGE_NAME": stage_name,
             "BATCH_HANDOFF_FILE_NAME": "map-items.jsonl",
+            "WORKER_MEMORY_MB": config.batch_task_job_def.worker_memory_mb,
+            "ESTIMATED_ITEM_SIZE_KB":config.batch_sizing.estimated_item_size_kb,
+            "MEMORY_SAFETY_FACTOR": config.batch_sizing.memory_safety_factor,
+            "MIN_ITEMS_PER_SHARD": config.batch_sizing.min_items_per_shard,
+            "MAX_ITEMS_PER_SHARD": config.batch_sizing.max_items_per_shard,
+
         }
         if extra_lambda_env:
             lambda_env.update(extra_lambda_env)
@@ -339,7 +345,7 @@ class BatchingStage(Construct):
                 "image": image_asset.image_uri,
                 "cpu": int(config.batch_task_job_def.vcpus * 1024),
                 "vcpus": config.batch_task_job_def.vcpus,
-                "memory": config.batch_task_job_def.memory_limit_mib,
+                "memory": config.batch_task_job_def.worker_memory_mb,
                 "jobRoleArn": job_role.role_arn,
                 "logConfiguration": {
                     "logDriver": "awslogs",

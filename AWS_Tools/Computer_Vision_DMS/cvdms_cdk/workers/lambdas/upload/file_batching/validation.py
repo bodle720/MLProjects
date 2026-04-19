@@ -15,13 +15,42 @@ BATCH_HANDOFF_FILE_NAME = os.environ.get("BATCH_HANDOFF_FILE_NAME", "map-items.j
 
 TASK_NAME = "[VAL_FILE_BATCHING]"
 
-# We can tune these constants
-MAX_MEMORY_MB = 2048  # from the job definition for validation step
-IMAGE_SIZE_MB = 3     # worst-case per image
-SAFETY_FACTOR = 0.5   # use only ~50% of memory for image data
+# Tuned from config / env
+WORKER_MEMORY_MB = int(os.environ.get("WORKER_MEMORY_MB", "2048"))
+ESTIMATED_ITEM_SIZE_KB = float(os.environ.get("ESTIMATED_ITEM_SIZE_KB", "3072"))
+MEMORY_SAFETY_FACTOR = float(os.environ.get("MEMORY_SAFETY_FACTOR", "0.5"))
+MIN_ITEMS_PER_SHARD = int(os.environ.get("MIN_ITEMS_PER_SHARD", "50"))
+MAX_ITEMS_PER_SHARD = int(os.environ.get("MAX_ITEMS_PER_SHARD", "300"))
 
-max_images = int((MAX_MEMORY_MB * SAFETY_FACTOR) / IMAGE_SIZE_MB)
-IMAGES_PER_BATCH = max(1, min(max_images, 200))
+if WORKER_MEMORY_MB <= 0:
+    raise RuntimeError(f"{TASK_NAME} WORKER_MEMORY_MB must be > 0, got {WORKER_MEMORY_MB}")
+if ESTIMATED_ITEM_SIZE_KB <= 0:
+    raise RuntimeError(f"{TASK_NAME} ESTIMATED_ITEM_SIZE_KB must be > 0, got {ESTIMATED_ITEM_SIZE_KB}")
+if not (0 < MEMORY_SAFETY_FACTOR <= 1):
+    raise RuntimeError(
+        f"{TASK_NAME} MEMORY_SAFETY_FACTOR must be in (0, 1], got {MEMORY_SAFETY_FACTOR}"
+    )
+if MIN_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MIN_ITEMS_PER_SHARD must be > 0, got {MIN_ITEMS_PER_SHARD}")
+if MAX_ITEMS_PER_SHARD <= 0:
+    raise RuntimeError(f"{TASK_NAME} MAX_ITEMS_PER_SHARD must be > 0, got {MAX_ITEMS_PER_SHARD}")
+if MIN_ITEMS_PER_SHARD > MAX_ITEMS_PER_SHARD:
+    raise RuntimeError(
+        f"{TASK_NAME} MIN_ITEMS_PER_SHARD ({MIN_ITEMS_PER_SHARD}) cannot exceed "
+        f"MAX_ITEMS_PER_SHARD ({MAX_ITEMS_PER_SHARD})"
+    )
+
+usable_kb = WORKER_MEMORY_MB * 1024.0 * MEMORY_SAFETY_FACTOR
+max_items_from_memory = int(usable_kb / ESTIMATED_ITEM_SIZE_KB)
+
+ITEMS_PER_SHARD = max(1, min(max_items_from_memory, MAX_ITEMS_PER_SHARD))
+
+if ITEMS_PER_SHARD < MIN_ITEMS_PER_SHARD:
+    # advisory only; do not override memory safety
+    print(
+        f"{TASK_NAME} advisory: computed items_per_shard={ITEMS_PER_SHARD} is below "
+        f"configured MIN_ITEMS_PER_SHARD={MIN_ITEMS_PER_SHARD}; using computed value for safety"
+    )
 
 def _require_event_key(event: dict, key: str):
     if key not in event:
@@ -107,7 +136,7 @@ def handler(event, context):
         total_images += 1
         batch_lines.append(line)
 
-        if len(batch_lines) >= IMAGES_PER_BATCH:
+        if len(batch_lines) >= ITEMS_PER_SHARD:
             flush_batch()
 
     flush_batch()
@@ -143,7 +172,7 @@ def handler(event, context):
         LOG_FIREHOSE_STREAM_NAME,
         (
             f"{TASK_NAME} Done batching {total_images} total images for image upload validation: "
-            f"label_type={label_type}, images_per_batch={IMAGES_PER_BATCH}, "
+            f"label_type={label_type}, ITEMS_PER_SHARD={ITEMS_PER_SHARD}, "
             f"manifest_count={batch_count}, handoff_s3_uri={plan_s3_uri}"
         ),
     )
