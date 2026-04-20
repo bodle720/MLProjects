@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
-from common.general_utils.testing import maybe_fail
+from common.testing_utils.upload_testing import maybe_fail
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (

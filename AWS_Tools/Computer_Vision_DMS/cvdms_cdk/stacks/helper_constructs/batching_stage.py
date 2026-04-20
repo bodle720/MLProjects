@@ -43,6 +43,7 @@ class BatchingStage(Construct):
         extra_permissions: list[iam.PolicyStatement] | None = None,
         extra_container_env: dict | None = None,
         extra_map_state_params: dict | None = None,
+        upload_testing_ssm_param_name: str | None = None,
     ):
         """
         New batching contract:
@@ -92,7 +93,7 @@ class BatchingStage(Construct):
             "MEMORY_SAFETY_FACTOR": str(config.batch_sizing.memory_safety_factor),
             "MIN_ITEMS_PER_SHARD": str(config.batch_sizing.min_items_per_shard),
             "MAX_ITEMS_PER_SHARD": str(config.batch_sizing.max_items_per_shard),
-
+            "UPLOAD_TESTING_SSM_PARAM_NAME": upload_testing_ssm_param_name,
         }
         if extra_lambda_env:
             lambda_env.update(extra_lambda_env)
@@ -122,6 +123,12 @@ class BatchingStage(Construct):
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
                 resources=[f"arn:aws:s3:::{iceberg_bucket.bucket_name}/upload_staging/*"],
+            )
+        )
+        batching_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=["*"],
             )
         )
         batching_fn.add_to_role_policy(
@@ -210,6 +217,13 @@ class BatchingStage(Construct):
             iam.PolicyStatement(
                 actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
                 resources=[firehose_delivery_stream_attr_arn],
+            )
+        )
+
+        job_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=["*"],
             )
         )
 
@@ -398,6 +412,7 @@ class BatchingStage(Construct):
             "AWS_REGION": region,
             "AWS_DEFAULT_REGION": region,
             "REGISTRATION_TIME": "$.registration_time",
+            "UPLOAD_TESTING_SSM_PARAM_NAME": upload_testing_ssm_param_name,
         }
         if extra_container_env:
             batch_env_map.update(extra_container_env)

@@ -1,4 +1,5 @@
 import uuid
+import json
 from constructs import Construct
 from stacks.helper_constructs.dlq_ops import DLQOps
 
@@ -15,6 +16,7 @@ from aws_cdk import (
     aws_ec2 as ec2,
     aws_iam as iam,
     aws_sqs as sqs,
+    aws_ssm as ssm,
     aws_dynamodb as dynamodb,
     aws_kinesisfirehose as firehose,
 )
@@ -61,6 +63,11 @@ class UploadStack(Stack):
         # Make the DLQ.
         self.dlq = self.make_dlq_assign_permissions()
 
+        # Make a SSM testing param that batch jobs and lambdas in the upload flow can call on to test the
+        # upload flow dlq processor. Params can be manually changed at will in the console in SSM.
+        self.upload_testing_ssm_param_name = f"/cvdms/{app_name}/upload/testing/fail_control"
+        self.make_ssm_testing_fail_control_param()
+
         # Creates Batch compute environment and job queue pointing to the compute environment.
         job_queue = self._make_compute_env(CONFIG.upload.compute_env)
 
@@ -85,6 +92,7 @@ class UploadStack(Stack):
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         deduplication_stage = BatchingStage(
@@ -105,6 +113,7 @@ class UploadStack(Stack):
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         registration_stage = BatchingStage(
@@ -125,6 +134,7 @@ class UploadStack(Stack):
             dlq_chain_factory=self._make_dlq_chain,
             firehose_delivery_stream_name=self.firehose_delivery_stream.ref,
             firehose_delivery_stream_attr_arn=self.firehose_delivery_stream.attr_arn,
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         # ------------------------------------------------------------------
@@ -152,6 +162,7 @@ class UploadStack(Stack):
             batch_plan_key_path="$.validationStage.plan_key",
             batch_plan_s3_uri_path="$.validationStage.plan_s3_uri",
             expected_count_path="$.validationStage.expected_count",
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         deduplication_ingest_stage = IngestStage(
@@ -174,6 +185,7 @@ class UploadStack(Stack):
             batch_plan_bucket_path="$.deduplicationStage.plan_bucket",
             batch_plan_key_path="$.deduplicationStage.plan_key",
             batch_plan_s3_uri_path="$.deduplicationStage.plan_s3_uri",
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         registration_ingest_stage = IngestStage(
@@ -197,6 +209,7 @@ class UploadStack(Stack):
             batch_plan_key_path="$.registrationStage.plan_key",
             batch_plan_s3_uri_path="$.registrationStage.plan_s3_uri",
             expected_count_path="$.registrationStage.total_rows",
+            upload_testing_ssm_param_name=self.upload_testing_ssm_param_name
         )
 
         # Make cleanup lambda to run once the entire upload job is done.
@@ -296,6 +309,20 @@ class UploadStack(Stack):
 
         # Make kickoff lambda to trigger on job.json upload.
         self._make_kickoff_lambda(upload_state_machine, CONFIG.upload.kickoff_lambda)
+
+    def make_ssm_testing_fail_control_param(self):
+        ssm.StringParameter(
+            self,
+            "UploadTestingFailControlParam",
+            parameter_name=self.upload_testing_ssm_param_name,
+            string_value=json.dumps(
+                {
+                    "enabled": False,
+                    "failpoint_name": None,
+                    "shard": None,
+                }
+            ),
+        )
 
     def make_dlq_assign_permissions(self):
         dlq_processor_env_vars = {

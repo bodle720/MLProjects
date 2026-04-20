@@ -37,6 +37,7 @@ class IngestStage(Construct):
         batch_plan_key_path: str,
         batch_plan_s3_uri_path: str | None = None,
         expected_count_path: str | None = None,
+        upload_testing_ssm_param_name: str = None
     ):
         super().__init__(scope, construct_id)
 
@@ -58,7 +59,7 @@ class IngestStage(Construct):
         self.batch_plan_key_path = batch_plan_key_path
         self.batch_plan_s3_uri_path = batch_plan_s3_uri_path
         self.expected_count_path = expected_count_path
-
+        self.upload_testing_ssm_param_name = upload_testing_ssm_param_name
         ingest_map_result_path = f"$.{stage_name}MapResults"
 
         lambda_env = {
@@ -75,6 +76,7 @@ class IngestStage(Construct):
             "MAX_ROWS": str(config.pre_ingest_grouping.max_rows),
             "MAX_BYTES": str(config.pre_ingest_grouping.max_bytes),
             "MAX_MATERIALIZED_GROUP_BYTES": str(config.pre_ingest_grouping.max_materialized_group_bytes),
+            "UPLOAD_TESTING_SSM_PARAM_NAME": self.upload_testing_ssm_param_name,
         }
 
         if config.pre_ingest_grouping.target_owner_bytes is not None:
@@ -435,5 +437,12 @@ class IngestStage(Construct):
                         "s3:prefix": ["canonical/*", "upload_staging/*", "image_source_membership/*"]
                     }
                 },
+            )
+        )
+
+        lambda_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=["*"],
             )
         )
