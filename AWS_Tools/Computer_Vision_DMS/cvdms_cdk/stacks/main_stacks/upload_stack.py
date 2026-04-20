@@ -360,6 +360,13 @@ class UploadStack(Stack):
             )
         )
 
+        dlq_processor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["batch:DescribeJobs"],
+                resources=["*"],
+            )
+        )
+
         # Iceberg bucket:
         # canonical/* covers:
         # - canonical/imagery/*
@@ -711,6 +718,13 @@ class UploadStack(Stack):
             iam.PolicyStatement(
                 actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
                 resources=[self.firehose_delivery_stream.attr_arn],
+            )
+        )
+
+        kickoff_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[self.dlq.queue_arn],
             )
         )
 

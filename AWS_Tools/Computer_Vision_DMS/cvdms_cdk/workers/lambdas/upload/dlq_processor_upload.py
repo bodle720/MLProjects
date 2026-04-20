@@ -46,6 +46,10 @@ QUIESCENCE_MAX_WAIT_SEC = 600
 QUIESCENCE_REQUIRED_EMPTY_POLLS = 2
 ACTIVE_MARKER_STALE_SEC = 20 * 60
 
+# Batch status interpretation for active markers written by Batch workers.
+BATCH_LIVE_STATUSES = {"SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"}
+BATCH_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED"}
+
 # Narrow Iceberg commit retry for rollback DML
 COMMIT_RETRY_ATTEMPTS = 4
 COMMIT_RETRY_BASE_SLEEP_SEC = 2.0
@@ -57,6 +61,7 @@ LOW_TIME_ABORT_MS = 60_000
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
+batch_client = boto3.client("batch")
 
 LABEL_TABLES = {
     CANONICAL_BBOX_TABLE_NAME,
@@ -202,6 +207,21 @@ def _read_json_key(key: str) -> Dict:
     return json.loads(body)
 
 
+def _try_read_json_key(key: str) -> Tuple[Optional[Dict], Optional[str]]:
+    try:
+        payload = _read_json_key(key)
+        if not isinstance(payload, dict):
+            return None, "non_dict_payload"
+        return payload, None
+    except ClientError as e:
+        code = str(e.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None, "missing"
+        return None, f"client_error:{code}"
+    except Exception as e:
+        return None, f"{type(e).__name__}:{e}"
+
+
 def _list_registration_processed_keys(job_id: str) -> List[str]:
     prefix = f"temp/image-upload/{job_id}/batches/registration-step/processed/"
     try:
@@ -226,52 +246,169 @@ def _list_active_worker_markers(job_id: str) -> List[Tuple[str, datetime]]:
     return out
 
 
+def _describe_batch_jobs_statuses(job_ids: List[str]) -> Tuple[Dict[str, str], Set[str]]:
+    """
+    Returns:
+      - status_by_job_id
+      - unresolved_job_ids: job IDs not returned by DescribeJobs; treat as terminal/missing
+    """
+    unique_ids = sorted({j.strip() for j in job_ids if isinstance(j, str) and j.strip()})
+    status_by_job_id: Dict[str, str] = {}
+    unresolved: Set[str] = set()
+
+    if not unique_ids:
+        return status_by_job_id, unresolved
+
+    for chunk in chunked(unique_ids, 100):
+        resp = batch_client.describe_jobs(jobs=chunk)
+        returned: Set[str] = set()
+
+        for job in resp.get("jobs", []) or []:
+            jid = job.get("jobId")
+            status = job.get("status")
+            if isinstance(jid, str) and jid.strip():
+                jid = jid.strip()
+                returned.add(jid)
+                if isinstance(status, str) and status.strip():
+                    status_by_job_id[jid] = status.strip()
+
+        unresolved.update(set(chunk) - returned)
+
+    return status_by_job_id, unresolved
+
+
 def _wait_for_worker_quiescence_or_raise(job_id: str, user: str, event_type: str) -> None:
+    """
+    Batch-backed active markers now block rollback only while AWS Batch still reports
+    the exact job as live. Non-batch or unreadable markers still use the old stale-timeout
+    fallback because we have no better control-plane source of truth for them yet.
+    """
     start = time.time()
     empty_polls = 0
 
     while True:
         markers = _list_active_worker_markers(job_id)
-        fresh: List[str] = []
-        stale: List[str] = []
-
         now = _utc_now()
+
+        # Batch-backed markers: decide with Batch control-plane status, not marker age.
+        batch_markers: List[Tuple[str, str]] = []
+
+        # Non-batch/unknown markers: fall back to freshness-vs-stale age.
+        fresh_nonbatch: List[str] = []
+        stale_nonbatch: List[str] = []
+
         for key, last_modified in markers:
             age_sec = (now - last_modified).total_seconds()
-            if age_sec > ACTIVE_MARKER_STALE_SEC:
-                stale.append(key)
-            else:
-                fresh.append(key)
+            payload, read_err = _try_read_json_key(key)
 
-        if fresh:
+            # Marker disappeared between list and read. Treat as gone.
+            if read_err == "missing":
+                continue
+
+            if payload:
+                worker_kind = str(payload.get("worker_kind") or "").strip().lower()
+                batch_job_id = str(payload.get("batch_job_id") or "").strip()
+
+                if worker_kind == "batch" and batch_job_id:
+                    batch_markers.append((key, batch_job_id))
+                    continue
+
+            # No usable batch identity: fall back to age-based logic.
+            if age_sec > ACTIVE_MARKER_STALE_SEC:
+                stale_nonbatch.append(key)
+            else:
+                if read_err:
+                    fresh_nonbatch.append(f"{key}:marker_read_error={read_err}")
+                else:
+                    fresh_nonbatch.append(key)
+
+        batch_live: List[str] = []
+        batch_terminal: List[str] = []
+        batch_unknown: List[str] = []
+
+        if batch_markers:
+            try:
+                status_by_job_id, unresolved_job_ids = _describe_batch_jobs_statuses(
+                    [jid for _, jid in batch_markers]
+                )
+
+                for key, jid in batch_markers:
+                    status = status_by_job_id.get(jid)
+                    if status in BATCH_LIVE_STATUSES:
+                        batch_live.append(f"{key}:job_id={jid}:status={status}")
+                    elif status in BATCH_TERMINAL_STATUSES:
+                        batch_terminal.append(f"{key}:job_id={jid}:status={status}")
+                    elif jid in unresolved_job_ids:
+                        # Not returned by DescribeJobs. Treat as terminal/missing, not blocking.
+                        batch_terminal.append(f"{key}:job_id={jid}:status=MISSING")
+                    else:
+                        batch_unknown.append(f"{key}:job_id={jid}:status={status or 'UNKNOWN'}")
+
+            except Exception as e:
+                # If Batch status lookup fails, be conservative: treat batch markers as blocking.
+                batch_unknown.extend([f"{key}:job_id={jid}:describe_error" for key, jid in batch_markers])
+                log(
+                    job_id,
+                    user,
+                    event_type,
+                    LOG_FIREHOSE_STREAM_NAME,
+                    f"{TASK_NAME} Batch DescribeJobs failed during quiescence; falling back to blocking on batch markers this poll: {e}",
+                    level="warning",
+                )
+
+        blocking = fresh_nonbatch + batch_live + batch_unknown
+
+        if blocking:
             empty_polls = 0
             log(
                 job_id,
                 user,
                 event_type,
                 LOG_FIREHOSE_STREAM_NAME,
-                f"{TASK_NAME} Waiting for worker quiescence; fresh active markers={len(fresh)} sample={fresh[:5]}",
+                (
+                    f"{TASK_NAME} Waiting for worker quiescence; "
+                    f"blocking_count={len(blocking)} "
+                    f"live_batch_count={len(batch_live)} "
+                    f"unknown_batch_count={len(batch_unknown)} "
+                    f"fresh_nonbatch_count={len(fresh_nonbatch)} "
+                    f"terminal_batch_count={len(batch_terminal)} "
+                    f"stale_nonbatch_count={len(stale_nonbatch)} "
+                    f"sample_blocking={blocking[:5]}"
+                ),
                 level="warning",
             )
         else:
             empty_polls += 1
-            if stale:
+            if batch_terminal or stale_nonbatch:
                 log(
                     job_id,
                     user,
                     event_type,
                     LOG_FIREHOSE_STREAM_NAME,
-                    f"{TASK_NAME} Proceeding with stale active markers only; stale_count={len(stale)} sample={stale[:5]}",
+                    (
+                        f"{TASK_NAME} Quiescence poll clear; "
+                        f"terminal_batch_count={len(batch_terminal)} "
+                        f"stale_nonbatch_count={len(stale_nonbatch)} "
+                        f"required_empty_polls={QUIESCENCE_REQUIRED_EMPTY_POLLS} "
+                        f"current_empty_polls={empty_polls} "
+                        f"sample_terminal_batch={batch_terminal[:5]} "
+                        f"sample_stale_nonbatch={stale_nonbatch[:5]}"
+                    ),
                     level="warning",
                 )
+
             if empty_polls >= QUIESCENCE_REQUIRED_EMPTY_POLLS:
                 return
 
         if (time.time() - start) >= QUIESCENCE_MAX_WAIT_SEC:
-            if fresh:
-                sample = fresh[:5]
+            if blocking:
                 raise RuntimeError(
-                    f"{TASK_NAME} rollback blocked by fresh active worker markers; count={len(fresh)} sample={sample}"
+                    f"{TASK_NAME} rollback blocked by active workers after max wait; "
+                    f"blocking_count={len(blocking)} "
+                    f"live_batch_count={len(batch_live)} "
+                    f"unknown_batch_count={len(batch_unknown)} "
+                    f"fresh_nonbatch_count={len(fresh_nonbatch)} "
+                    f"sample_blocking={blocking[:5]}"
                 )
             return
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
+
+import boto3
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
@@ -18,10 +20,67 @@ INGEST_HANDOFF_FILE_NAME = os.environ.get("INGEST_HANDOFF_FILE_NAME", "map-items
 
 TASK_NAME = "[REG_INGEST_PRE]"
 
+# --------------------------------------------------------------------
+# Grouping knobs.
+# Registration mutates the most tables, so keep these conservative.
+# --------------------------------------------------------------------
+GROUPING_ENABLED = os.environ["GROUPING_ENABLED"].strip().lower() == "true"
+
+# Target-shard grouping (upload_staging + canonical_imagery + image_labels + image_source_membership)
+TARGET_TARGET_ROWS = int(os.environ["TARGET_ROWS"])
+TARGET_TARGET_BYTES = int(os.environ["TARGET_BYTES"])
+MAX_TARGET_ROWS = int(os.environ["MAX_ROWS"])
+MAX_TARGET_BYTES = int(os.environ["MAX_BYTES"])
+
+# Owner-shard grouping (canonical_labels_by_fingerprint only)
+TARGET_OWNER_BYTES = int(os.environ["TARGET_OWNER_BYTES"])
+MAX_OWNER_BYTES = int(os.environ["MAX_OWNER_BYTES"])
+TARGET_OWNER_PARTS = int(os.environ["TARGET_OWNER_PARTS"])
+MAX_OWNER_PARTS = int(os.environ["MAX_OWNER_PARTS"])
+
+# Guardrail while materializing merged JSONLs in pre-lambda.
+MAX_MATERIALIZED_GROUP_BYTES = int(os.environ["MAX_MATERIALIZED_GROUP_BYTES"])
+
+s3 = boto3.client("s3")
+
 def _require_event_key(event: dict, key: str):
     if key not in event:
         raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
     return event[key]
+
+
+def _head_size_bytes(bucket: str, key: str) -> int:
+    try:
+        resp = s3.head_object(Bucket=bucket, Key=key)
+        return int(resp.get("ContentLength", 0))
+    except Exception as e:
+        raise RuntimeError(f"{TASK_NAME} Failed head_object for s3://{bucket}/{key}: {e}")
+
+
+def _read_key_bytes(bucket: str, key: str) -> bytes:
+    resp = read_obj_with_retry(bucket, key, TASK_NAME)
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} Failed to read s3://{bucket}/{key}")
+    data = resp["Body"].read()
+    if not isinstance(data, (bytes, bytearray)):
+        raise RuntimeError(f"{TASK_NAME} Unexpected non-bytes read from s3://{bucket}/{key}")
+    return bytes(data)
+
+
+def _ensure_trailing_newline(data: bytes) -> bytes:
+    if not data:
+        return b""
+    return data if data.endswith(b"\n") else (data + b"\n")
+
+
+def _write_bytes_key(key: str, body: bytes, content_type: str = "application/x-ndjson") -> None:
+    s3.put_object(
+        Bucket=FILE_BUCKET_NAME,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )
+
 
 def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -56,6 +115,7 @@ def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
 
     return items
 
+
 def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
     Prefer explicit shard from the batching handoff item.
@@ -89,11 +149,13 @@ def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) 
             out.append(s)
     return out
 
+
 def _extract_owner_shard_id_from_key(k: str) -> str:
     for part in k.split("/"):
         if part.startswith("owner-"):
             return part[len("owner-") :]
     return ""
+
 
 def collect_processed_shards(
     job_id: str,
@@ -170,7 +232,8 @@ def collect_processed_shards(
         owner_parts[owner_id] = sorted(owner_parts[owner_id])
 
     missing_target: List[str] = []
-    shards: List[Dict[str, Any]] = []
+    target_shards: List[Dict[str, Any]] = []
+    owner_shard_items: List[Dict[str, Any]] = []
 
     total_rows_read = 0
     total_canon_imagery_rows = 0
@@ -205,13 +268,18 @@ def collect_processed_shards(
                 if o:
                     expected_owner_shards_from_summaries.add(str(o).rjust(6, "0"))
 
+        upload_size = _head_size_bytes(bucket, up_k)
+        imagery_size = _head_size_bytes(bucket, img_k)
+        image_labels_size = _head_size_bytes(bucket, img_lab_k)
+        image_source_membership_size = _head_size_bytes(bucket, img_src_k)
+
         total_rows_read += rows_read
         total_canon_imagery_rows += canon_im_rows
         total_image_labels_rows += img_lbl_rows
         total_image_source_membership_rows += img_src_rows
         total_canon_label_rows += canon_lbl_rows
 
-        shards.append(
+        target_shards.append(
             {
                 "kind": "target",
                 "shard": shard,
@@ -224,6 +292,16 @@ def collect_processed_shards(
                 "canonical_labels_key": None,
                 "image_labels_key": img_lab_k,
                 "image_source_membership_key": img_src_k,
+                "upload_staging_size_bytes": upload_size,
+                "canonical_imagery_size_bytes": imagery_size,
+                "image_labels_size_bytes": image_labels_size,
+                "image_source_membership_size_bytes": image_source_membership_size,
+                "total_target_bytes": (
+                    upload_size
+                    + imagery_size
+                    + image_labels_size
+                    + image_source_membership_size
+                ),
             }
         )
 
@@ -256,8 +334,11 @@ def collect_processed_shards(
 
         total_owner_label_files += len(parts)
         owner_prefix = f"{processed_prefix}/canonical_labels_by_fingerprint/owner-{owner_id}/"
+        owner_bytes = 0
+        for p in parts:
+            owner_bytes += _head_size_bytes(bucket, p)
 
-        shards.append(
+        owner_shard_items.append(
             {
                 "kind": "label_owner",
                 "shard": f"owner-{owner_id}",
@@ -265,6 +346,8 @@ def collect_processed_shards(
                 "owner_shard_id": owner_id,
                 "owner_prefix": owner_prefix,
                 "parts_count": len(parts),
+                "owner_part_keys": list(parts),
+                "canonical_labels_size_bytes": owner_bytes,
                 "upload_staging_key": None,
                 "canonical_imagery_key": None,
                 "canonical_labels_key": owner_prefix,
@@ -275,7 +358,8 @@ def collect_processed_shards(
 
     return {
         "missing_target_shards": missing_target,
-        "shards": shards,
+        "target_shards": target_shards,
+        "owner_shard_items": owner_shard_items,
         "total_rows_read": total_rows_read,
         "total_canon_imagery_rows": total_canon_imagery_rows,
         "total_canon_label_rows": total_canon_label_rows,
@@ -287,11 +371,315 @@ def collect_processed_shards(
         "total_owner_label_files": total_owner_label_files,
     }
 
-def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+def _close_group(groups: List[List[Dict[str, Any]]], current: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if current:
+        groups.append(current)
+    return []
+
+
+def group_target_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    if not GROUPING_ENABLED or len(shards) <= 1:
+        return [[s] for s in shards]
+
+    groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_rows = 0
+    current_bytes = 0
+
+    for shard in shards:
+        shard_rows = int(shard.get("rows_read", 0))
+        shard_bytes = int(shard.get("total_target_bytes", 0))
+
+        if not current:
+            current = [shard]
+            current_rows = shard_rows
+            current_bytes = shard_bytes
+            continue
+
+        current_at_target = (
+            current_rows >= TARGET_TARGET_ROWS
+            or current_bytes >= TARGET_TARGET_BYTES
+        )
+
+        would_rows = current_rows + shard_rows
+        would_bytes = current_bytes + shard_bytes
+        would_exceed_hard_cap = (
+            would_rows > MAX_TARGET_ROWS
+            or would_bytes > MAX_TARGET_BYTES
+        )
+
+        if current_at_target or would_exceed_hard_cap:
+            current = _close_group(groups, current)
+            current = [shard]
+            current_rows = shard_rows
+            current_bytes = shard_bytes
+            continue
+
+        current.append(shard)
+        current_rows = would_rows
+        current_bytes = would_bytes
+
+    _close_group(groups, current)
+    return groups
+
+
+def group_owner_shards(owner_items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    if not GROUPING_ENABLED or len(owner_items) <= 1:
+        return [[o] for o in owner_items]
+
+    groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_bytes = 0
+    current_parts = 0
+
+    for owner in owner_items:
+        owner_bytes = int(owner.get("canonical_labels_size_bytes", 0))
+        owner_parts = int(owner.get("parts_count", 0))
+
+        if not current:
+            current = [owner]
+            current_bytes = owner_bytes
+            current_parts = owner_parts
+            continue
+
+        current_at_target = (
+            current_bytes >= TARGET_OWNER_BYTES
+            or current_parts >= TARGET_OWNER_PARTS
+        )
+
+        would_bytes = current_bytes + owner_bytes
+        would_parts = current_parts + owner_parts
+        would_exceed_hard_cap = (
+            would_bytes > MAX_OWNER_BYTES
+            or would_parts > MAX_OWNER_PARTS
+        )
+
+        if current_at_target or would_exceed_hard_cap:
+            current = _close_group(groups, current)
+            current = [owner]
+            current_bytes = owner_bytes
+            current_parts = owner_parts
+            continue
+
+        current.append(owner)
+        current_bytes = would_bytes
+        current_parts = would_parts
+
+    _close_group(groups, current)
+    return groups
+
+
+def _materialize_grouped_jsonl_file(
+    *,
+    source_keys: List[str],
+    dest_key: str,
+) -> Tuple[str, int]:
+    if not source_keys:
+        raise RuntimeError(f"{TASK_NAME} cannot materialize empty source_keys for {dest_key}")
+
+    parts: List[bytes] = []
+    total_bytes = 0
+
+    for key in source_keys:
+        blob = _ensure_trailing_newline(_read_key_bytes(FILE_BUCKET_NAME, key))
+        total_bytes += len(blob)
+
+        if total_bytes > MAX_MATERIALIZED_GROUP_BYTES:
+            raise RuntimeError(
+                f"{TASK_NAME} grouped materialization would exceed "
+                f"MAX_MATERIALIZED_GROUP_BYTES={MAX_MATERIALIZED_GROUP_BYTES}: "
+                f"dest_key={dest_key} total_bytes={total_bytes}"
+            )
+
+        parts.append(blob)
+
+    body = b"".join(parts)
+    _write_bytes_key(dest_key, body)
+    return dest_key, len(body)
+
+
+def _materialize_grouped_target_item(
+    *,
+    job_id: str,
+    group_index: int,
+    group_shards: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not group_shards:
+        raise RuntimeError(f"{TASK_NAME} cannot materialize empty target group")
+
+    if len(group_shards) == 1:
+        only = group_shards[0]
+        return {
+            "kind": "target",
+            "shard": f"group-target-{group_index:05d}",
+            "source_shards": [only["shard"]],
+            "grouped": False,
+            "source_shard_count": 1,
+            "rows_read": int(only["rows_read"]),
+            "canonical_imagery_rows": int(only["canonical_imagery_rows"]),
+            "image_labels_rows": int(only["image_labels_rows"]),
+            "image_source_membership_rows": int(only["image_source_membership_rows"]),
+            "upload_staging_key": only["upload_staging_key"],
+            "canonical_imagery_key": only["canonical_imagery_key"],
+            "canonical_labels_key": None,
+            "image_labels_key": only["image_labels_key"],
+            "image_source_membership_key": only["image_source_membership_key"],
+        }
+
+    source_shards = [s["shard"] for s in group_shards]
+
+    upload_key, _ = _materialize_grouped_jsonl_file(
+        source_keys=[s["upload_staging_key"] for s in group_shards],
+        dest_key=(
+            f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/grouped/"
+            f"upload_staging/group-{group_index:05d}.jsonl"
+        ),
+    )
+    imagery_key, _ = _materialize_grouped_jsonl_file(
+        source_keys=[s["canonical_imagery_key"] for s in group_shards],
+        dest_key=(
+            f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/grouped/"
+            f"canonical_imagery/group-{group_index:05d}.jsonl"
+        ),
+    )
+    image_labels_key, _ = _materialize_grouped_jsonl_file(
+        source_keys=[s["image_labels_key"] for s in group_shards],
+        dest_key=(
+            f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/grouped/"
+            f"image_labels/group-{group_index:05d}.jsonl"
+        ),
+    )
+    image_source_membership_key, _ = _materialize_grouped_jsonl_file(
+        source_keys=[s["image_source_membership_key"] for s in group_shards],
+        dest_key=(
+            f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/grouped/"
+            f"image_source_membership/group-{group_index:05d}.jsonl"
+        ),
+    )
+
+    return {
+        "kind": "target",
+        "shard": f"group-target-{group_index:05d}",
+        "source_shards": source_shards,
+        "grouped": True,
+        "source_shard_count": len(group_shards),
+        "rows_read": sum(int(s.get("rows_read", 0)) for s in group_shards),
+        "canonical_imagery_rows": sum(int(s.get("canonical_imagery_rows", 0)) for s in group_shards),
+        "image_labels_rows": sum(int(s.get("image_labels_rows", 0)) for s in group_shards),
+        "image_source_membership_rows": sum(int(s.get("image_source_membership_rows", 0)) for s in group_shards),
+        "upload_staging_key": upload_key,
+        "canonical_imagery_key": imagery_key,
+        "canonical_labels_key": None,
+        "image_labels_key": image_labels_key,
+        "image_source_membership_key": image_source_membership_key,
+    }
+
+
+def _materialize_grouped_owner_item(
+    *,
+    job_id: str,
+    group_index: int,
+    group_owner_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not group_owner_items:
+        raise RuntimeError(f"{TASK_NAME} cannot materialize empty owner group")
+
+    if len(group_owner_items) == 1:
+        only = group_owner_items[0]
+        return {
+            "kind": "label_owner",
+            "shard": f"group-owner-{group_index:05d}",
+            "source_shards": [only["shard"]],
+            "grouped": False,
+            "source_shard_count": 1,
+            "rows_read": None,
+            "owner_shard_ids": [only["owner_shard_id"]],
+            "canonical_labels_key": only["canonical_labels_key"],
+            "upload_staging_key": None,
+            "canonical_imagery_key": None,
+            "image_labels_key": None,
+            "image_source_membership_key": None,
+        }
+
+    owner_ids = [o["owner_shard_id"] for o in group_owner_items]
+    source_shards = [o["shard"] for o in group_owner_items]
+    source_keys: List[str] = []
+    total_parts = 0
+
+    for o in group_owner_items:
+        part_keys = o.get("owner_part_keys") or []
+        if not isinstance(part_keys, list):
+            raise RuntimeError(f"{TASK_NAME} owner_part_keys malformed for owner item: {o}")
+        total_parts += len(part_keys)
+        for p in part_keys:
+            if isinstance(p, str) and p.strip():
+                source_keys.append(p.strip())
+
+    grouped_prefix = (
+        f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/grouped/"
+        f"canonical_labels/owner-group-{group_index:05d}/"
+    )
+    grouped_file_key = f"{grouped_prefix}part-merged.jsonl"
+
+    _materialize_grouped_jsonl_file(
+        source_keys=source_keys,
+        dest_key=grouped_file_key,
+    )
+
+    return {
+        "kind": "label_owner",
+        "shard": f"group-owner-{group_index:05d}",
+        "source_shards": source_shards,
+        "grouped": True,
+        "source_shard_count": len(group_owner_items),
+        "rows_read": None,
+        "owner_shard_ids": owner_ids,
+        "grouped_owner_parts_count": total_parts,
+        "canonical_labels_key": grouped_prefix,
+        "upload_staging_key": None,
+        "canonical_imagery_key": None,
+        "image_labels_key": None,
+        "image_source_membership_key": None,
+    }
+
+
+def build_grouped_ingest_items(
+    job_id: str,
+    target_shards: List[Dict[str, Any]],
+    owner_shard_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    target_groups = group_target_shards(target_shards)
+    owner_groups = group_owner_shards(owner_shard_items)
+
+    grouped_items: List[Dict[str, Any]] = []
+
+    for idx, group in enumerate(target_groups):
+        grouped_items.append(
+            _materialize_grouped_target_item(
+                job_id=job_id,
+                group_index=idx,
+                group_shards=group,
+            )
+        )
+
+    for idx, group in enumerate(owner_groups):
+        grouped_items.append(
+            _materialize_grouped_owner_item(
+                job_id=job_id,
+                group_index=idx,
+                group_owner_items=group,
+            )
+        )
+
+    return grouped_items
+
+
+def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
     handoff_prefix = f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/"
     handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
 
-    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in shards) + "\n"
+    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in items) + "\n"
     plan_s3_uri = write_s3_obj(
         FILE_BUCKET_NAME,
         handoff_key,
@@ -304,8 +692,9 @@ def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str,
         "plan_bucket": FILE_BUCKET_NAME,
         "plan_key": handoff_key,
         "plan_s3_uri": plan_s3_uri,
-        "item_count": len(shards),
+        "item_count": len(items),
     }
+
 
 def handler(event, context):
     job_id = _require_event_key(event, "job_id")
@@ -363,7 +752,8 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    shards = collected["shards"]
+    target_shards = collected["target_shards"]
+    owner_shard_items = collected["owner_shard_items"]
     total_rows_read = int(collected["total_rows_read"])
 
     log(
@@ -371,8 +761,8 @@ def handler(event, context):
         user,
         event_type,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Collected {len(shards)} map items "
-        f"(target_shards={collected['target_shard_count']}, owner_shards={collected['owner_shard_count']}). "
+        f"{TASK_NAME} Collected raw registration outputs "
+        f"(target_shards={len(target_shards)}, owner_shards={len(owner_shard_items)}). "
         f"total_rows_read={total_rows_read} "
         f"canon_imagery_rows={collected['total_canon_imagery_rows']} "
         f"canon_label_rows_total={collected['total_canon_label_rows']} "
@@ -388,7 +778,69 @@ def handler(event, context):
         )
 
     try:
-        handoff = write_ingest_handoff(job_id, shards)
+        grouped_items = build_grouped_ingest_items(job_id, target_shards, owner_shard_items)
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Failed building grouped ingest items: {e}",
+            level="error",
+        )
+        raise
+
+    grouped_target_items = [x for x in grouped_items if x.get("kind") == "target"]
+    grouped_owner_items = [x for x in grouped_items if x.get("kind") == "label_owner"]
+
+    grouped_total_rows_read = sum(int(x.get("rows_read", 0) or 0) for x in grouped_target_items)
+    grouped_total_canon_imagery_rows = sum(int(x.get("canonical_imagery_rows", 0) or 0) for x in grouped_target_items)
+    grouped_total_image_labels_rows = sum(int(x.get("image_labels_rows", 0) or 0) for x in grouped_target_items)
+    grouped_total_image_source_membership_rows = sum(int(x.get("image_source_membership_rows", 0) or 0) for x in grouped_target_items)
+
+    if grouped_total_rows_read != total_rows_read:
+        raise RuntimeError(
+            f"{TASK_NAME} Grouped target rows mismatch: grouped_total_rows_read={grouped_total_rows_read}, "
+            f"workers total_rows_read={total_rows_read}"
+        )
+
+    if grouped_total_canon_imagery_rows != int(collected["total_canon_imagery_rows"]):
+        raise RuntimeError(
+            f"{TASK_NAME} Grouped canonical_imagery row mismatch: grouped={grouped_total_canon_imagery_rows}, "
+            f"workers={collected['total_canon_imagery_rows']}"
+        )
+
+    if grouped_total_image_labels_rows != int(collected["total_image_labels_rows"]):
+        raise RuntimeError(
+            f"{TASK_NAME} Grouped image_labels row mismatch: grouped={grouped_total_image_labels_rows}, "
+            f"workers={collected['total_image_labels_rows']}"
+        )
+
+    if grouped_total_image_source_membership_rows != int(collected["total_image_source_membership_rows"]):
+        raise RuntimeError(
+            f"{TASK_NAME} Grouped image_source_membership row mismatch: grouped={grouped_total_image_source_membership_rows}, "
+            f"workers={collected['total_image_source_membership_rows']}"
+        )
+
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Grouped ingest units "
+        f"(target_shards={len(target_shards)} -> target_groups={len(grouped_target_items)}, "
+        f"owner_shards={len(owner_shard_items)} -> owner_groups={len(grouped_owner_items)}). "
+        f"grouping_enabled={GROUPING_ENABLED} "
+        f"target_rows_target={TARGET_TARGET_ROWS} "
+        f"target_bytes_target={TARGET_TARGET_BYTES} "
+        f"max_target_rows={MAX_TARGET_ROWS} "
+        f"max_target_bytes={MAX_TARGET_BYTES} "
+        f"target_owner_bytes={TARGET_OWNER_BYTES} "
+        f"max_owner_bytes={MAX_OWNER_BYTES}"
+    )
+
+    try:
+        handoff = write_ingest_handoff(job_id, grouped_items)
     except Exception as e:
         log(
             job_id,
@@ -419,4 +871,6 @@ def handler(event, context):
         "target_shard_count": int(collected["target_shard_count"]),
         "owner_shard_count": int(collected["owner_shard_count"]),
         "total_owner_label_files": int(collected["total_owner_label_files"]),
+        "grouped_target_item_count": int(len(grouped_target_items)),
+        "grouped_owner_item_count": int(len(grouped_owner_items)),
     }

@@ -13,7 +13,6 @@ from aws_cdk import (
 
 from config_models import IngestStageConfig
 
-
 class IngestStage(Construct):
     def __init__(
         self,
@@ -70,7 +69,25 @@ class IngestStage(Construct):
             "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream_name,
             "SHA256_TABLE_NAME": self.sha256_table.table_name,
             "INGEST_HANDOFF_FILE_NAME": "map-items.jsonl",
+            "GROUPING_ENABLED": "true" if config.pre_ingest_grouping.grouping_enabled else "false",
+            "TARGET_ROWS": str(config.pre_ingest_grouping.target_rows),
+            "TARGET_BYTES": str(config.pre_ingest_grouping.target_bytes),
+            "MAX_ROWS": str(config.pre_ingest_grouping.max_rows),
+            "MAX_BYTES": str(config.pre_ingest_grouping.max_bytes),
+            "MAX_MATERIALIZED_GROUP_BYTES": str(config.pre_ingest_grouping.max_materialized_group_bytes),
         }
+
+        if config.pre_ingest_grouping.target_owner_bytes is not None:
+            lambda_env["TARGET_OWNER_BYTES"] = str(config.pre_ingest_grouping.target_owner_bytes)
+
+        if config.pre_ingest_grouping.max_owner_bytes is not None:
+            lambda_env["MAX_OWNER_BYTES"] = str(config.pre_ingest_grouping.max_owner_bytes)
+
+        if config.pre_ingest_grouping.target_owner_parts is not None:
+            lambda_env["TARGET_OWNER_PARTS"] = str(config.pre_ingest_grouping.target_owner_parts)
+
+        if config.pre_ingest_grouping.max_owner_parts is not None:
+            lambda_env["MAX_OWNER_PARTS"] = str(config.pre_ingest_grouping.max_owner_parts)
 
         # --------------------------------------
         # Form the 'pre' lambda task.

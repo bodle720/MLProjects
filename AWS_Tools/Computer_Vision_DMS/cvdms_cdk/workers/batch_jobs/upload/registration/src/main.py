@@ -54,6 +54,10 @@ SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
+# AWS Batch injects these automatically at runtime.
+AWS_BATCH_JOB_ID = (os.environ.get("AWS_BATCH_JOB_ID") or "").strip() or None
+AWS_BATCH_JOB_ATTEMPT = (os.environ.get("AWS_BATCH_JOB_ATTEMPT") or "").strip() or None
+
 TASK_NAME = "[REG_JOB_DEF]"
 STAGE_NAME = "registration-batch"
 
@@ -77,6 +81,14 @@ s3 = boto3.client("s3")
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _marker_worker_fields() -> Dict[str, Any]:
+    return {
+        "worker_kind": "batch",
+        "batch_job_id": AWS_BATCH_JOB_ID,
+        "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
+    }
 
 
 def _active_marker_key(shard_name: str) -> str:
@@ -671,12 +683,12 @@ def main():
             "job_id": JOB_ID,
             "stage": STAGE_NAME,
             "shard": shard_name,
-            "request_id": None,
             "started_at": _iso_now(),
             "manifest_s3_uri": MANIFEST_S3_URI,
             "label_type": LABEL_TYPE,
             "data_source": DATA_SOURCE,
             "source_split": SOURCE_SPLIT,
+            **_marker_worker_fields(),
         },
     )
 
@@ -685,7 +697,8 @@ def main():
         USER,
         EVENT_TYPE,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
+        f"{TASK_NAME} Start shard={shard_name} manifest={MANIFEST_S3_URI} "
+        f"label_type={LABEL_TYPE} batch_job_id={AWS_BATCH_JOB_ID}",
     )
 
     try:
@@ -736,6 +749,8 @@ def main():
                 "shard": shard_name,
                 "completed_at": _iso_now(),
                 "rollback_seed_key": rollback_seed_key,
+                "terminal_state": "SUCCEEDED",
+                **_marker_worker_fields(),
             },
         )
 
@@ -758,16 +773,34 @@ def main():
             f"rollback_canonical_image_keys={summary['rollback_canonical_image_keys']} "
             f"rollback_canonical_label_keys_new_only={summary['rollback_canonical_label_keys_new_only']} "
             f"rollback_seed=s3://{FILE_BUCKET_NAME}/{rollback_seed_key} "
+            f"batch_job_id={AWS_BATCH_JOB_ID} "
             f"time_s={elapsed:.1f}",
         )
 
     except Exception as e:
+        try:
+            _write_json_marker(
+                completed_key,
+                {
+                    "job_id": JOB_ID,
+                    "stage": STAGE_NAME,
+                    "shard": shard_name,
+                    "completed_at": _iso_now(),
+                    "terminal_state": "FAILED",
+                    "error": str(e)[:2000],
+                    **_marker_worker_fields(),
+                },
+            )
+        except Exception:
+            pass
+
         log(
             JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
+            f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI} "
+            f"batch_job_id={AWS_BATCH_JOB_ID}: {e}",
             level="error",
         )
         raise

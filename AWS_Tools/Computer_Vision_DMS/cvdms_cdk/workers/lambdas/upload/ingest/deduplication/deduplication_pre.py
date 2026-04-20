@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import os
 import json
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple, Optional
+
+import boto3
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import (
@@ -25,10 +27,52 @@ INGEST_HANDOFF_FILE_NAME = os.environ.get("INGEST_HANDOFF_FILE_NAME", "map-items
 
 TASK_NAME = "[DEDUP_INGEST_PRE]"
 
+# --------------------------------------------------------------------
+# Grouping knobs
+# Dedup rows are lighter than validation, so allow larger row groups.
+# --------------------------------------------------------------------
+GROUPING_ENABLED = os.environ["GROUPING_ENABLED"].strip().lower() == "true"
+
+# Preferred target per grouped write unit.
+TARGET_GROUP_ROWS = int(os.environ["TARGET_ROWS"])
+TARGET_GROUP_BYTES = int(os.environ["TARGET_BYTES"])
+
+MAX_GROUP_ROWS = int(os.environ["MAX_ROWS"])
+MAX_GROUP_BYTES = int(os.environ["MAX_BYTES"])
+
+MAX_MATERIALIZED_GROUP_BYTES = int(os.environ["MAX_MATERIALIZED_GROUP_BYTES"])
+
+s3 = boto3.client("s3")
+
 def _require_event_key(event: dict, key: str):
     if key not in event:
         raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
     return event[key]
+
+
+def _head_size_bytes(bucket: str, key: str) -> int:
+    try:
+        resp = s3.head_object(Bucket=bucket, Key=key)
+        return int(resp.get("ContentLength", 0))
+    except Exception as e:
+        raise RuntimeError(f"{TASK_NAME} Failed head_object for s3://{bucket}/{key}: {e}")
+
+
+def _read_key_bytes(bucket: str, key: str) -> bytes:
+    resp = read_obj_with_retry(bucket, key, TASK_NAME)
+    if resp is None:
+        raise RuntimeError(f"{TASK_NAME} Failed to read s3://{bucket}/{key}")
+    data = resp["Body"].read()
+    if not isinstance(data, (bytes, bytearray)):
+        raise RuntimeError(f"{TASK_NAME} Unexpected non-bytes read from s3://{bucket}/{key}")
+    return bytes(data)
+
+
+def _ensure_trailing_newline(data: bytes) -> bytes:
+    if not data:
+        return b""
+    return data if data.endswith(b"\n") else (data + b"\n")
+
 
 def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -63,6 +107,7 @@ def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
 
     return items
 
+
 def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
     Prefer explicit shard from the batching handoff item.
@@ -95,6 +140,7 @@ def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) 
             seen.add(s)
             out.append(s)
     return out
+
 
 def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -144,6 +190,7 @@ def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> 
         summary = s3_read_json(bucket, summary_key, TASK_NAME)
         rows_read = int(summary.get("rows_read", 0))
         processed_rows = int(summary.get("processed_rows", 0))
+        upload_staging_size_bytes = _head_size_bytes(bucket, jsonl_key)
 
         total_rows_read += rows_read
         total_processed_rows += processed_rows
@@ -154,6 +201,7 @@ def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> 
                 "kind": "deduplication",
                 "rows_read": rows_read,
                 "processed_rows": processed_rows,
+                "upload_staging_size_bytes": upload_staging_size_bytes,
                 "canonical_imagery_rows": None,
                 "canonical_label_rows": None,
                 "upload_staging_key": jsonl_key,
@@ -172,11 +220,163 @@ def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> 
         "processed_prefix": processed_prefix,
     }
 
-def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+def _close_group(
+    groups: List[List[Dict[str, Any]]],
+    current: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if current:
+        groups.append(current)
+    return []
+
+
+def group_dedup_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """
+    Greedy deterministic grouping:
+    - keep shard order stable
+    - pack shards into a group until target reached
+    - never exceed hard caps unless a single shard itself already exceeds them
+    """
+    if not GROUPING_ENABLED or len(shards) <= 1:
+        return [[s] for s in shards]
+
+    groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_rows = 0
+    current_bytes = 0
+
+    for shard in shards:
+        shard_rows = int(shard.get("rows_read", 0))
+        shard_bytes = int(shard.get("upload_staging_size_bytes", 0))
+
+        if not current:
+            current = [shard]
+            current_rows = shard_rows
+            current_bytes = shard_bytes
+            continue
+
+        current_at_target = (
+            current_rows >= TARGET_GROUP_ROWS
+            or current_bytes >= TARGET_GROUP_BYTES
+        )
+
+        would_rows = current_rows + shard_rows
+        would_bytes = current_bytes + shard_bytes
+        would_exceed_hard_cap = (
+            would_rows > MAX_GROUP_ROWS
+            or would_bytes > MAX_GROUP_BYTES
+        )
+
+        if current_at_target or would_exceed_hard_cap:
+            current = _close_group(groups, current)
+            current = [shard]
+            current_rows = shard_rows
+            current_bytes = shard_bytes
+            continue
+
+        current.append(shard)
+        current_rows = would_rows
+        current_bytes = would_bytes
+
+    _close_group(groups, current)
+    return groups
+
+
+def _materialize_grouped_upload_staging(
+    *,
+    job_id: str,
+    group_index: int,
+    group_shards: List[Dict[str, Any]],
+) -> Tuple[str, int]:
+    """
+    Create one merged upload_staging JSONL for a grouped write unit.
+    Returns:
+      (new_s3_key, total_bytes)
+    """
+    if not group_shards:
+        raise RuntimeError(f"{TASK_NAME} cannot materialize empty group")
+
+    if len(group_shards) == 1:
+        only = group_shards[0]
+        return only["upload_staging_key"], int(only.get("upload_staging_size_bytes", 0))
+
+    parts: List[bytes] = []
+    total_bytes = 0
+
+    for shard in group_shards:
+        src_key = shard["upload_staging_key"]
+        blob = _ensure_trailing_newline(_read_key_bytes(FILE_BUCKET_NAME, src_key))
+        total_bytes += len(blob)
+
+        if total_bytes > MAX_MATERIALIZED_GROUP_BYTES:
+            raise RuntimeError(
+                f"{TASK_NAME} grouped upload_staging would exceed "
+                f"MAX_MATERIALIZED_GROUP_BYTES={MAX_MATERIALIZED_GROUP_BYTES}: "
+                f"group_index={group_index} total_bytes={total_bytes}"
+            )
+
+        parts.append(blob)
+
+    body = b"".join(parts)
+    grouped_key = (
+        f"temp/image-upload/{job_id}/batches/deduplication-step/ingest-handoff/grouped/"
+        f"upload_staging/group-{group_index:05d}.jsonl"
+    )
+
+    write_s3_obj(
+        FILE_BUCKET_NAME,
+        grouped_key,
+        body,
+        "application/x-ndjson",
+        TASK_NAME,
+    )
+
+    return grouped_key, len(body)
+
+
+def build_grouped_ingest_items(job_id: str, shards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups = group_dedup_shards(shards)
+
+    ingest_items: List[Dict[str, Any]] = []
+    for group_index, group_shards in enumerate(groups):
+        grouped_key, grouped_size_bytes = _materialize_grouped_upload_staging(
+            job_id=job_id,
+            group_index=group_index,
+            group_shards=group_shards,
+        )
+
+        source_shards = [s["shard"] for s in group_shards]
+        rows_read = sum(int(s.get("rows_read", 0)) for s in group_shards)
+        processed_rows = sum(int(s.get("processed_rows", 0)) for s in group_shards)
+
+        ingest_items.append(
+            {
+                "shard": f"group-{group_index:05d}",
+                "kind": "deduplication",
+                "source_shards": source_shards,
+                "grouped": len(group_shards) > 1,
+                "source_shard_count": len(group_shards),
+                "rows_read": rows_read,
+                "processed_rows": processed_rows,
+                "upload_staging_size_bytes": grouped_size_bytes,
+                "canonical_imagery_rows": None,
+                "canonical_label_rows": None,
+                "upload_staging_key": grouped_key,
+                "canonical_imagery_key": None,
+                "canonical_labels_key": None,
+                "image_labels_key": None,
+                "image_source_membership_key": None,
+            }
+        )
+
+    return ingest_items
+
+
+def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
     handoff_prefix = f"temp/image-upload/{job_id}/batches/deduplication-step/ingest-handoff/"
     handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
 
-    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in shards) + "\n"
+    body = "\n".join(json.dumps(item, separators=(",", ":")) for item in items) + "\n"
     plan_s3_uri = write_s3_obj(
         FILE_BUCKET_NAME,
         handoff_key,
@@ -189,8 +389,9 @@ def write_ingest_handoff(job_id: str, shards: List[Dict[str, Any]]) -> Dict[str,
         "plan_bucket": FILE_BUCKET_NAME,
         "plan_key": handoff_key,
         "plan_s3_uri": plan_s3_uri,
-        "item_count": len(shards),
+        "item_count": len(items),
     }
+
 
 def handler(event, context):
     job_id = _require_event_key(event, "job_id")
@@ -259,12 +460,12 @@ def handler(event, context):
 
     log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Athena original_count={original_count}")
 
-    if total_rows_read != original_count:
+    if int(total_rows_read) != int(original_count):
         err = f"{TASK_NAME} Row count mismatch: original_count={original_count}, workers rows_read={total_rows_read}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
         raise RuntimeError(err)
 
-    if total_processed_rows != total_rows_read:
+    if int(total_processed_rows) != int(total_rows_read):
         raise RuntimeError(f"{TASK_NAME} processed_rows({total_processed_rows}) != rows_read({total_rows_read})")
 
     # 4) Delete original partition rows once, before map inserts
@@ -282,9 +483,51 @@ def handler(event, context):
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed deleting upload_staging partition: {e}", level="error")
         raise
 
-    # 5) Write ingest handoff JSONL for Distributed Map
+    # 5) Build grouped ingest items
     try:
-        handoff = write_ingest_handoff(job_id, shards)
+        ingest_items = build_grouped_ingest_items(job_id, shards)
+    except Exception as e:
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed building grouped ingest items: {e}", level="error")
+        raise
+
+    total_grouped_rows = sum(int(item.get("rows_read", 0)) for item in ingest_items)
+    total_grouped_processed_rows = sum(int(item.get("processed_rows", 0)) for item in ingest_items)
+
+    if int(total_grouped_rows) != int(total_rows_read):
+        err = (
+            f"{TASK_NAME} Grouped ingest row count mismatch: "
+            f"grouped_rows={total_grouped_rows}, workers_rows_read={total_rows_read}"
+        )
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise RuntimeError(err)
+
+    if int(total_grouped_processed_rows) != int(total_processed_rows):
+        err = (
+            f"{TASK_NAME} Grouped ingest processed row mismatch: "
+            f"grouped_processed_rows={total_grouped_processed_rows}, workers_processed_rows={total_processed_rows}"
+        )
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, err, level="error")
+        raise RuntimeError(err)
+
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        (
+            f"{TASK_NAME} Grouped ingest units: original_shards={len(shards)} "
+            f"grouped_items={len(ingest_items)} "
+            f"grouping_enabled={GROUPING_ENABLED} "
+            f"target_group_rows={TARGET_GROUP_ROWS} "
+            f"max_group_rows={MAX_GROUP_ROWS} "
+            f"target_group_bytes={TARGET_GROUP_BYTES} "
+            f"max_group_bytes={MAX_GROUP_BYTES}"
+        ),
+    )
+
+    # 6) Write ingest handoff JSONL for Distributed Map
+    try:
+        handoff = write_ingest_handoff(job_id, ingest_items)
     except Exception as e:
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed writing ingest handoff: {e}", level="error")
         raise
@@ -300,6 +543,8 @@ def handler(event, context):
         "original_count": int(original_count),
         "total_rows_read": int(total_rows_read),
         "total_processed_rows": int(total_processed_rows),
+        "original_shard_count": int(len(shards)),
+        "grouped_item_count": int(len(ingest_items)),
         "processed_prefix": collected.get("processed_prefix"),
         "ctas_table_name": ctas_table_name,
     }

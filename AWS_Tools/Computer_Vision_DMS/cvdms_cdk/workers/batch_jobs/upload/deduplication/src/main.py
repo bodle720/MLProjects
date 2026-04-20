@@ -3,7 +3,7 @@ import os
 import json
 import time
 import hashlib
-from typing import Any
+from typing import Any, Dict, List
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -25,6 +25,10 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 SHA256_TABLE_NAME = os.environ["SHA256_TABLE_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
+# AWS Batch injects these automatically at runtime.
+AWS_BATCH_JOB_ID = (os.environ.get("AWS_BATCH_JOB_ID") or "").strip() or None
+AWS_BATCH_JOB_ATTEMPT = (os.environ.get("AWS_BATCH_JOB_ATTEMPT") or "").strip() or None
+
 TASK_NAME = "[DEDUP_JOB_DEF]"
 STAGE_NAME = "deduplication-batch"
 
@@ -42,14 +46,26 @@ MAX_GROUP_SIZE = 10000
 
 s3 = boto3.client("s3")
 
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _marker_worker_fields() -> Dict[str, Any]:
+    return {
+        "worker_kind": "batch",
+        "batch_job_id": AWS_BATCH_JOB_ID,
+        "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
+    }
+
 
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
+
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -59,11 +75,13 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
+
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
+
 
 def ts_sortable(v: Any) -> str:
     """
@@ -84,24 +102,26 @@ def ts_sortable(v: Any) -> str:
     s = str(v).strip()
     return s if s else "9999-12-31 23:59:59"
 
-def pick_representative(group):
+
+def pick_representative(group: List[dict]) -> dict:
     if len(group) == 1:
         return group[0]
 
-    def key_fn(r):
+    def key_fn(r: dict) -> tuple[str, str]:
         ts = ts_sortable(r.get("uploaded_at"))
         return (ts, r.get("image_id") or "")
 
     return min(group, key=key_fn)
 
-def norm_string_labels(row: dict) -> list[str]:
+
+def norm_string_labels(row: dict) -> List[str]:
     labels = row.get("string_labels")
     if not isinstance(labels, list) or not labels:
         labels = row.get("classes_present")
     if not isinstance(labels, list):
         return []
 
-    out = []
+    out: List[str] = []
     seen = set()
     for x in labels:
         s = str(x).strip().lower()
@@ -112,6 +132,7 @@ def norm_string_labels(row: dict) -> list[str]:
             out.append(s)
 
     return sorted(out)
+
 
 def label_signature(row: dict) -> str:
     """
@@ -130,12 +151,13 @@ def label_signature(row: dict) -> str:
 
     return "__MISSING_LABEL_SIG__"
 
-def process_manifest(manifest):
+
+def process_manifest(manifest: dict) -> tuple[List[dict], dict]:
     files = manifest.get("files", [])
     shard_name = manifest.get("shard_prefix", "shard")
 
     total_rows = 0
-    groups = defaultdict(list)
+    groups: dict[str, List[dict]] = defaultdict(list)
     row_iter = read_parquet_rows_from_s3_uris(files)
 
     for r in row_iter:
@@ -161,8 +183,8 @@ def process_manifest(manifest):
                 f"{TASK_NAME} Shard {shard_name} exceeded MAX_ROWS_IN_MEMORY ({MAX_ROWS_IN_MEMORY})"
             )
 
-    processed_rows = []
-    representatives = []  # list of (sha, rep_image_id)
+    processed_rows: List[dict] = []
+    representatives: List[tuple[str, str]] = []  # list of (sha, rep_image_id)
     internal_dup_count = 0
     warned_big_group = False
 
@@ -221,7 +243,7 @@ def process_manifest(manifest):
     )
 
     external_dup_count = 0
-    rep_index = {}
+    rep_index: dict[tuple[str, str], dict] = {}
     for r in processed_rows:
         if r.get("sha256_hash") and r.get("image_id"):
             rep_index[(r["sha256_hash"], r["image_id"])] = r
@@ -253,7 +275,8 @@ def process_manifest(manifest):
 
     return processed_rows, summary
 
-def write_processed_outputs(shard_name, processed_rows, summary):
+
+def write_processed_outputs(shard_name: str, processed_rows: List[dict], summary: dict) -> dict:
     bucket = FILE_BUCKET_NAME
     jsonl_key = f"{PROCESSED_PREFIX}/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
@@ -268,6 +291,7 @@ def write_processed_outputs(shard_name, processed_rows, summary):
         "summary": f"s3://{bucket}/{summary_key}",
         "success": f"s3://{bucket}/{success_key}",
     }
+
 
 def main():
     start = time.time()
@@ -288,9 +312,9 @@ def main():
             "job_id": JOB_ID,
             "stage": STAGE_NAME,
             "shard": shard_name,
-            "request_id": None,
             "started_at": _iso_now(),
             "manifest_s3_uri": MANIFEST_S3_URI,
+            **_marker_worker_fields(),
         },
     )
 
@@ -299,7 +323,8 @@ def main():
         USER,
         EVENT_TYPE,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI}",
+        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} "
+        f"batch_job_id={AWS_BATCH_JOB_ID}",
     )
 
     try:
@@ -314,16 +339,39 @@ def main():
                 "shard": shard_name,
                 "completed_at": _iso_now(),
                 "manifest_s3_uri": MANIFEST_S3_URI,
+                "rows_read": summary["rows_read"],
+                "internal_duplicates": summary["internal_duplicates"],
+                "external_duplicates": summary["external_duplicates"],
+                "processed_rows": summary["processed_rows"],
+                "terminal_state": "SUCCEEDED",
+                **_marker_worker_fields(),
             },
         )
 
     except Exception as e:
+        try:
+            _write_json_marker(
+                completed_key,
+                {
+                    "job_id": JOB_ID,
+                    "stage": STAGE_NAME,
+                    "shard": shard_name,
+                    "completed_at": _iso_now(),
+                    "manifest_s3_uri": MANIFEST_S3_URI,
+                    "terminal_state": "FAILED",
+                    "error": str(e)[:2000],
+                    **_marker_worker_fields(),
+                },
+            )
+        except Exception:
+            pass
+
         log(
             JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} error shard={shard_name} err={e}",
+            f"{TASK_NAME} error shard={shard_name} batch_job_id={AWS_BATCH_JOB_ID} err={e}",
             level="error",
         )
         raise
@@ -344,9 +392,11 @@ def main():
             f"internal_duplicates={summary['internal_duplicates']} "
             f"external_duplicates={summary['external_duplicates']} "
             f"processed_rows={summary['processed_rows']} "
+            f"batch_job_id={AWS_BATCH_JOB_ID} "
             f"time_s={elapsed:.1f}"
         ),
     )
+
 
 if __name__ == "__main__":
     main()

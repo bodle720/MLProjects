@@ -78,8 +78,22 @@ class BatchingStageConfig:
     batch_sizing: BatchSizingConfig
 
 @dataclass
+class IngestStagePreGroupingConfig:
+    grouping_enabled: bool
+    target_rows: int
+    target_bytes: int
+    max_rows: int
+    max_bytes: int
+    max_materialized_group_bytes: int
+    target_owner_bytes: int | None = None
+    max_owner_bytes: int | None = None
+    target_owner_parts: int | None = None
+    max_owner_parts: int | None = None
+
+@dataclass
 class IngestStageConfig:
     pre_ingest_lambda: LambdaConfig
+    pre_ingest_grouping: IngestStagePreGroupingConfig
     map_ingest_lambda: LambdaConfig
     map_max_concurrency: int
     post_ingest_lambda: LambdaConfig

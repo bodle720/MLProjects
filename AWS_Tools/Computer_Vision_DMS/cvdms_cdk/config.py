@@ -2,7 +2,8 @@ from config_models import (
     AppConfig, ComputeEnvConfig, StateMachineConfig,
     BatchingStageConfig, BatchTaskJobDefConfig, StorageConfig,
     LoggingConfig, LambdaConfig, IngestStageConfig, UploadConfig,
-    DLQOpsConfig, SQSConfig, DatasetConfig, BatchSizingConfig
+    DLQOpsConfig, SQSConfig, DatasetConfig, BatchSizingConfig,
+    IngestStagePreGroupingConfig
 )
 
 CONFIG = AppConfig(
@@ -119,6 +120,14 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
+            pre_ingest_grouping=IngestStagePreGroupingConfig(
+                grouping_enabled=True,
+                target_rows=2500,
+                target_bytes=16 * 1024 * 1024,  # 16 MB
+                max_rows=5000,
+                max_bytes=32 * 1024 * 1024,  # 32 MB
+                max_materialized_group_bytes=48 * 1024 * 1024  # 48 MB
+            ),
             map_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/validation",
                 handler="validation_map.handler",
@@ -140,6 +149,14 @@ CONFIG = AppConfig(
                 memory_size=1024,
                 timeout_sec=900
             ),
+            pre_ingest_grouping=IngestStagePreGroupingConfig(
+                grouping_enabled=True,
+                target_rows=10000,
+                target_bytes=16 * 1024 * 1024,  # 16 MB
+                max_rows=25000,
+                max_bytes=32 * 1024 * 1024,  # 32 MB
+                max_materialized_group_bytes=48 * 1024 * 1024  # 48 MB
+            ),
             map_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/deduplication",
                 handler="deduplication_map.handler",
@@ -158,8 +175,20 @@ CONFIG = AppConfig(
             pre_ingest_lambda=LambdaConfig(
                 path="workers/lambdas/upload/ingest/registration",
                 handler="registration_pre.handler",
-                memory_size=1024,
+                memory_size=2048,
                 timeout_sec=900
+            ),
+            pre_ingest_grouping=IngestStagePreGroupingConfig(
+                grouping_enabled=True,
+                target_rows=3000,
+                target_bytes=16 * 1024 * 1024,  # 16 MB
+                max_rows=6000,
+                max_bytes=32 * 1024 * 1024,  # 32 MB
+                max_materialized_group_bytes=64 * 1024 * 1024,  # 64 MB
+                target_owner_bytes=16 * 1024 * 1024,  # 16 MB
+                max_owner_bytes=32 * 1024 * 1024,  # 32 MB
+                target_owner_parts=32,
+                max_owner_parts=128
             ),
             map_ingest_lambda=LambdaConfig(
                         path="workers/lambdas/upload/ingest/registration",

@@ -13,6 +13,7 @@ import json
 import time
 import hashlib
 from datetime import datetime, timezone
+from typing import Any, Dict, List
 
 import boto3
 from PIL import Image
@@ -42,20 +43,36 @@ FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 REGISTRATION_TIME = os.environ["REGISTRATION_TIME"]
 
+# AWS Batch injects these automatically at runtime.
+AWS_BATCH_JOB_ID = (os.environ.get("AWS_BATCH_JOB_ID") or "").strip() or None
+AWS_BATCH_JOB_ATTEMPT = (os.environ.get("AWS_BATCH_JOB_ATTEMPT") or "").strip() or None
+
 TASK_NAME = "[VAL_JOB_DEF]"
 STAGE_NAME = "validation-batch"
 PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processed"
 
 s3 = boto3.client("s3")
 
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _marker_worker_fields() -> Dict[str, Any]:
+    return {
+        "worker_kind": "batch",
+        "batch_job_id": AWS_BATCH_JOB_ID,
+        "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
+    }
+
 
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
+
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
+
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -65,11 +82,13 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
+
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
+
 
 def manifest_shard_name(manifest_s3_uri: str) -> str:
     try:
@@ -81,6 +100,7 @@ def manifest_shard_name(manifest_s3_uri: str) -> str:
     # batch-001.jsonl -> batch-001
     m = re.match(r"^(.*)\.jsonl$", fname)
     return m.group(1) if m else fname
+
 
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     # derive deterministic image uuid from job + source-ref
@@ -289,7 +309,8 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     row["validation_status"] = "passed"
     return row
 
-def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary: dict) -> None:
+
+def write_processed_outputs(shard_name: str, processed_rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
     jsonl_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
     success_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-SUCCESS"
@@ -319,6 +340,7 @@ def write_processed_outputs(shard_name: str, processed_rows: list[dict], summary
         TASK_NAME,
     )
 
+
 def main():
     start = time.time()
     shard_name = manifest_shard_name(MANIFEST_S3_URI)
@@ -332,12 +354,12 @@ def main():
             "job_id": JOB_ID,
             "stage": STAGE_NAME,
             "shard": shard_name,
-            "request_id": None,
             "started_at": _iso_now(),
             "manifest_s3_uri": MANIFEST_S3_URI,
             "label_type": LABEL_TYPE,
             "data_source": DATA_SOURCE,
             "source_split": SOURCE_SPLIT,
+            **_marker_worker_fields(),
         },
     )
 
@@ -346,7 +368,8 @@ def main():
         USER,
         EVENT_TYPE,
         LOG_FIREHOSE_STREAM_NAME,
-        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} label_type={LABEL_TYPE}",
+        f"{TASK_NAME} start shard={shard_name} manifest={MANIFEST_S3_URI} "
+        f"label_type={LABEL_TYPE} batch_job_id={AWS_BATCH_JOB_ID}",
     )
 
     try:
@@ -359,7 +382,7 @@ def main():
         if not obj:
             raise RuntimeError(f"{TASK_NAME} Could not read manifest: {MANIFEST_S3_URI}")
 
-        processed_rows = []
+        processed_rows: List[Dict[str, Any]] = []
         total = 0
         failed = 0
 
@@ -414,6 +437,8 @@ def main():
                 "failed_rows": failed,
                 "processed_rows": len(processed_rows),
                 "manifest_s3_uri": MANIFEST_S3_URI,
+                "terminal_state": "SUCCEEDED",
+                **_marker_worker_fields(),
             },
         )
 
@@ -424,22 +449,41 @@ def main():
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
             f"{TASK_NAME} done shard={shard_name} rows_read={total} failed={failed} "
-            f"processed_rows={len(processed_rows)} time_s={elapsed:.1f}",
+            f"processed_rows={len(processed_rows)} batch_job_id={AWS_BATCH_JOB_ID} time_s={elapsed:.1f}",
         )
 
     except Exception as e:
+        try:
+            _write_json_marker(
+                completed_key,
+                {
+                    "job_id": JOB_ID,
+                    "stage": STAGE_NAME,
+                    "shard": shard_name,
+                    "completed_at": _iso_now(),
+                    "manifest_s3_uri": MANIFEST_S3_URI,
+                    "terminal_state": "FAILED",
+                    "error": str(e)[:2000],
+                    **_marker_worker_fields(),
+                },
+            )
+        except Exception:
+            pass
+
         log(
             JOB_ID,
             USER,
             EVENT_TYPE,
             LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI}: {e}",
+            f"{TASK_NAME} ERROR shard={shard_name} manifest={MANIFEST_S3_URI} "
+            f"batch_job_id={AWS_BATCH_JOB_ID}: {e}",
             level="error",
         )
         raise
 
     finally:
         _delete_marker_best_effort(active_key)
+
 
 if __name__ == "__main__":
     main()
