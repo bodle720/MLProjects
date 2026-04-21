@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+# cdk deploy cvdmsv1-LoggingStack cvdmsv1-StorageStack --profile <profile name>
+# cdk deploy cvdmsv1-UploadStack cvdmsv1-DatasetStack --profile <profile name>
+
 import os
 
 import aws_cdk as cdk
 
 from config import CONFIG
+
 from stacks.main_stacks.logging_stack import LoggingStack
 from stacks.main_stacks.storage_stack import StorageStack
 from stacks.main_stacks.upload_stack import UploadStack
@@ -23,13 +27,11 @@ logging_stack = LoggingStack(app,
 storage_stack = StorageStack(app,
                            f"{APP_NAME}-StorageStack",
                              app_name=APP_NAME,
-                             common_utils_layer=logging_stack.common_utils_layer,
                              env=env)
 
 upload_stack = UploadStack(app,
                             f"{APP_NAME}-UploadStack",
                             app_name=APP_NAME,
-                            common_utils_layer=logging_stack.common_utils_layer,
                             file_bucket=storage_stack.file_bucket,
                             iceberg_bucket=storage_stack.iceberg_bucket,
                             job_table=storage_stack.job_table,
@@ -43,7 +45,6 @@ upload_stack = UploadStack(app,
 dataset_stack = DatasetStack(app,
                                 f"{APP_NAME}-DatasetStack",
                                 app_name=APP_NAME,
-                                common_utils_layer=logging_stack.common_utils_layer,
                                 file_bucket=storage_stack.file_bucket,
                                 datasets_bucket=storage_stack.datasets_bucket,
                                 iceberg_bucket=storage_stack.iceberg_bucket,

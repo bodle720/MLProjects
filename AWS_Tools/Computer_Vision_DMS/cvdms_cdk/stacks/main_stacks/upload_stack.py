@@ -33,7 +33,6 @@ class UploadStack(Stack):
         construct_id: str,
         *,
         app_name: str,
-        common_utils_layer: _lambda.LayerVersion,
         file_bucket: s3.Bucket,
         iceberg_bucket: s3.Bucket,
         job_table: dynamodb.Table,
@@ -55,7 +54,7 @@ class UploadStack(Stack):
         self.lock_table = lock_table
         self.iceberg_database_name = iceberg_database_name
         self.firehose_delivery_stream = firehose_delivery_stream
-        self.common_utils_layer = common_utils_layer
+        self.common_utils_layer = self.make_common_utils_layer()
 
         # Make the SQS Queue that will receive upload events.
         self.upload_events_queue = upload_events_queue
@@ -757,3 +756,14 @@ class UploadStack(Stack):
 
         kickoff_lambda.add_event_source(event_sources.SqsEventSource(self.upload_events_queue, batch_size=1))
         self.upload_events_queue.grant_consume_messages(kickoff_lambda)
+
+    def make_common_utils_layer(self):
+        # Create a Lambda Layer from the common utilities
+        common_layer = _lambda.LayerVersion(
+            self,
+            "CommonUtilsLayerUpload",
+            code=_lambda.Code.from_asset("workers/common"),
+            compatible_runtimes=[_lambda.Runtime.PYTHON_3_11],
+            description="Shared utilities for all Lambda functions in the upload flow"
+        )
+        return common_layer

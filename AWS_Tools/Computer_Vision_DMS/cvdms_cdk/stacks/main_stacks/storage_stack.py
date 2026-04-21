@@ -27,7 +27,6 @@ class StorageStack(Stack):
                  construct_id: str,
                  *,
                  app_name: str,
-                 common_utils_layer: _lambda.LayerVersion,
                  **kwargs) -> None:
         '''
         This stack makes the file bucket that will store all files and the iceberg bucket, which will store all
@@ -38,8 +37,6 @@ class StorageStack(Stack):
         # The super call accepts env and initializes the self.account and self.region values
         # inside the base Stack class. So e can call them in this subclass.
         super().__init__(scope, construct_id, **kwargs)
-
-        self.common_utils_layer = common_utils_layer
 
         # Derive a unique glue database name from the stack name to store the iceberg table schema.
         # Make it deterministic, collision resistant, and length bounded.

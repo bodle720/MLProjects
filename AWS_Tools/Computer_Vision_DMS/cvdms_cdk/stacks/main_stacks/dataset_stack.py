@@ -26,7 +26,6 @@ class DatasetStack(Stack):
                  construct_id: str,
                  *,
                  app_name: str,
-                 common_utils_layer: _lambda.LayerVersion,
                  file_bucket: s3.Bucket,
                  datasets_bucket: s3.Bucket,
                  iceberg_bucket: s3.Bucket,
@@ -43,7 +42,7 @@ class DatasetStack(Stack):
 
         # Shared resources / config
         self.app_name = app_name
-        self.common_utils_layer = common_utils_layer
+        self.common_utils_layer = self.make_common_utils_layer()
 
         self.file_bucket = file_bucket
         self.datasets_bucket = datasets_bucket
@@ -469,3 +468,14 @@ class DatasetStack(Stack):
             event_sources.SqsEventSource(self.dataset_events_queue, batch_size=1)
         )
         self.dataset_events_queue.grant_consume_messages(kickoff_lambda)
+
+    def make_common_utils_layer(self):
+        # Create a Lambda Layer from the common utilities
+        common_layer = _lambda.LayerVersion(
+            self,
+            "CommonUtilsLayerDataset",
+            code=_lambda.Code.from_asset("workers/common"),
+            compatible_runtimes=[_lambda.Runtime.PYTHON_3_11],
+            description="Shared utilities for all Lambda functions in the dataset flow"
+        )
+        return common_layer
