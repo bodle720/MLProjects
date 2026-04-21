@@ -36,7 +36,6 @@
 #
 # With enabled=false, all failpoints are inert and the workflow runs normally.
 #
-#
 # -----------------------------------------------------------------------------
 # How to enable a failpoint in the AWS console
 # -----------------------------------------------------------------------------
@@ -67,7 +66,6 @@
 #   "failpoint_name": null,
 #   "shard": null
 # }
-#
 #
 # -----------------------------------------------------------------------------
 # Supported failpoints currently implemented
@@ -104,7 +102,6 @@
 #   "failpoint_name": "after_batch_rollback_seed",
 #   "shard": "000001"
 # }
-#
 #
 # 2) after_target_rollback_plan
 # ----------------------------------

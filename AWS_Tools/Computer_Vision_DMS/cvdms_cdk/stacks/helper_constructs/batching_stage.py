@@ -321,7 +321,7 @@ class BatchingStage(Construct):
         )
         job_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["s3:PutObject", "s3:AbortMultipartUpload"],
+                actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
                 resources=[f"arn:aws:s3:::{file_bucket.bucket_name}/canonical/*"],
             )
         )
@@ -329,7 +329,7 @@ class BatchingStage(Construct):
             iam.PolicyStatement(
                 actions=["s3:ListBucket"],
                 resources=[f"arn:aws:s3:::{file_bucket.bucket_name}"],
-                conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*"]}},
+                conditions={"StringLike": {"s3:prefix": ["temp/image-upload/*", "canonical/*"]}},
             )
         )
 
