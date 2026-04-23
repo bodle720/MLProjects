@@ -5,6 +5,9 @@ from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import delete_s3_prefix
 from common.general_utils.ddb_utils import update_job_status, release_lock
 
+# testing function for dlq processor
+from common.testing_utils.dataset_testing import maybe_fail
+
 JOB_TABLE_NAME = os.environ["JOB_TABLE_NAME"]
 FILE_BUCKET_NAME = os.environ["FILE_BUCKET_NAME"]
 LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
@@ -36,6 +39,7 @@ def handler(event, context):
         level="info",
     )
 
+    maybe_fail("cleanup_fail")
     # ---------------------------------------------------------
     # 1. Delete S3 temp files (safe final cleanup)
     # ---------------------------------------------------------

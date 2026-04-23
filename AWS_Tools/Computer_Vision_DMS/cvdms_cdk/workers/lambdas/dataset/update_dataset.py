@@ -10,6 +10,7 @@ from common.dataset_utils.dataset_update_splits import update_dataset_splits
 from common.dataset_utils.dataset_iceberg_utils import write_dataset_membership
 from common.dataset_utils.dataset_s3_utils import write_s3_artifacts
 from common.dataset_utils.dataset_ddb_utils import write_ddb_artifacts
+from common.testing_utils.dataset_testing import maybe_fail
 
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
@@ -535,6 +536,8 @@ def handler(event, context):
             ),
             level="info",
         )
+
+        maybe_fail("update_fail")
 
         return {
             "status": "ok",

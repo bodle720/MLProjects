@@ -9,6 +9,8 @@ from common.dataset_utils.dataset_delete_utils import (
     delete_ddb_rows,
 )
 
+from common.testing_utils.dataset_testing import maybe_fail
+
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
@@ -145,6 +147,8 @@ def handler(event, context):
         )
         result["deleted_s3_artifacts"] = True
         result["s3_result"] = s3_result
+
+        maybe_fail("delete_fail")
 
         ddb_result = delete_ddb_rows(
             datasets_table_name=DATASETS_TABLE_NAME,

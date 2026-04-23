@@ -8,6 +8,7 @@ from common.dataset_utils.dataset_iceberg_utils import write_dataset_membership
 from common.dataset_utils.dataset_s3_utils import write_s3_artifacts
 from common.dataset_utils.dataset_ddb_utils import write_ddb_artifacts
 from common.dataset_utils.split_strategies.stratified_v1 import stratified_v1
+from common.testing_utils.dataset_testing import maybe_fail
 
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
 DATASET_VERSIONS_TABLE_NAME = os.environ["DATASET_VERSIONS_TABLE_NAME"]
@@ -388,6 +389,8 @@ def handler(event, context):
             split_rows=canonical_split_rows,
             artifact_result=artifact_result,
         )
+
+        maybe_fail("create_fail")
 
         effective_split_mode = (
             "honor_source_splits"

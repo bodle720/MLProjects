@@ -1,4 +1,5 @@
 import uuid
+import json
 from constructs import Construct
 from stacks.helper_constructs.dlq_ops import DLQOps
 
@@ -13,6 +14,7 @@ from aws_cdk import (
     aws_lambda_event_sources as event_sources,
     aws_iam as iam,
     aws_sqs as sqs,
+    aws_ssm as ssm,
     aws_dynamodb as dynamodb,
     aws_kinesisfirehose as firehose
 )
@@ -58,6 +60,11 @@ class DatasetStack(Stack):
 
         # SQS queue receiving dataset submission events
         self.dataset_events_queue = dataset_events_queue
+
+        # Make a SSM testing param that various lambdas in the dataset flow can call on to test the
+        # dlq processor. Params can be manually changed at will in the console in SSM.
+        self.dataset_testing_ssm_param_name = f"/cvdms/{app_name}/dataset/testing/fail_control"
+        self.make_ssm_testing_fail_control_param()
 
         # Workflow DLQ + processor
         self.dlq = self.make_dlq_assign_permissions()
@@ -141,6 +148,19 @@ class DatasetStack(Stack):
 
         # Kickoff lambda starts the workflow from SQS messages
         self._make_kickoff_lambda(dataset_state_machine, CONFIG.dataset.kickoff_lambda)
+
+    def make_ssm_testing_fail_control_param(self):
+        ssm.StringParameter(
+            self,
+            "DatasetTestingFailControlParam",
+            parameter_name=self.dataset_testing_ssm_param_name,
+            string_value=json.dumps(
+                {
+                    "enabled": False,
+                    "failpoint_name": None
+                }
+            ),
+        )
 
     def make_dlq_assign_permissions(self):
         dlq_processor_env_vars = {
@@ -259,6 +279,7 @@ class DatasetStack(Stack):
             "ATHENA_WORKGROUP": "primary",
             "ATHENA_OUTPUT_S3": f"s3://{self.file_bucket.bucket_name}/athena-results/",
             "LOG_FIREHOSE_STREAM_NAME": self.firehose_delivery_stream.ref,
+            "DATASET_TESTING_SSM_PARAM_NAME": self.dataset_testing_ssm_param_name
         }
 
     def _grant_common_dataset_lambda_permissions(self, fn: _lambda.Function) -> None:
@@ -334,6 +355,14 @@ class DatasetStack(Stack):
             actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
             resources=[self.firehose_delivery_stream.attr_arn]
         ))
+
+        # Permission to read the testing ssm param
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=["*"],
+            )
+        )
 
     def _make_dataset_lambda_task(self,
                                   *,

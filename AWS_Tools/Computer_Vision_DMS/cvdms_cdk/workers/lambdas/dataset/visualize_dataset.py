@@ -11,6 +11,7 @@ import boto3
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import write_s3_obj
 from common.dataset_utils.dataset_get_info import get_dataset_info
+from common.testing_utils.dataset_testing import maybe_fail
 
 DATASETS_BUCKET_NAME = os.environ["DATASETS_BUCKET_NAME"]
 DATASETS_TABLE_NAME = os.environ["DATASETS_TABLE_NAME"]
@@ -601,6 +602,8 @@ def handler(event, context):
                 dataset_id, version, "split_comparison_metrics.json", split_comparison
             ),
         }
+
+        maybe_fail("visualize_fail")
 
         log(
             job_id,
