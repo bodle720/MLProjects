@@ -138,6 +138,13 @@ def build_get_dataset_result(
         dataset_version_item.get("version"),
         field_name="version",
     )
+
+    if version != latest_version:
+        raise ValueError(
+            f"Dataset latest_version mismatch: dataset table row says {latest_version}, "
+            f"but dataset versions row says {version}."
+        )
+
     total_image_count = _coerce_required_int(
         dataset_version_item.get("total_image_count"),
         field_name="total_image_count",

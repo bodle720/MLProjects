@@ -67,24 +67,32 @@ class DatasetStack(Stack):
             task_id="CreateDatasetTask",
             lambda_id="CreateDatasetLambda",
             lambda_config=CONFIG.dataset.create_lambda,
+            stage_name="create_task",
+            dlq_policy="rollback_new_version"
         )
 
         update_task = self._make_dataset_lambda_task(
             task_id="UpdateDatasetTask",
             lambda_id="UpdateDatasetLambda",
             lambda_config=CONFIG.dataset.update_lambda,
+            stage_name="update_task",
+            dlq_policy="rollback_new_version"
         )
 
         delete_task = self._make_dataset_lambda_task(
             task_id="DeleteDatasetTask",
             lambda_id="DeleteDatasetLambda",
             lambda_config=CONFIG.dataset.delete_lambda,
+            stage_name="delete_task",
+            dlq_policy="complete_delete"
         )
 
         visualization_task = self._make_dataset_lambda_task(
             task_id="GenerateVisualizationTask",
             lambda_id="GenerateVisualizationLambda",
             lambda_config=CONFIG.dataset.visualization_lambda,
+            stage_name="visualization_task",
+            dlq_policy="rollback_new_version"
         )
 
         cleanup_task = self._make_cleanup_task(CONFIG.dataset.cleanup_lambda)
@@ -197,7 +205,7 @@ class DatasetStack(Stack):
 
         return dlq
 
-    def _make_dlq_chain(self) -> sfn.Chain:
+    def _make_dlq_chain(self, *, failed_stage: str, dlq_policy: str) -> sfn.Chain:
         suffix = uuid.uuid4().hex[:8]
 
         make_dlq_message = sfn.Pass(
@@ -208,7 +216,11 @@ class DatasetStack(Stack):
                 "job_id.$": "$.job_id",
                 "user.$": "$.user",
                 "event_type.$": "$.event_type",
+                "task_type.$": "$.task_type",
+                "dataset_context.$": "$.dataset_context",
                 "error.$": "States.JsonToString($.errorInfo)",
+                "failed_stage": failed_stage,
+                "dlq_policy": dlq_policy,
             },
             result_path="$.dlqMessage"
         )
@@ -327,7 +339,9 @@ class DatasetStack(Stack):
                                   *,
                                   task_id: str,
                                   lambda_id: str,
-                                  lambda_config: LambdaConfig) -> tasks.LambdaInvoke:
+                                  lambda_config: LambdaConfig,
+                                  stage_name: str,
+                                  dlq_policy: str) -> tasks.LambdaInvoke:
         fn = _lambda.Function(
             self,
             lambda_id,
@@ -367,7 +381,7 @@ class DatasetStack(Stack):
         )
 
         task.add_catch(
-            handler=self._make_dlq_chain(),
+            handler=self._make_dlq_chain(failed_stage = stage_name, dlq_policy = dlq_policy),
             errors=["States.ALL"],
             result_path="$.errorInfo",
         )
@@ -414,7 +428,7 @@ class DatasetStack(Stack):
         )
 
         cleanup_task.add_catch(
-            handler=self._make_dlq_chain(),
+            handler=self._make_dlq_chain(failed_stage = "cleanup_task", dlq_policy = "finalize_success"),
             errors=["States.ALL"],
             result_path="$.errorInfo",
         )

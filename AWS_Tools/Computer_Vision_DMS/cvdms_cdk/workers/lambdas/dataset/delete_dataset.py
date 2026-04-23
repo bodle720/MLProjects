@@ -89,7 +89,29 @@ def handler(event, context):
         )
 
         if not dataset_state["dataset_info"].get("exists"):
-            raise ValueError(f"Dataset '{dataset_id}' does not exist.")
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Dataset '{dataset_id}' does not exist; treating delete as idempotent no-op.",
+                level="warning",
+            )
+
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "user": user,
+                "event_type": event_type,
+                "task_type": task_type,
+                "submission_s3_uri": submission_s3_uri,
+                "dataset_id": dataset_id,
+                "dataset_id_exists": False,
+                "already_deleted": True,
+                "deleted_iceberg_rows": False,
+                "deleted_s3_artifacts": False,
+                "deleted_ddb_records": False,
+            }
 
         dataset_meta = dataset_state["dataset_info"]
         dataset_label_type = dataset_meta.get("label_type")

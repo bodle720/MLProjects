@@ -32,6 +32,8 @@ VALID_LABEL_TYPES = {
     "semantic-segmentation",
     "instance-segmentation",
 }
+SUPPORTED_SPLIT_STRATEGIES = {"stratified_v1"}
+
 LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
     "single-label": "single_label",
     "multi-label": "multi_label",
@@ -40,11 +42,22 @@ LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
     "instance-segmentation": "instance_segmentation",
 }
 
+_VALID_SPLITS = {"train", "val", "test"}
+
+
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
+
+
+def _normalize_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
 
 def _assert_request_shape(
     request: dict[str, Any],
@@ -93,6 +106,171 @@ def _assert_request_shape(
         split_strategy_name,
         description,
     )
+
+
+def _normalize_supported_strategy_or_none(value: Any) -> str | None:
+    text = _normalize_optional_string(value)
+    if text is None:
+        return None
+    if text not in SUPPORTED_SPLIT_STRATEGIES:
+        return None
+    return text
+
+
+def _resolve_effective_split_strategy_for_update(
+    *,
+    job_id: str,
+    user: str,
+    event_type: str,
+    dataset_id: str,
+    latest_meta: dict[str, Any],
+    split_approach: str,
+    requested_split_strategy_name: str | None,
+    honor_source_splits: bool,
+) -> tuple[str | None, str]:
+    """
+    Returns:
+      (effective_split_strategy_name, effective_split_mode)
+
+    Rules:
+    - honor_source_splits=True:
+        * rebalance forbidden
+        * strategy is ignored for actual assignment
+        * keep prior split_strategy_name only for metadata continuity if present
+        * effective mode = honor_source_splits
+
+    - honor_source_splits=False:
+        * maintain:
+            - inherit prior usable strategy if present
+            - otherwise allow request to supply one
+            - if neither exists, fail
+        * rebalance:
+            - explicit request strategy required
+    """
+    requested_strategy = _normalize_supported_strategy_or_none(requested_split_strategy_name)
+    prior_strategy = _normalize_supported_strategy_or_none(latest_meta.get("split_strategy_name"))
+    fallback_strategy = _normalize_supported_strategy_or_none(latest_meta.get("effective_split_mode"))
+
+    if honor_source_splits:
+        if split_approach == "rebalance":
+            raise ValueError(
+                "split_approach='rebalance' is not allowed when honor_source_splits=True."
+            )
+
+        if requested_split_strategy_name:
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} honor_source_splits=True, so request.split_strategy_name="
+                    f"{requested_split_strategy_name!r} is accepted but ignored for "
+                    f"dataset_id={dataset_id}."
+                ),
+                level="info",
+            )
+
+        metadata_strategy = prior_strategy or fallback_strategy
+        return metadata_strategy, "honor_source_splits"
+
+    # honor_source_splits=False below
+    if split_approach == "rebalance":
+        if requested_strategy is None:
+            raise ValueError(
+                "request.split_strategy_name is required and must be supported when "
+                "split_approach='rebalance'"
+            )
+        return requested_strategy, requested_strategy
+
+    # maintain
+    inherited_strategy = prior_strategy or fallback_strategy
+    if inherited_strategy is not None:
+        if requested_strategy and requested_strategy != inherited_strategy:
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} split_approach='maintain' uses the dataset's existing "
+                    f"split strategy {inherited_strategy!r}; "
+                    f"request.split_strategy_name={requested_split_strategy_name!r} "
+                    f"will be ignored for dataset_id={dataset_id}."
+                ),
+                level="info",
+            )
+        return inherited_strategy, inherited_strategy
+
+    if requested_strategy is not None:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            (
+                f"{TASK_NAME} latest version metadata did not contain a usable prior split strategy; "
+                f"using request.split_strategy_name={requested_strategy!r} for "
+                f"maintain update on dataset_id={dataset_id}."
+            ),
+            level="warning",
+        )
+        return requested_strategy, requested_strategy
+
+    raise ValueError(
+        f"{TASK_NAME} could not resolve a usable split strategy for maintain update on "
+        f"dataset_id={dataset_id}; latest version metadata did not contain one and none "
+        f"was supplied in the request."
+    )
+
+
+def _canonicalize_split_rows_or_raise(
+    *,
+    split_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Enforce one canonical split row per image_id.
+
+    Behavior:
+    - exact duplicate row for same image_id -> collapse
+    - conflicting row for same image_id -> raise
+
+    Returns:
+    - canonical rows sorted by image_id
+    - duplicate_collapsed_count
+    """
+    canonical_by_image_id: dict[str, dict[str, Any]] = {}
+    duplicate_collapsed_count = 0
+
+    for row in split_rows:
+        image_id = _require_nonempty_string(row.get("image_id"), field_name="split_rows[].image_id")
+        split = _require_nonempty_string(row.get("split"), field_name="split_rows[].split")
+        if split not in _VALID_SPLITS:
+            raise ValueError(f"{TASK_NAME} Invalid split in split_rows for image_id={image_id}: {split!r}")
+
+        normalized_row = {**row, "image_id": image_id, "split": split}
+
+        existing = canonical_by_image_id.get(image_id)
+        if existing is None:
+            canonical_by_image_id[image_id] = normalized_row
+            continue
+
+        if existing == normalized_row:
+            duplicate_collapsed_count += 1
+            continue
+
+        raise ValueError(
+            f"{TASK_NAME} Conflicting duplicate split rows for image_id={image_id!r}. "
+            f"First row={existing!r}; duplicate row={normalized_row!r}"
+        )
+
+    canonical_rows = sorted(
+        canonical_by_image_id.values(),
+        key=lambda r: r["image_id"],
+    )
+
+    return canonical_rows, duplicate_collapsed_count
+
 
 def handler(event, context):
     job_id = "unknown"
@@ -166,72 +344,16 @@ def handler(event, context):
         if label_type not in VALID_LABEL_TYPES:
             raise ValueError(f"Unsupported dataset label_type: {label_type!r}")
 
-        # Determine the effective split mode/strategy for this update.
-        latest_split_strategy_name = (
-            latest_meta.get("split_strategy_name")
-            or latest_meta.get("effective_split_mode")
+        effective_split_strategy_name, effective_split_mode = _resolve_effective_split_strategy_for_update(
+            job_id=job_id,
+            user=user,
+            event_type=event_type,
+            dataset_id=dataset_id,
+            latest_meta=latest_meta,
+            split_approach=split_approach,
+            requested_split_strategy_name=requested_split_strategy_name,
+            honor_source_splits=honor_source_splits,
         )
-
-        if honor_source_splits:
-            if split_approach == "rebalance":
-                raise ValueError(
-                    "split_approach='rebalance' is not allowed when honor_source_splits=True."
-                )
-
-            if requested_split_strategy_name:
-                log(
-                    job_id,
-                    user,
-                    event_type,
-                    LOG_FIREHOSE_STREAM_NAME,
-                    (
-                        f"{TASK_NAME} honor_source_splits=True, so request.split_strategy_name="
-                        f"{requested_split_strategy_name!r} is accepted but ignored for "
-                        f"dataset_id={dataset_id}."
-                    ),
-                    level="info",
-                )
-
-            # Keep the historical value around for metadata continuity if present,
-            # but effective split mode is governed by honor_source_splits.
-            effective_split_strategy_name = latest_meta.get("split_strategy_name")
-            effective_split_mode = "honor_source_splits"
-
-        else:
-            if split_approach == "maintain":
-                effective_split_strategy_name = latest_split_strategy_name
-                if not effective_split_strategy_name or effective_split_strategy_name == "honor_source_splits":
-                    raise ValueError(
-                        f"{TASK_NAME} existing latest_version_info missing a usable "
-                        f"split_strategy_name for maintain update on dataset_id={dataset_id}"
-                    )
-
-                if (
-                    requested_split_strategy_name
-                    and requested_split_strategy_name != effective_split_strategy_name
-                ):
-                    log(
-                        job_id,
-                        user,
-                        event_type,
-                        LOG_FIREHOSE_STREAM_NAME,
-                        (
-                            f"{TASK_NAME} split_approach='maintain' uses the dataset's existing "
-                            f"split strategy {effective_split_strategy_name!r}; "
-                            f"request.split_strategy_name={requested_split_strategy_name!r} "
-                            f"will be ignored for dataset_id={dataset_id}."
-                        ),
-                        level="info",
-                    )
-
-            else:  # rebalance
-                if not requested_split_strategy_name:
-                    raise ValueError(
-                        "request.split_strategy_name is required when split_approach='rebalance'"
-                    )
-                effective_split_strategy_name = requested_split_strategy_name
-
-            effective_split_mode = effective_split_strategy_name
 
         effective_version_description = description
 
@@ -277,8 +399,7 @@ def handler(event, context):
         )
 
         # 3) Resolve current dataset membership rows.
-        membership_mode = "enriched"
-
+        # Enriched mode is valid for both maintain and rebalance and simplifies downstream handling.
         membership_sql, current_rows = resolve_dataset_membership(
             iceberg_database_name=ICEBERG_DATABASE_NAME,
             dataset_membership_table_name=dataset_membership_table_name,
@@ -286,7 +407,7 @@ def handler(event, context):
             dataset_id=dataset_id,
             version=latest_version,
             label_type=label_type,
-            mode=membership_mode,
+            mode="enriched",
             athena_output_s3_uri=ATHENA_OUTPUT_S3,
             athena_workgroup=ATHENA_WORKGROUP,
             task_name=TASK_NAME,
@@ -319,13 +440,35 @@ def handler(event, context):
                 f"After {operation} operation, {dataset_id} had no rows for the newest updated version."
             )
 
+        canonical_split_rows, duplicate_collapsed_count = _canonicalize_split_rows_or_raise(
+            split_rows=split_rows,
+        )
+
+        if not canonical_split_rows:
+            raise ValueError(
+                f"{TASK_NAME} canonical split row set is empty for dataset_id={dataset_id}, version={new_version}"
+            )
+
+        if duplicate_collapsed_count > 0:
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} Collapsed {duplicate_collapsed_count} exact duplicate split rows "
+                    f"for dataset_id={dataset_id}, version={new_version}"
+                ),
+                level="warning",
+            )
+
         log(
             job_id,
             user,
             event_type,
             LOG_FIREHOSE_STREAM_NAME,
             (
-                f"{TASK_NAME} Computed {len(split_rows)} final split rows for version={new_version}, "
+                f"{TASK_NAME} Computed {len(canonical_split_rows)} final split rows for version={new_version}, "
                 f"effective_split_mode={split_summary['effective_split_mode']}, "
                 f"excluded_unresolved={split_summary.get('excluded_unresolved_count', 0)}, "
                 f"excluded_inconsistent={split_summary.get('excluded_inconsistent_count', 0)}"
@@ -333,19 +476,7 @@ def handler(event, context):
             level="info",
         )
 
-        # 5) Write new-version Iceberg membership rows.
-        membership_result = write_dataset_membership(
-            task_name=TASK_NAME,
-            iceberg_database_name=ICEBERG_DATABASE_NAME,
-            athena_output_s3_uri=ATHENA_OUTPUT_S3,
-            athena_workgroup=ATHENA_WORKGROUP,
-            dataset_id=dataset_id,
-            version=new_version,
-            dataset_label_type=label_type,
-            split_rows=split_rows,
-        )
-
-        # 6) Write versioned S3 artifacts.
+        # 5) Write versioned S3 artifacts first.
         artifact_result = write_s3_artifacts(
             dataset_bucket_name=DATASETS_BUCKET_NAME,
             dataset_id=dataset_id,
@@ -355,7 +486,19 @@ def handler(event, context):
             honor_source_splits=honor_source_splits,
             selection_sql=selection_sql_for_update,
             selection_config=selection_config,
-            split_rows=split_rows,
+            split_rows=canonical_split_rows,
+        )
+
+        # 6) Write new-version Iceberg membership rows.
+        membership_result = write_dataset_membership(
+            task_name=TASK_NAME,
+            iceberg_database_name=ICEBERG_DATABASE_NAME,
+            athena_output_s3_uri=ATHENA_OUTPUT_S3,
+            athena_workgroup=ATHENA_WORKGROUP,
+            dataset_id=dataset_id,
+            version=new_version,
+            dataset_label_type=label_type,
+            split_rows=canonical_split_rows,
         )
 
         # 7) Write DDB version metadata and advance dataset latest_version.
@@ -374,7 +517,7 @@ def handler(event, context):
             operation=operation,
             split_approach=split_approach,
             selection_config=selection_config,
-            split_rows=split_rows,
+            split_rows=canonical_split_rows,
             artifact_result=artifact_result,
         )
 
@@ -411,6 +554,8 @@ def handler(event, context):
             "split_approach": split_approach,
             f"candidate_imagery_count_to_{operation}": len(selected_imagery_rows),
             "preexisting_membership_count": len(current_rows),
+            "canonical_split_row_count": len(canonical_split_rows),
+            "duplicate_collapsed_count": duplicate_collapsed_count,
             "final_membership_row_count": membership_result["row_count"],
             "membership_table_name": membership_result["table_name"],
             "excluded_unresolved_count": split_summary.get("excluded_unresolved_count", 0),

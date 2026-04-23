@@ -61,7 +61,17 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
 
-def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bool, str]:
+def send_to_dlq(
+    job_id: str,
+    user: str,
+    event_type: str,
+    error: str,
+    *,
+    task_type: str | None = None,
+    dataset_context: dict | None = None,
+    failed_stage: str = "kickoff",
+    dlq_policy: str = "kickoff_only",
+) -> Tuple[bool, str]:
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "DATASET_OP"
@@ -74,6 +84,10 @@ def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bo
                 "job_id": job_id,
                 "user": user,
                 "event_type": event_type,
+                "task_type": task_type,
+                "dataset_context": dataset_context,
+                "failed_stage": failed_stage,
+                "dlq_policy": dlq_policy,
                 "error": str(error),
             }),
         )
@@ -84,14 +98,30 @@ def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bo
         return False, msg
 
 
-def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
+def fail(
+    job_id: str,
+    user: str,
+    event_type: str,
+    msg: str,
+    *,
+    task_type: str | None = None,
+    dataset_context: dict | None = None,
+) -> dict:
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "DATASET_OP"
 
-    ok, dlq_err = send_to_dlq(job_id, user, event_type, msg)
+    ok, dlq_err = send_to_dlq(
+        job_id,
+        user,
+        event_type,
+        msg,
+        task_type=task_type,
+        dataset_context=dataset_context,
+        failed_stage="kickoff",
+        dlq_policy="kickoff_only",
+    )
     if not ok:
-        # Raise so the SQS-triggered Lambda invocation fails and the message is retried.
         raise RuntimeError(
             f"{TASK_NAME} Kickoff failed and DLQ send also failed. "
             f"original_error={msg}; dlq_error={dlq_err}"
@@ -102,6 +132,7 @@ def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
         "job_id": job_id,
         "user": user,
         "event_type": event_type,
+        "task_type": task_type,
     }
 
 
@@ -169,16 +200,16 @@ def handler(event, context):
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid submission.json payload: {e}")
 
     if event_type != "DATASET_OP":
-        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid event_type: {event_type}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid event_type: {event_type}", task_type=task_type, dataset_context=dataset_context)
 
     if not isinstance(task_type, str) or task_type not in ALLOWED_TASK_TYPES:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid task_type: {task_type}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid task_type: {task_type}", task_type=task_type, dataset_context=dataset_context)
 
     if not isinstance(request, dict):
-        return fail(job_id, user, event_type, f"{TASK_NAME} request must be an object")
+        return fail(job_id, user, event_type, f"{TASK_NAME} request must be an object", task_type=task_type, dataset_context=dataset_context)
 
     if not isinstance(dataset_context, dict):
-        return fail(job_id, user, event_type, f"{TASK_NAME} dataset_context must be an object")
+        return fail(job_id, user, event_type, f"{TASK_NAME} dataset_context must be an object", task_type=task_type, dataset_context=dataset_context)
 
     expected_submission_s3_uri = f"s3://{FILE_BUCKET_NAME}/temp/dataset-ops/{job_id}/submission.json"
     if submission_s3_uri != expected_submission_s3_uri:
@@ -187,13 +218,15 @@ def handler(event, context):
             user,
             event_type,
             f"{TASK_NAME} submission_s3_uri mismatch: got {submission_s3_uri}, expected {expected_submission_s3_uri}",
+            task_type=task_type,
+            dataset_context = dataset_context
         )
 
     ok, reason = assert_lock_held_by_job(job_id)
     if not ok:
         msg = f"{TASK_NAME} Lock mismatch for job_id={job_id}: {reason}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
-        return fail(job_id, user, event_type, msg)
+        return fail(job_id, user, event_type, msg, task_type=task_type, dataset_context=dataset_context)
 
     # Deterministic execution name = idempotent per job.
     execution_name = job_id[:80]
@@ -241,7 +274,7 @@ def handler(event, context):
             f"{TASK_NAME} Error starting dataset state machine: {e}",
             level="error",
         )
-        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}", task_type=task_type, dataset_context=dataset_context)
 
     except Exception as e:
         log(
@@ -252,7 +285,7 @@ def handler(event, context):
             f"{TASK_NAME} Error starting dataset state machine: {e}",
             level="error",
         )
-        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}", task_type=task_type, dataset_context=dataset_context)
 
     log(
         job_id,
