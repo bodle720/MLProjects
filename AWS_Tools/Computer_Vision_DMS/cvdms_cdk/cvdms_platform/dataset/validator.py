@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from common.general_utils.class_normalizer import canonicalize_class_name
+from workers.common.python.common.general_utils.class_normalizer import canonicalize_class_name
+
+# Normalizes data source in line with upload flow
+from workers.common.python.common.general_utils.data_source_normalization import canonicalize_data_source
 
 _ALLOWED_LABEL_TYPES = {
     "single-label",
@@ -352,11 +355,25 @@ def validate_selection_config(selection_config: dict[str, Any]) -> dict[str, Any
     validated["allowed_classes"] = canon_allowed
 
     if "allowed_sources" in selection_config:
-        validated["allowed_sources"] = _validate_nonempty_string_list(
+        allowed_sources_ls = _validate_nonempty_string_list(
             name="allowed_sources",
             value=selection_config["allowed_sources"],
             normalize=False,
         )
+
+        canon_sources: list[str] = []
+        seen_sources: set[str] = set()
+
+        for raw in allowed_sources_ls:
+            canon = canonicalize_data_source(raw, field_name="allowed_sources")
+            if canon in seen_sources:
+                raise ValueError(
+                    f"allowed_sources contains duplicate source after canonicalization: {canon}"
+                )
+            seen_sources.add(canon)
+            canon_sources.append(canon)
+
+        validated["allowed_sources"] = canon_sources
 
     if "upload_date_range" in selection_config:
         validated["upload_date_range"] = _validate_date_range(

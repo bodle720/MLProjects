@@ -137,6 +137,52 @@ def _build_honor_source_split_rows(
     return split_rows, summary
 
 
+def _canonicalize_split_rows_or_raise(
+    *,
+    split_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Enforce one canonical split row per image_id for this dataset version.
+
+    Behavior:
+    - exact duplicate row for same image_id -> collapse
+    - conflicting row for same image_id -> raise
+
+    Returns:
+    - canonical_rows sorted deterministically by image_id
+    - duplicate_collapsed_count
+    """
+    canonical_by_image_id: dict[str, dict[str, Any]] = {}
+    duplicate_collapsed_count = 0
+
+    for row in split_rows:
+        image_id = _require_nonempty_string(row.get("image_id"), field_name="split_rows[].image_id")
+        split = _require_nonempty_string(row.get("split"), field_name="split_rows[].split")
+        if split not in _VALID_SPLITS:
+            raise ValueError(f"{TASK_NAME} Invalid split in split_rows for image_id={image_id}: {split!r}")
+
+        existing = canonical_by_image_id.get(image_id)
+        if existing is None:
+            canonical_by_image_id[image_id] = row
+            continue
+
+        if existing == row:
+            duplicate_collapsed_count += 1
+            continue
+
+        raise ValueError(
+            f"{TASK_NAME} Conflicting duplicate split rows for image_id={image_id!r}. "
+            f"First row={existing!r}; duplicate row={row!r}"
+        )
+
+    canonical_rows = sorted(
+        canonical_by_image_id.values(),
+        key=lambda r: str(r["image_id"]).strip(),
+    )
+
+    return canonical_rows, duplicate_collapsed_count
+
+
 def handler(event, context):
     job_id = "unknown"
     user = "unknown"
@@ -276,19 +322,29 @@ def handler(event, context):
                 level="info",
             )
 
-        # Iceberg membership rows
-        membership_result = write_dataset_membership(
-            task_name=TASK_NAME,
-            iceberg_database_name=ICEBERG_DATABASE_NAME,
-            athena_output_s3_uri=ATHENA_OUTPUT_S3,
-            athena_workgroup=ATHENA_WORKGROUP,
-            dataset_id=dataset_id,
-            version=1,
-            dataset_label_type=label_type,
+        # Canonicalize once so Iceberg/S3/DDB all see the same exact row set.
+        canonical_split_rows, duplicate_collapsed_count = _canonicalize_split_rows_or_raise(
             split_rows=split_rows,
         )
 
-        # S3 artifacts
+        if not canonical_split_rows:
+            raise ValueError(f"{TASK_NAME} canonical split row set is empty for dataset_id={dataset_id}")
+
+        if duplicate_collapsed_count > 0:
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} Collapsed {duplicate_collapsed_count} exact duplicate split rows "
+                    f"for dataset_id={dataset_id}"
+                ),
+                level="warning",
+            )
+
+        # Write S3 artifacts first: safer to leave orphaned version artifacts than
+        # to leave membership rows if a later S3 write fails.
         artifact_result = write_s3_artifacts(
             dataset_bucket_name=DATASETS_BUCKET_NAME,
             dataset_id=dataset_id,
@@ -298,7 +354,19 @@ def handler(event, context):
             honor_source_splits=honor_source_splits,
             selection_sql=selection_sql,
             selection_config=selection_config,
-            split_rows=split_rows,
+            split_rows=canonical_split_rows,
+        )
+
+        # Iceberg membership rows
+        membership_result = write_dataset_membership(
+            task_name=TASK_NAME,
+            iceberg_database_name=ICEBERG_DATABASE_NAME,
+            athena_output_s3_uri=ATHENA_OUTPUT_S3,
+            athena_workgroup=ATHENA_WORKGROUP,
+            dataset_id=dataset_id,
+            version=1,
+            dataset_label_type=label_type,
+            split_rows=canonical_split_rows,
         )
 
         # DDB dataset + version metadata
@@ -317,7 +385,7 @@ def handler(event, context):
             operation="create",
             split_approach="initial",
             selection_config=selection_config,
-            split_rows=split_rows,
+            split_rows=canonical_split_rows,
             artifact_result=artifact_result,
         )
 
@@ -335,6 +403,7 @@ def handler(event, context):
             (
                 f"{TASK_NAME} Completed create flow for dataset_id={dataset_id}, "
                 f"version=1, candidates={len(candidates)}, "
+                f"canonical_split_rows={len(canonical_split_rows)}, "
                 f"membership_rows={membership_result['row_count']}, "
                 f"effective_split_mode={effective_split_mode}"
             ),
@@ -356,6 +425,8 @@ def handler(event, context):
             "split_strategy_name": split_strategy_name,
             "effective_split_mode": effective_split_mode,
             "candidate_count": len(candidates),
+            "canonical_split_row_count": len(canonical_split_rows),
+            "duplicate_collapsed_count": duplicate_collapsed_count,
             "membership_row_count": membership_result["row_count"],
             "membership_table_name": membership_result["table_name"],
             "excluded_unresolved_count": exclusion_summary["unresolved_count"],

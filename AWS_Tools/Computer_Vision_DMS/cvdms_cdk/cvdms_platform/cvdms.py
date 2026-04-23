@@ -208,7 +208,7 @@ class CvdmsApp:
                                  *,
                                  dataset_id: str,
                                  label_type: str,
-                                 description: str,
+                                 description: str | None,
                                  selection_config: dict,
                                  split_strategy_name: str,
                                  honor_source_splits: bool) -> Dict:

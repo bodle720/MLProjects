@@ -1,10 +1,10 @@
 import os
 import json
 from typing import Tuple
-from datetime import datetime
 from urllib.parse import unquote_plus
 
 import boto3
+from botocore.exceptions import ClientError
 
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import s3_read_json
@@ -18,7 +18,7 @@ DATASET_DLQ_URL = os.environ["DATASET_DLQ_URL"]
 ALLOWED_TASK_TYPES = {
     "create_dataset",
     "update_dataset",
-    "delete_dataset"
+    "delete_dataset",
 }
 
 TASK_NAME = "[DATASET_KICKOFF]"
@@ -27,14 +27,8 @@ sf = boto3.client("stepfunctions")
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
 
+
 def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
-    """
-    Ensures:
-      - lock exists
-      - locked == True
-      - locked_by == job_id
-    Returns (True, "") if ok, else (False, reason).
-    """
     try:
         resp = ddb.get_item(
             TableName=LOCK_TABLE_NAME,
@@ -67,7 +61,7 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
 
-def send_to_dlq(job_id, user, event_type, error):
+def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bool, str]:
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "DATASET_OP"
@@ -83,22 +77,26 @@ def send_to_dlq(job_id, user, event_type, error):
                 "error": str(error),
             }),
         )
+        return True, ""
     except Exception as e:
-        log(
-            job_id,
-            user,
-            event_type,
-            LOG_FIREHOSE_STREAM_NAME,
-            f"{TASK_NAME} Failed to send to DLQ: {str(error)}, exception: {e}",
-            level="error",
-        )
+        msg = f"{TASK_NAME} Failed to send to DLQ: original_error={error}, exception={e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
+        return False, msg
 
 
-def fail(job_id, user, event_type, msg):
+def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "DATASET_OP"
-    send_to_dlq(job_id, user, event_type, msg)
+
+    ok, dlq_err = send_to_dlq(job_id, user, event_type, msg)
+    if not ok:
+        # Raise so the SQS-triggered Lambda invocation fails and the message is retried.
+        raise RuntimeError(
+            f"{TASK_NAME} Kickoff failed and DLQ send also failed. "
+            f"original_error={msg}; dlq_error={dlq_err}"
+        )
+
     return {
         "status": "failed",
         "job_id": job_id,
@@ -112,12 +110,10 @@ def handler(event, context):
     user = "unknown"
     event_type = "DATASET_OP"
 
-    # Guard: ensure there is at least one SQS record.
     records = event.get("Records", [])
     if not records:
         return fail(job_id, user, event_type, f"{TASK_NAME} No Records in event")
 
-    # batch_size=1 in CDK, so use the first SQS record.
     sqs_rec = records[0]
     body = sqs_rec.get("body")
     if not body:
@@ -128,7 +124,6 @@ def handler(event, context):
     except Exception as e:
         return fail(job_id, user, event_type, f"{TASK_NAME} Failed to parse SQS body as JSON: {e}")
 
-    # The SQS body should contain the S3 notification event.
     s3_records = body_json.get("Records", [])
     if not s3_records:
         return fail(job_id, user, event_type, f"{TASK_NAME} No S3 Records inside SQS body")
@@ -138,7 +133,6 @@ def handler(event, context):
     bucket = s3_info.get("bucket", {}).get("name")
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
-    # Expect temp/dataset-ops/<job_id>/submission.json
     if not key.endswith("submission.json"):
         return fail(job_id, user, event_type, f"{TASK_NAME} Unexpected key: {key}")
 
@@ -147,9 +141,13 @@ def handler(event, context):
         job_id = parts[2]
 
     if bucket != FILE_BUCKET_NAME:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Bucket mismatch: got {bucket}, expected {FILE_BUCKET_NAME}")
+        return fail(
+            job_id,
+            user,
+            event_type,
+            f"{TASK_NAME} Bucket mismatch: got {bucket}, expected {FILE_BUCKET_NAME}",
+        )
 
-    # Load submission.json
     try:
         submission = s3_read_json(bucket, key, TASK_NAME)
         job_id = submission["job_id"]
@@ -158,7 +156,7 @@ def handler(event, context):
         task_type = submission["task_type"]
         request = submission["request"]
         submission_s3_uri = submission["submission_s3_uri"]
-        dataset_context = submission["dataset_context"] # dict, dataset context fields, see dataset client
+        dataset_context = submission["dataset_context"]
     except Exception as e:
         log(
             job_id,
@@ -170,7 +168,6 @@ def handler(event, context):
         )
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid submission.json payload: {e}")
 
-    # Minimal validation only.
     if event_type != "DATASET_OP":
         return fail(job_id, user, event_type, f"{TASK_NAME} Invalid event_type: {event_type}")
 
@@ -179,6 +176,9 @@ def handler(event, context):
 
     if not isinstance(request, dict):
         return fail(job_id, user, event_type, f"{TASK_NAME} request must be an object")
+
+    if not isinstance(dataset_context, dict):
+        return fail(job_id, user, event_type, f"{TASK_NAME} dataset_context must be an object")
 
     expected_submission_s3_uri = f"s3://{FILE_BUCKET_NAME}/temp/dataset-ops/{job_id}/submission.json"
     if submission_s3_uri != expected_submission_s3_uri:
@@ -189,18 +189,19 @@ def handler(event, context):
             f"{TASK_NAME} submission_s3_uri mismatch: got {submission_s3_uri}, expected {expected_submission_s3_uri}",
         )
 
-    # Enforce that this submission corresponds to the currently-held global lock.
     ok, reason = assert_lock_held_by_job(job_id)
     if not ok:
         msg = f"{TASK_NAME} Lock mismatch for job_id={job_id}: {reason}"
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
         return fail(job_id, user, event_type, msg)
 
-    # Start the dataset state machine.
+    # Deterministic execution name = idempotent per job.
+    execution_name = job_id[:80]
+
     try:
         response = sf.start_execution(
             stateMachineArn=DATASET_STATE_MACHINE_ARN,
-            name=f"{job_id}-{int(datetime.now().timestamp() * 1000)}"[:80],
+            name=execution_name,
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
@@ -208,9 +209,40 @@ def handler(event, context):
                 "task_type": task_type,
                 "submission_s3_uri": submission_s3_uri,
                 "request": request,
-                "dataset_context": dataset_context
+                "dataset_context": dataset_context,
             }),
         )
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ExecutionAlreadyExists":
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Execution already exists for job_id={job_id}; treating as duplicate kickoff and returning success.",
+                level="warning",
+            )
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "user": user,
+                "event_type": event_type,
+                "task_type": task_type,
+                "submission_s3_uri": submission_s3_uri,
+                "duplicate_start_suppressed": True,
+            }
+
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Error starting dataset state machine: {e}",
+            level="error",
+        )
+        return fail(job_id, user, event_type, f"{TASK_NAME} Failed to start dataset state machine: {e}")
+
     except Exception as e:
         log(
             job_id,

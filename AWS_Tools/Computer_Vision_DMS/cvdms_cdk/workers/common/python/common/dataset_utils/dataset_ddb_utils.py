@@ -8,6 +8,10 @@ from botocore.exceptions import ClientError
 
 dynamodb_resource = boto3.resource("dynamodb")
 
+_VALID_SPLITS = {"train", "val", "test"}
+_VALID_SPLIT_APPROACHES = {"initial", "maintain", "rebalance"}
+
+
 def write_ddb_artifacts(
     *,
     new_dataset: bool,
@@ -88,21 +92,26 @@ def write_ddb_artifacts(
     if not isinstance(honor_source_splits, bool):
         raise TypeError("honor_source_splits must be a bool")
 
-    normalized_split_strategy_name = _normalize_optional_string(split_strategy_name)
-    effective_split_mode = (
-        "honor_source_splits"
-        if honor_source_splits
-        else normalized_split_strategy_name
-    )
-
-    if not effective_split_mode:
+    split_approach = _normalize_required_string(split_approach, field_name="split_approach")
+    if split_approach not in _VALID_SPLIT_APPROACHES:
         raise ValueError(
-            "effective split mode cannot be empty; provide split_strategy_name when "
-            "honor_source_splits=False"
+            f"split_approach must be one of {sorted(_VALID_SPLIT_APPROACHES)}, got {split_approach!r}"
         )
 
+    normalized_split_strategy_name = _normalize_optional_string(split_strategy_name)
+    effective_split_mode = _derive_effective_split_mode(
+        new_dataset=new_dataset,
+        split_approach=split_approach,
+        honor_source_splits=honor_source_splits,
+        split_strategy_name=normalized_split_strategy_name,
+    )
+
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    count_summary = build_split_count_summary(split_rows=split_rows)
+
+    canonical_split_rows, duplicate_collapsed_count = _canonicalize_split_rows_for_metadata_or_raise(
+        split_rows=split_rows,
+    )
+    count_summary = build_split_count_summary(split_rows=canonical_split_rows)
 
     allowed_classes = selection_config.get("allowed_classes")
     if not isinstance(allowed_classes, list) or not allowed_classes:
@@ -167,6 +176,9 @@ def write_ddb_artifacts(
         "total_test_count": count_summary["total_test_count"],
     }
 
+    if duplicate_collapsed_count > 0:
+        dataset_version_item["duplicate_collapsed_count"] = duplicate_collapsed_count
+
     if artifact_result:
         if artifact_result.get("base_prefix") is not None:
             dataset_version_item["version_s3_prefix"] = artifact_result["base_prefix"]
@@ -200,6 +212,7 @@ def write_ddb_artifacts(
         "dataset_version_item": dataset_version_item,
     }
 
+
 def build_split_count_summary(*, split_rows: list[dict[str, Any]]) -> dict[str, int]:
     split_counts = Counter()
 
@@ -213,6 +226,7 @@ def build_split_count_summary(*, split_rows: list[dict[str, Any]]) -> dict[str, 
         "total_val_count": split_counts.get("val", 0),
         "total_test_count": split_counts.get("test", 0),
     }
+
 
 def transact_write_dataset_and_version(
     *,
@@ -297,6 +311,7 @@ def transact_write_dataset_and_version(
 
         raise
 
+
 def to_ddb_item(value: Any) -> dict[str, Any]:
     """
     Convert a plain Python dict into the low-level DynamoDB attribute-value format.
@@ -305,6 +320,7 @@ def to_ddb_item(value: Any) -> dict[str, Any]:
         raise TypeError(f"to_ddb_item expects dict input, got {type(value).__name__}")
 
     return {k: _to_ddb_attr(v) for k, v in value.items()}
+
 
 def _to_ddb_attr(value: Any) -> dict[str, Any]:
     if value is None:
@@ -333,17 +349,112 @@ def _to_ddb_attr(value: Any) -> dict[str, Any]:
 
     raise TypeError(f"Unsupported type for DynamoDB serialization: {type(value).__name__}")
 
+
 def _require_valid_split(value: Any) -> str:
     split = str(value).strip() if value is not None else ""
-    if split not in {"train", "val", "test"}:
+    if split not in _VALID_SPLITS:
         raise ValueError(f"Invalid split: {value!r}")
     return split
+
 
 def _normalize_optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_required_string(value: Any, *, field_name: str) -> str:
+    text = _normalize_optional_string(value)
+    if not text:
+        raise ValueError(f"{field_name} cannot be empty")
+    return text
+
+
+def _derive_effective_split_mode(
+    *,
+    new_dataset: bool,
+    split_approach: str,
+    honor_source_splits: bool,
+    split_strategy_name: str | None,
+) -> str:
+    if honor_source_splits:
+        return "honor_source_splits"
+
+    if new_dataset:
+        if not split_strategy_name:
+            raise ValueError(
+                "split_strategy_name is required for dataset create when honor_source_splits=False"
+            )
+        return split_strategy_name
+
+    if split_approach == "rebalance":
+        if not split_strategy_name:
+            raise ValueError(
+                "split_strategy_name is required when split_approach='rebalance' "
+                "and honor_source_splits=False"
+            )
+        return split_strategy_name
+
+    if split_approach == "maintain":
+        return split_strategy_name or "maintain"
+
+    if split_approach == "initial":
+        if not split_strategy_name:
+            raise ValueError(
+                "split_strategy_name is required when split_approach='initial' "
+                "and honor_source_splits=False"
+            )
+        return split_strategy_name
+
+    raise ValueError(f"Unsupported split_approach: {split_approach!r}")
+
+
+def _canonicalize_split_rows_for_metadata_or_raise(
+    *,
+    split_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Defensive metadata-only canonicalization.
+
+    Enforce one logical row per image_id:
+    - exact duplicate rows collapse
+    - conflicting duplicate rows raise
+
+    Returns:
+    - canonical rows sorted by image_id
+    - number of exact duplicates collapsed
+    """
+    canonical_by_image_id: dict[str, dict[str, Any]] = {}
+    duplicate_collapsed_count = 0
+
+    for row in split_rows:
+        image_id = _normalize_required_string(row.get("image_id"), field_name="split_rows[].image_id")
+        split = _require_valid_split(row.get("split"))
+
+        normalized_row = {**row, "image_id": image_id, "split": split}
+
+        existing = canonical_by_image_id.get(image_id)
+        if existing is None:
+            canonical_by_image_id[image_id] = normalized_row
+            continue
+
+        if existing == normalized_row:
+            duplicate_collapsed_count += 1
+            continue
+
+        raise ValueError(
+            f"Conflicting duplicate split rows for image_id={image_id!r}. "
+            f"First row={existing!r}; duplicate row={normalized_row!r}"
+        )
+
+    canonical_rows = sorted(
+        canonical_by_image_id.values(),
+        key=lambda r: r["image_id"],
+    )
+
+    return canonical_rows, duplicate_collapsed_count
+
 
 def _default_dataset_description(
     *,
@@ -354,6 +465,7 @@ def _default_dataset_description(
     if honor_source_splits:
         return f"{label_type} dataset honoring source splits created at {created_at}"
     return f"{label_type} dataset created at {created_at}"
+
 
 def _default_version_description(
     *,
@@ -372,10 +484,12 @@ def _default_version_description(
                 f"Initial {label_type} dataset version v{version} honoring source splits "
                 f"created at {created_at}"
             )
-        return (
-            f"Initial {label_type} dataset version v{version} "
-            f"({split_strategy_name}) created at {created_at}"
-        )
+        if split_strategy_name:
+            return (
+                f"Initial {label_type} dataset version v{version} "
+                f"({split_strategy_name}) created at {created_at}"
+            )
+        return f"Initial {label_type} dataset version v{version} created at {created_at}"
 
     if honor_source_splits:
         return (
@@ -383,7 +497,13 @@ def _default_version_description(
             f"source splits created at {created_at}"
         )
 
+    if split_strategy_name:
+        return (
+            f"Dataset update v{version} ({operation}, {split_approach}, {split_strategy_name}) "
+            f"created at {created_at}"
+        )
+
     return (
-        f"Dataset update v{version} ({operation}, {split_approach}, {split_strategy_name}) "
+        f"Dataset update v{version} ({operation}, {split_approach}) "
         f"created at {created_at}"
     )

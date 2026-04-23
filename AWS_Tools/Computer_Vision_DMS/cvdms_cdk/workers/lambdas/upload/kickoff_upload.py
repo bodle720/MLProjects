@@ -1,13 +1,12 @@
 import os
 import json
 from typing import Tuple
-from datetime import datetime
 from urllib.parse import unquote_plus
 
 import boto3
 from botocore.exceptions import ClientError
 
-# Lambda layer imports, add to path to avoid pycharm complaining.
+# Lambda layer imports
 from common.general_utils.logging_utils import log
 from common.general_utils.s3_utils import s3_read_json, parse_s3_uri
 
@@ -22,7 +21,7 @@ ALLOWED_LABEL_TYPES = {
     "multi-label",
     "object-detection",
     "semantic-segmentation",
-    "instance-segmentation"
+    "instance-segmentation",
 }
 
 TASK_NAME = "[UPLOAD_KICKOFF]"
@@ -31,6 +30,7 @@ sf = boto3.client("stepfunctions")
 s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
+
 
 def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     """
@@ -72,9 +72,10 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
-def send_to_dlq(job_id, user, event_type, error):
-    job_id = job_id or 'unknown'
-    user = user or 'unknown'
+
+def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bool, str]:
+    job_id = job_id or "unknown"
+    user = user or "unknown"
     event_type = event_type or "IMAGE_UPLOAD"
 
     try:
@@ -85,18 +86,36 @@ def send_to_dlq(job_id, user, event_type, error):
                 "job_id": job_id,
                 "user": user,
                 "event_type": event_type,
-                "error": str(error)
-            })
+                "error": str(error),
+            }),
         )
+        return True, ""
     except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Failed to send to DLQ: {str(error)}, exception: {e}", level='error')
+        msg = f"{TASK_NAME} Failed to send to DLQ: original_error={error}, exception={e}"
+        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
+        return False, msg
 
-def fail(job_id, user, event_type, msg):
+
+def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
     job_id = job_id or "unknown"
     user = user or "unknown"
     event_type = event_type or "IMAGE_UPLOAD"
-    send_to_dlq(job_id, user, event_type, msg)
-    return {"status": "failed", "job_id": job_id, "user": user, "event_type": event_type}
+
+    ok, dlq_err = send_to_dlq(job_id, user, event_type, msg)
+    if not ok:
+        # Raise so the SQS-triggered Lambda invocation fails and the message is retried.
+        raise RuntimeError(
+            f"{TASK_NAME} Kickoff failed and DLQ send also failed. "
+            f"original_error={msg}; dlq_error={dlq_err}"
+        )
+
+    return {
+        "status": "failed",
+        "job_id": job_id,
+        "user": user,
+        "event_type": event_type,
+    }
+
 
 def handler(event, context):
     job_id = "unknown"
@@ -131,18 +150,18 @@ def handler(event, context):
     bucket = s3_info.get("bucket", {}).get("name")
     key = unquote_plus(s3_info.get("object", {}).get("key", ""))
 
-    # key: "temp/image-upload/<job_id>/job.json"
+    # key: temp/image-upload/<job_id>/job.json
     if not key.endswith("job.json"):
         return fail(job_id, user, event_type, f"{TASK_NAME} Unexpected key: {key}")
 
     parts = key.split("/")
     if len(parts) >= 3 and parts[0] == "temp" and parts[1] == "image-upload":
-        job_id = parts[2]  # use this even before reading the manifest
+        job_id = parts[2]
 
     if bucket != FILE_BUCKET_NAME:
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Bucket mismatch in upload kickoff lambda")
 
-    # Now proceed with your existing logic to fetch job.json, validate, etc.
+    # Load job.json
     try:
         job_data = s3_read_json(bucket, key, TASK_NAME)
         job_id = job_data["job_id"]
@@ -155,11 +174,18 @@ def handler(event, context):
         registration_time = job_data["registration_time"]
         original_manifest_s3_uri = job_data["original_manifest_s3_uri"]
     except Exception as e:
-        log(job_id, user, "IMAGE_UPLOAD", LOG_FIREHOSE_STREAM_NAME, f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json", level='error')
+        log(
+            job_id,
+            user,
+            "IMAGE_UPLOAD",
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Upload Kickoff Lambda could not initialize job_id, user, data_source, event_type, and/or label_type from job json",
+            level="error",
+        )
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: could not initialize expected manifest fields: {str(e)}")
 
     if not isinstance(data_source, str) or data_source.strip() == "":
-        return fail(job_id, user, event_type,f"{TASK_NAME} Invalid data_source type: {type(data_source).__name__}, value = {data_source}")
+        return fail(job_id, user, event_type, f"{TASK_NAME} Invalid data_source type: {type(data_source).__name__}, value = {data_source}")
 
     if source_split is None:
         source_split = "__none__"
@@ -190,12 +216,23 @@ def handler(event, context):
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest missing key: {original_manifest_s3_uri}")
 
     if manifest_bucket != FILE_BUCKET_NAME:
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest bucket mismatch in upload kickoff lambda, manifest is in bucket: {manifest_bucket}, expected {FILE_BUCKET_NAME}")
+        return fail(
+            job_id,
+            user,
+            event_type,
+            f"{TASK_NAME} Kickoff Lambda failed: Manifest bucket mismatch in upload kickoff lambda, manifest is in bucket: {manifest_bucket}, expected {FILE_BUCKET_NAME}",
+        )
 
-    if manifest_key != f"temp/image-upload/{job_id}/{job_id}.manifest":
-        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: Manifest key incorrect: got {manifest_key}, expected temp/image-upload/{job_id}/{job_id}.manifest")
+    expected_manifest_key = f"temp/image-upload/{job_id}/{job_id}.manifest"
+    if manifest_key != expected_manifest_key:
+        return fail(
+            job_id,
+            user,
+            event_type,
+            f"{TASK_NAME} Kickoff Lambda failed: Manifest key incorrect: got {manifest_key}, expected {expected_manifest_key}",
+        )
 
-    # Make sure we have <job id>.manifest located next to job.json: "temp/image-upload/<job_id>/<job_id>.manifest"
+    # Make sure we have <job_id>.manifest next to job.json
     try:
         head = s3.head_object(Bucket=manifest_bucket, Key=manifest_key)
         if head.get("ContentLength", 0) <= 0:
@@ -206,11 +243,13 @@ def handler(event, context):
             return fail(job_id, user, event_type, f"{TASK_NAME} Missing manifest next to job.json: {original_manifest_s3_uri}")
         return fail(job_id, user, event_type, f"{TASK_NAME} head_object failed for manifest: {original_manifest_s3_uri}: {e}")
 
-    # Start the upload step function.
+    # Idempotent execution name per job_id
+    execution_name = job_id[:80]
+
     try:
         response = sf.start_execution(
             stateMachineArn=UPLOAD_STATE_MACHINE_ARN,
-            name = f"{job_id}-{int(datetime.now().timestamp() * 1000)}"[:80],
+            name=execution_name,
             input=json.dumps({
                 "job_id": job_id,
                 "user": user,
@@ -220,14 +259,61 @@ def handler(event, context):
                 "source_split": source_split,
                 "path_prefix": path_prefix,
                 "original_manifest_s3_uri": original_manifest_s3_uri,
-                "registration_time": registration_time
-            })
+                "registration_time": registration_time,
+            }),
         )
-    except Exception as e:
-        log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Error starting state machine for upload workflow.", level='error')
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ExecutionAlreadyExists":
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                f"{TASK_NAME} Execution already exists for job_id={job_id}; treating as duplicate kickoff and returning success.",
+                level="warning",
+            )
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "user": user,
+                "label_type": label_type,
+                "event_type": event_type,
+                "data_source": data_source,
+                "source_split": source_split,
+                "path_prefix": path_prefix,
+                "original_manifest_s3_uri": original_manifest_s3_uri,
+                "duplicate_start_suppressed": True,
+            }
+
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Error starting state machine for upload workflow: {e}",
+            level="error",
+        )
         return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
 
-    log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME,f"{TASK_NAME} Kickoff Lambda started state machine execution {response['executionArn']}")
+    except Exception as e:
+        log(
+            job_id,
+            user,
+            event_type,
+            LOG_FIREHOSE_STREAM_NAME,
+            f"{TASK_NAME} Error starting state machine for upload workflow: {e}",
+            level="error",
+        )
+        return fail(job_id, user, event_type, f"{TASK_NAME} Kickoff Lambda failed: error starting the step function for uploading: {str(e)}")
+
+    log(
+        job_id,
+        user,
+        event_type,
+        LOG_FIREHOSE_STREAM_NAME,
+        f"{TASK_NAME} Kickoff Lambda started state machine execution {response['executionArn']}",
+    )
 
     return {
         "status": "ok",
@@ -238,5 +324,5 @@ def handler(event, context):
         "data_source": data_source,
         "source_split": source_split,
         "path_prefix": path_prefix,
-        "original_manifest_s3_uri": original_manifest_s3_uri
+        "original_manifest_s3_uri": original_manifest_s3_uri,
     }

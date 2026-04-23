@@ -73,8 +73,6 @@ Label-type specifics:
     - worker-response-ref must be a valid S3 URI ending in .json
     - no skip permitted
 '''
-import re
-import unicodedata
 import json
 import uuid
 import logging
@@ -87,62 +85,9 @@ from mypy_boto3_s3.client import S3Client
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource
 
 from cvdms_platform.upload.upload_client_utils import validate_manifest, validate_s3_key_prefix
+from workers.common.python.common.general_utils.data_source_normalization import canonicalize_data_source
 
 _ALLOWED_LABEL_TYPES = {"single-label", "multi-label", "object-detection", "semantic-segmentation", "instance-segmentation"}
-_DATA_SOURCE_MAX_LEN = 35
-
-def canonicalize_data_source(
-    value: Any,
-    *,
-    field_name: str = "data_source",
-    max_length: int = _DATA_SOURCE_MAX_LEN,
-) -> str:
-    """
-    Normalize a user-provided data source identifier into a compact,
-    lowercase, ASCII-safe token for storage and filtering.
-
-    Rules:
-    - must be a string
-    - strip leading/trailing whitespace
-    - lowercase
-    - Unicode NFKD normalize, then drop non-ASCII chars
-    - remove apostrophes
-    - remove all non-alphanumeric characters
-    - must remain non-empty
-    - truncate to max_length
-    - must remain non-empty after truncation
-
-    Examples:
-    - "COCO 2017" -> "coco2017"
-    - "BigEarthNet v2" -> "bigearthnetv2"
-    - " EuroSAT " -> "eurosat"
-    - "my-custom dataset!" -> "mycustomdataset"
-    """
-    if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be a string, got {type(value).__name__}")
-
-    s = value.strip().lower()
-    if s == "":
-        raise ValueError(f"{field_name} cannot be empty after stripping")
-
-    s = unicodedata.normalize("NFKD", s)
-    s = s.encode("ascii", "ignore").decode("ascii")
-
-    # remove apostrophes so "dataset's" -> "datasets"
-    s = re.sub(r"[\'’`]+", "", s)
-
-    # keep only lowercase letters and digits
-    s = re.sub(r"[^a-z0-9]+", "", s)
-
-    if s == "":
-        raise ValueError(f"{field_name} became empty after normalization")
-
-    s = s[:max_length]
-
-    if s == "":
-        raise ValueError(f"{field_name} became empty after length truncation")
-
-    return s
 
 class UploadClient:
     """
@@ -450,10 +395,24 @@ class UploadClient:
         if not ok:
             logging.error(f"Failed to upload files to S3: {msg}")
             job_ok, job_msg = self._update_job_status(job_id, "FAILED", error_msg=msg)
-            self._release_lock(expected_holder=job_id)
-            return {"error": f"Failed upload step: {msg}, updated job status to FAILED attempt: {job_ok}, msg = {job_msg}"}
+            rel_success, rel_msg = self._release_lock(expected_holder=job_id)
+            return {"error": f"""
+                               Failed upload step: {msg}, updated job status to FAILED attempt: {job_ok}, msg = {job_msg}
+                               lock released: {rel_success}, release msg: {rel_msg}
+                              """}
 
         logging.info("Done uploading manifest and job.json to S3.")
-        self._update_job_status(job_id, "IN_PROGRESS")
+
+        job_ok, job_msg = self._update_job_status(job_id, "IN_PROGRESS")
+        if not job_ok:
+            logging.error(
+                f"Failed to update job status to IN_PROGRESS for job_id={job_id}: {job_msg}. "
+                "Submission was already uploaded, so server-side work may already be progressing. "
+                "Not releasing the lock."
+            )
+            raise RuntimeError(
+                f"Submission uploaded successfully, but failed to update job status to IN_PROGRESS: {job_msg}. "
+                "Server-side work may already be progressing; inspect the job before retrying."
+            )
 
         return {"submission_status": "success", "job_id": job_id}

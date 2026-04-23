@@ -2,7 +2,7 @@ import uuid
 import json
 import logging
 
-from typing import Literal, Any, Tuple, Optional
+from typing import Literal, Any, Tuple, Optional, Dict
 from datetime import datetime, timezone
 from mypy_boto3_s3.client import S3Client
 from botocore.exceptions import ClientError
@@ -479,29 +479,33 @@ class DatasetClient:
 
             return False, f"upload_error: {e}"
 
-    def _submit_job(self, *, payload: dict) -> dict:
-        # try to acquire lock
+    def _submit_job(self, *, payload: dict) -> Dict:
+        # 1) Try to acquire the global lock.
         ok, holder_or_err = self._acquire_lock()
         if not ok:
-            logging.error(f"Failed to acquire lock: {holder_or_err}")
-            raise RuntimeError(f"Failed to acquire lock: {holder_or_err}")
+            return {"error": f"Failed to acquire lock: {holder_or_err}"}
 
-        job_id = holder_or_err  # we used holder as generated job id in acquire lock
+        job_id = holder_or_err  # holder doubles as the job_id
         dataset_id = payload["request"]["dataset_id"]
-        new_version = payload["request"]["new_version"] # 1 for create, int N > 1 for update, None for delete
+        new_version = payload["request"]["new_version"]  # 1=create, N>1=update, None=delete
         label_type = payload["request"]["label_type"]
         honor_source_splits = payload["request"].get("honor_source_splits")
 
         logging.info(f"Acquired lock: {job_id}")
 
+        # 2) Enrich payload with job-scoped context before upload.
         payload["job_id"] = job_id
-        payload["submission_s3_uri"] = f"s3://{self.file_bucket_name}/temp/dataset-ops/{job_id}/submission.json"
-        payload["dataset_context"] = {"dataset_id": dataset_id,
-                                      "new_version": new_version,
-                                      "label_type": label_type,
-                                      "honor_source_splits": honor_source_splits}
+        payload["submission_s3_uri"] = (
+            f"s3://{self.file_bucket_name}/temp/dataset-ops/{job_id}/submission.json"
+        )
+        payload["dataset_context"] = {
+            "dataset_id": dataset_id,
+            "new_version": new_version,
+            "label_type": label_type,
+            "honor_source_splits": honor_source_splits,
+        }
 
-        # create job row
+        # 3) Create initial job row.
         task_type = payload["task_type"]
         job_summary = payload["request"].get("description")
         if not job_summary:
@@ -510,32 +514,56 @@ class DatasetClient:
             else:
                 job_summary = "No description provided."
 
-        ok, err = self._create_job_row(job_id,
-                                       task_type=task_type,
-                                       dataset_id=dataset_id,
-                                       summary=job_summary)
+        ok, err = self._create_job_row(
+            job_id,
+            task_type=task_type,
+            dataset_id=dataset_id,
+            summary=job_summary,
+        )
         if not ok:
             logging.error(f"Failed to create job row: {err}")
-            # release lock before returning
-            self._release_lock(expected_holder=job_id)
-            raise RuntimeError(f"Failed to create job row: {err}")
+            rel_ok, rel_msg = self._release_lock(expected_holder=job_id)
+            return {
+                "error": (
+                    f"Failed to create job row: {err}. "
+                    f"Lock released: {rel_ok}, release msg: {rel_msg}"
+                )
+            }
 
-        logging.info(f"Created job row in job table for {self.event_type} event and is status: PENDING.")
+        logging.info(
+            f"Created job row in job table for {self.event_type} event with status=PENDING."
+        )
 
-        logging.info('Uploading submission file to S3.')
-        ok, msg = self._upload_submission_to_s3(job_id,
-                                                payload)
+        # 4) Upload submission.json to S3.
+        logging.info("Uploading submission file to S3.")
+        ok, msg = self._upload_submission_to_s3(job_id, payload)
         if not ok:
-            logging.error(f"Failed to upload file to S3: {msg}")
-            self._update_job_status(job_id, "FAILED", error_msg=msg)
-            self._release_lock(expected_holder=job_id)
-            raise RuntimeError(f"Failed to upload file to S3: {msg}")
+            logging.error(f"Failed to upload submission file to S3: {msg}")
+            job_ok, job_msg = self._update_job_status(job_id, "FAILED", error_msg=msg)
+            rel_ok, rel_msg = self._release_lock(expected_holder=job_id)
+            return {
+                "error": (
+                    f"Failed upload step to S3: {msg}. "
+                    f"Updated job status to FAILED attempt: {job_ok}, msg: {job_msg}. "
+                    f"Lock released: {rel_ok}, release msg: {rel_msg}"
+                )
+            }
 
         logging.info("Done uploading submission.json to S3.")
-        job_ok, job_msg = self._update_job_status(job_id, "IN_PROGRESS")
 
+        # 5) Mark submitted/in progress.
+        # IMPORTANT: if this fails, do NOT release the lock, because server-side work
+        # may already be progressing after the successful S3 upload.
+        job_ok, job_msg = self._update_job_status(job_id, "IN_PROGRESS")
         if not job_ok:
-            logging.error(f"Failed to update job status to IN_PROGRESS: {job_msg}")
-            raise RuntimeError(f"Failed to update job status to IN_PROGRESS: {job_msg}")
+            logging.error(
+                f"Failed to update job status to IN_PROGRESS for job_id={job_id}: {job_msg}. "
+                "Submission was already uploaded, so server-side work may already be progressing. "
+                "Not releasing the lock."
+            )
+            raise RuntimeError(
+                    f"Submission uploaded successfully, but failed to update job status to "
+                    f"IN_PROGRESS: {job_msg}. "
+                    "Server-side work may already be progressing; inspect the job before retrying.")
 
         return {"submission_status": "success", "job_id": job_id}
