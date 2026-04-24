@@ -299,14 +299,21 @@ def transact_write_dataset_and_version(
         version = dataset_version_item.get("version", "<unknown>")
 
         if error_code == "TransactionCanceledException":
+            cancellation_reasons = e.response.get("CancellationReasons", [])
+            reasons_text = "; ".join(
+                f"{idx}:{reason.get('Code')}:{reason.get('Message')}"
+                for idx, reason in enumerate(cancellation_reasons)
+            ) or "<no cancellation reasons returned>"
+
             if new_dataset:
-                raise ValueError(
-                    f"Dataset '{dataset_id}' already exists or version {version} already exists."
+                raise RuntimeError(
+                    f"Create transaction failed for dataset '{dataset_id}' version {version}. "
+                    f"CancellationReasons={reasons_text}"
                 ) from e
-            raise ValueError(
-                f"Failed to advance dataset '{dataset_id}' to version {version}. "
-                f"The dataset may not exist, the previous version may not match, "
-                f"or version {version} already exists."
+
+            raise RuntimeError(
+                f"Update transaction failed for dataset '{dataset_id}' version {version}. "
+                f"CancellationReasons={reasons_text}"
             ) from e
 
         raise

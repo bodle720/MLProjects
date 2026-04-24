@@ -223,6 +223,15 @@ class DatasetStack(Stack):
             conditions={"StringLike": {"s3:prefix": ["datasets/*"]}}
         ))
 
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}/*"]
+        ))
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket", "s3:GetBucketLocation"],
+            resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"]
+        ))
+
         return dlq
 
     def _make_dlq_chain(self, *, failed_stage: str, dlq_policy: str) -> sfn.Chain:
@@ -403,12 +412,6 @@ class DatasetStack(Stack):
             payload_response_only=True
         )
 
-        task.add_retry(
-            backoff_rate=2.0,
-            max_attempts=2,
-            interval=Duration.seconds(2)
-        )
-
         task.add_catch(
             handler=self._make_dlq_chain(failed_stage = stage_name, dlq_policy = dlq_policy),
             errors=["States.ALL"],
@@ -448,12 +451,6 @@ class DatasetStack(Stack):
                 "submission_s3_uri.$": "$.submission_s3_uri",
             }),
             payload_response_only=True
-        )
-
-        cleanup_task.add_retry(
-            backoff_rate=2.0,
-            max_attempts=2,
-            interval=Duration.seconds(2)
         )
 
         cleanup_task.add_catch(
