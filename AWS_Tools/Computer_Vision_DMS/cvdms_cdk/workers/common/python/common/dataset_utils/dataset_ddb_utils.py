@@ -7,6 +7,7 @@ from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 dynamodb_resource = boto3.resource("dynamodb")
+dynamodb_client = boto3.client("dynamodb")
 
 _VALID_SPLITS = {"train", "val", "test"}
 _VALID_SPLIT_APPROACHES = {"initial", "maintain", "rebalance"}
@@ -302,7 +303,7 @@ def transact_write_dataset_and_version(
     print("DEBUG version_action:", repr(version_action))
 
     try:
-        dynamodb_resource.meta.client.transact_write_items(
+        dynamodb_client.transact_write_items(
             TransactItems=[dataset_action, version_action]
         )
     except ClientError as e:
