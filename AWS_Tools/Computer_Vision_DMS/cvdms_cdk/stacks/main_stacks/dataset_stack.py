@@ -232,6 +232,23 @@ class DatasetStack(Stack):
             resources=[f"arn:aws:s3:::{self.iceberg_bucket.bucket_name}"]
         ))
 
+        # Glue
+        dlq_processor.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "glue:GetDatabase", "glue:GetDatabases",
+                "glue:GetTable", "glue:GetTables",
+                "glue:GetPartition", "glue:GetPartitions",
+                "glue:GetTableVersion", "glue:GetTableVersions",
+                "glue:CreateTable", "glue:UpdateTable", "glue:DeleteTable",
+                "glue:BatchCreatePartition", "glue:BatchDeletePartition",
+            ],
+            resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{self.iceberg_database_name}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{self.iceberg_database_name}/*",
+            ]
+        ))
+
         return dlq
 
     def _make_dlq_chain(self, *, failed_stage: str, dlq_policy: str) -> sfn.Chain:

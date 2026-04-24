@@ -1,9 +1,9 @@
 from collections import Counter
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 dynamodb_resource = boto3.resource("dynamodb")
@@ -11,6 +11,12 @@ dynamodb_resource = boto3.resource("dynamodb")
 _VALID_SPLITS = {"train", "val", "test"}
 _VALID_SPLIT_APPROACHES = {"initial", "maintain", "rebalance"}
 
+_serializer = TypeSerializer()
+
+def to_ddb_item(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"to_ddb_item expects dict input, got {type(value).__name__}")
+    return {k: _serializer.serialize(v) for k, v in value.items()}
 
 def write_ddb_artifacts(
     *,
@@ -289,6 +295,12 @@ def transact_write_dataset_and_version(
         }
     }
 
+    print("DEBUG dataset_item type:", type(dataset_item.get("dataset_id")).__name__)
+    print("DEBUG dataset_item value:", repr(dataset_item.get("dataset_id")))
+    print("DEBUG marshalled dataset_id:", repr(to_ddb_item(dataset_item).get("dataset_id")))
+    print("DEBUG dataset_action:", repr(dataset_action))
+    print("DEBUG version_action:", repr(version_action))
+
     try:
         dynamodb_resource.meta.client.transact_write_items(
             TransactItems=[dataset_action, version_action]
@@ -317,45 +329,6 @@ def transact_write_dataset_and_version(
             ) from e
 
         raise
-
-
-def to_ddb_item(value: Any) -> dict[str, Any]:
-    """
-    Convert a plain Python dict into the low-level DynamoDB attribute-value format.
-    """
-    if not isinstance(value, dict):
-        raise TypeError(f"to_ddb_item expects dict input, got {type(value).__name__}")
-
-    return {k: _to_ddb_attr(v) for k, v in value.items()}
-
-
-def _to_ddb_attr(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {"NULL": True}
-
-    if isinstance(value, bool):
-        return {"BOOL": value}
-
-    if isinstance(value, str):
-        return {"S": value}
-
-    if isinstance(value, int):
-        return {"N": str(value)}
-
-    if isinstance(value, float):
-        return {"N": str(Decimal(str(value)))}
-
-    if isinstance(value, Decimal):
-        return {"N": str(value)}
-
-    if isinstance(value, list):
-        return {"L": [_to_ddb_attr(v) for v in value]}
-
-    if isinstance(value, dict):
-        return {"M": {k: _to_ddb_attr(v) for k, v in value.items()}}
-
-    raise TypeError(f"Unsupported type for DynamoDB serialization: {type(value).__name__}")
-
 
 def _require_valid_split(value: Any) -> str:
     split = str(value).strip() if value is not None else ""
