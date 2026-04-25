@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from formatting import (
+from helpers.formatting import (
     SPLIT_ORDER,
     bucket_label,
     clean_label,
@@ -28,7 +28,7 @@ from formatting import (
     sorted_splits,
     summary_stats_to_dataframe,
 )
-from suggestions import Suggestion, build_suggestions
+from helpers.suggestions import Suggestion, build_suggestions
 
 
 def _has_data(df: pd.DataFrame) -> bool:
@@ -197,16 +197,28 @@ def _render_distribution(
     )
     categories = list(total_by_category.index)
 
-    max_categories = st.slider(
-        f"Maximum {category_name}s to display",
-        min_value=5,
-        max_value=max(5, min(100, len(categories))),
-        value=min(max_categories_default, max(5, len(categories))),
-        step=5,
-        key=f"{missing_artifact_name}_max_categories",
-    )
+    category_count = len(categories)
+
+    if category_count <= 5:
+        max_categories = category_count
+    else:
+        slider_max = min(100, category_count)
+        slider_default = min(max_categories_default, slider_max)
+
+        # Keep the default at least 5, but never above slider_max.
+        slider_default = max(5, slider_default)
+
+        max_categories = st.slider(
+            f"Maximum {category_name}s to display",
+            min_value=5,
+            max_value=slider_max,
+            value=slider_default,
+            step=5,
+            key=f"{missing_artifact_name}_max_categories",
+        )
 
     selected_categories = categories[:max_categories]
+
     counts_df = counts_df[counts_df[category_name].isin(selected_categories)]
     pct_df = pct_df[pct_df[category_name].isin(selected_categories)]
 
@@ -587,14 +599,23 @@ def _render_delta_block(
         st.info(f"No delta rows available for {title}.")
         return
 
-    top_n = st.slider(
-        f"Rows to show for {title}",
-        min_value=5,
-        max_value=max(5, min(100, len(df))),
-        value=min(25, max(5, len(df))),
-        step=5,
-        key=f"delta_rows_{title}",
-    )
+    row_count = len(df)
+
+    if row_count <= 5:
+        top_n = row_count
+    else:
+        slider_max = min(100, row_count)
+        slider_default = min(25, slider_max)
+        slider_default = max(5, slider_default)
+
+        top_n = st.slider(
+            f"Rows to show for {title}",
+            min_value=5,
+            max_value=slider_max,
+            value=slider_default,
+            step=5,
+            key=f"delta_rows_{title}",
+        )
 
     chart_df = df.head(top_n)
 

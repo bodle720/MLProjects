@@ -24,8 +24,7 @@ from typing import Any
 
 from botocore.client import BaseClient
 
-from s3_loader import S3ObjectRef, build_visualization_key, read_json_from_s3
-
+from helpers.s3_loader import S3ObjectRef, build_visualization_key, read_json_from_s3
 
 ARTIFACT_FILENAMES: dict[str, str] = {
     "overview": "overview.json",
