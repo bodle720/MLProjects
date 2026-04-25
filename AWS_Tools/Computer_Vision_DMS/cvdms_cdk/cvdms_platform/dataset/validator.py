@@ -491,6 +491,12 @@ def validate_update_dataset_inputs(
             "split_strategy_name is required when split_approach='rebalance'."
         )
 
+    if validated_split_approach == "maintain" and validated_split_strategy_name is not None:
+        raise ValueError(
+            "split_strategy_name should not be provided when split_approach='maintain'; "
+            "maintain-mode uses the dataset's existing split strategy."
+        )
+
     return {
         "dataset_id": validated_dataset_id,
         "operation": validated_operation,

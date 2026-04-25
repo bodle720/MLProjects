@@ -296,12 +296,6 @@ def transact_write_dataset_and_version(
         }
     }
 
-    print("DEBUG dataset_item type:", type(dataset_item.get("dataset_id")).__name__)
-    print("DEBUG dataset_item value:", repr(dataset_item.get("dataset_id")))
-    print("DEBUG marshalled dataset_id:", repr(to_ddb_item(dataset_item).get("dataset_id")))
-    print("DEBUG dataset_action:", repr(dataset_action))
-    print("DEBUG version_action:", repr(version_action))
-
     try:
         dynamodb_client.transact_write_items(
             TransactItems=[dataset_action, version_action]

@@ -1,5 +1,6 @@
 import os
 from typing import Any
+from collections import Counter
 
 from common.general_utils.logging_utils import log
 from common.general_utils.ddb_utils import dataset_exists
@@ -308,6 +309,21 @@ def handler(event, context):
                 )
 
             split_rows = stratified_v1(candidates=candidates)
+
+            split_counts = Counter(row["split"] for row in split_rows)
+            log(
+                job_id,
+                user,
+                event_type,
+                LOG_FIREHOSE_STREAM_NAME,
+                (
+                    f"{TASK_NAME} stratified_v1 counts: "
+                    f"train={split_counts.get('train', 0)}, "
+                    f"val={split_counts.get('val', 0)}, "
+                    f"test={split_counts.get('test', 0)}"
+                ),
+                level="info",
+            )
 
             if not split_rows:
                 raise ValueError(

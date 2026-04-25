@@ -346,11 +346,12 @@ def _score_group_for_split(
     # Secondary: overall split-size penalty
     current_total = assigned_total_rows[split]
     projected_total = current_total + group.row_count
-    target_total = target_total_rows[split]
+    target_total = max(1, target_total_rows[split])
 
-    score += _SIZE_WEIGHT * abs(projected_total - target_total)
-
+    fill_ratio = projected_total / target_total
     overflow = max(0, projected_total - target_total)
+
+    score += _SIZE_WEIGHT * fill_ratio
     score += _OVERFLOW_WEIGHT * overflow
 
     # Tertiary: source and image-condition balancing
@@ -392,7 +393,8 @@ def _dimension_penalty(
     target_counts: dict[str, int],
 ) -> float:
     """
-    Penalize projected distance from target, with extra penalty for overshooting.
+    Penalize normalized fill level, with extra penalty for overshooting.
+    Lower score = better candidate split.
     """
     penalty = 0.0
 
@@ -401,10 +403,15 @@ def _dimension_penalty(
         projected = current + add
         target = target_counts.get(key, 0)
 
-        base_distance = abs(projected - target)
-        overshoot = max(0, projected - target)
+        if target <= 0:
+            # If target is zero, any assignment here is undesirable.
+            penalty += projected * 10.0
+            continue
 
-        penalty += base_distance + (2.0 * overshoot)
+        fill_ratio = projected / target
+        overshoot_ratio = max(0, projected - target) / target
+
+        penalty += fill_ratio + (2.0 * overshoot_ratio)
 
     return penalty
 
