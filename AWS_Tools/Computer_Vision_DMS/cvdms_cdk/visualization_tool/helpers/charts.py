@@ -30,14 +30,11 @@ from helpers.formatting import (
 )
 from helpers.suggestions import Suggestion, build_suggestions
 
-
 def _has_data(df: pd.DataFrame) -> bool:
     return df is not None and not df.empty
 
-
 def _display_missing_artifact(name: str) -> None:
     st.warning(f"Artifact is missing or unavailable: `{name}`")
-
 
 def _format_pct_column(df: pd.DataFrame, column: str) -> pd.DataFrame:
     out = df.copy()
@@ -45,14 +42,12 @@ def _format_pct_column(df: pd.DataFrame, column: str) -> pd.DataFrame:
         out[column] = out[column].map(lambda x: pct(x))
     return out
 
-
 def _format_number_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     out = df.copy()
     for col in columns:
         if col in out.columns:
             out[col] = out[col].map(number)
     return out
-
 
 def _split_metric_columns(split_counts: dict[str, Any], split_percentages: dict[str, Any]) -> None:
     cols = st.columns(3)
@@ -65,7 +60,6 @@ def _split_metric_columns(split_counts: dict[str, Any], split_percentages: dict[
             delta=pct(percentage),
             delta_color="off",
         )
-
 
 def render_bundle_status(bundle: Any) -> None:
     """
@@ -85,7 +79,6 @@ def render_bundle_status(bundle: Any) -> None:
             st.markdown(f"**{name}**")
             st.caption(artifact.s3_ref.uri)
             st.code(artifact.error or "Unknown error")
-
 
 def render_overview(bundle: Any) -> None:
     overview = bundle.get("overview")
@@ -150,7 +143,6 @@ def render_overview(bundle: Any) -> None:
         display_df = df.copy()
         display_df["percentage"] = display_df["percentage"].map(pct)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
-
 
 def _render_distribution(
     *,
@@ -276,7 +268,6 @@ def _render_distribution(
         )
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-
 def render_class_balance(bundle: Any) -> None:
     artifact = bundle.get("class_distribution")
     _render_distribution(
@@ -286,7 +277,6 @@ def render_class_balance(bundle: Any) -> None:
         missing_artifact_name="class_distribution",
     )
 
-
 def render_source_balance(bundle: Any) -> None:
     artifact = bundle.get("source_distribution")
     _render_distribution(
@@ -295,7 +285,6 @@ def render_source_balance(bundle: Any) -> None:
         category_name="source",
         missing_artifact_name="source_distribution",
     )
-
 
 def render_source_split_resolution(bundle: Any) -> None:
     artifact = bundle.get("source_split_resolution")
@@ -364,7 +353,6 @@ def render_source_split_resolution(bundle: Any) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(resolved_df, use_container_width=True, hide_index=True)
-
 
 def render_quality_buckets(bundle: Any) -> None:
     artifact = bundle.get("quality_distribution")
@@ -445,7 +433,6 @@ def render_quality_buckets(bundle: Any) -> None:
     display_df = pct_df.copy()
     display_df["percentage"] = display_df["percentage"].map(pct)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-
 
 def render_numeric_features(bundle: Any) -> None:
     summary = bundle.get("numeric_summary")
@@ -575,7 +562,6 @@ def render_numeric_features(bundle: Any) -> None:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-
 def _render_delta_block(
     *,
     block: dict[str, Any],
@@ -640,7 +626,6 @@ def _render_delta_block(
     display_df = display_df.rename(columns={"category": category_name})
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-
 def render_split_comparison(bundle: Any) -> None:
     artifact = bundle.get("split_comparison")
     if not artifact:
@@ -679,7 +664,6 @@ def render_split_comparison(bundle: Any) -> None:
             category_name="source",
         )
 
-
 def _render_single_suggestion(suggestion: Suggestion) -> None:
     severity = suggestion.severity.lower().strip()
 
@@ -693,7 +677,6 @@ def _render_single_suggestion(suggestion: Suggestion) -> None:
         st.success(label)
     else:
         st.info(label)
-
 
 def render_suggestions(bundle: Any) -> None:
     st.subheader("Dataset Suggestions")
@@ -743,7 +726,6 @@ def render_suggestions(bundle: Any) -> None:
 
     for suggestion in filtered:
         _render_single_suggestion(suggestion)
-
 
 def render_raw_artifacts(bundle: Any) -> None:
     """

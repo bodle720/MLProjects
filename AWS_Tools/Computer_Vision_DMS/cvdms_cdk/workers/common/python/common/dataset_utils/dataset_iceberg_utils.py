@@ -24,15 +24,12 @@ _ICEBERG_COMMIT_RETRY_MARKERS = (
     "Failed to commit Iceberg update",
 )
 
-
 def _is_retryable_iceberg_commit_error(exc: Exception | str) -> bool:
     text = str(exc)
     return any(marker in text for marker in _ICEBERG_COMMIT_RETRY_MARKERS)
 
-
 def _escape_sql_string(value: str) -> str:
     return value.replace("'", "''")
-
 
 def _assert_membership_table_key_shape(table_name: str) -> TableSchema:
     schema = TABLES.get(table_name)
@@ -46,7 +43,6 @@ def _assert_membership_table_key_shape(table_name: str) -> TableSchema:
         )
 
     return schema
-
 
 def _dedupe_membership_rows_or_raise(
     rows: list[dict[str, Any]],
@@ -86,7 +82,6 @@ def _dedupe_membership_rows_or_raise(
     deduped.sort(key=lambda r: str(r["image_id"]).strip())
     return deduped
 
-
 def _run_sql_with_commit_retry(
     *,
     sql: str,
@@ -123,7 +118,6 @@ def _run_sql_with_commit_retry(
     if last_exc is not None:
         raise last_exc
 
-
 def _delete_existing_dataset_version_rows(
     *,
     task_name: str,
@@ -146,7 +140,6 @@ def _delete_existing_dataset_version_rows(
         athena_output_s3_uri=athena_output_s3_uri,
         athena_workgroup=athena_workgroup,
     )
-
 
 def _insert_membership_rows_in_batches(
     *,
@@ -171,7 +164,6 @@ def _insert_membership_rows_in_batches(
             athena_output_s3_uri=athena_output_s3_uri,
             athena_workgroup=athena_workgroup,
         )
-
 
 def write_dataset_membership(
     *,
@@ -247,7 +239,6 @@ def write_dataset_membership(
         "version": version,
         "dataset_label_type": dataset_label_type,
     }
-
 
 def build_membership_rows(
     *,

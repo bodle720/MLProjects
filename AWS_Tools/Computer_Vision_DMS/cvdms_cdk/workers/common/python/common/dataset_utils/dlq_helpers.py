@@ -21,20 +21,17 @@ _MEMBERSHIP_TABLE_BY_LABEL_TYPE: dict[str, str] = {
     "instance-segmentation": "instance_segmentation",
 }
 
-
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
 
-
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = _optional_string(value)
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
-
 
 def _coerce_optional_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
@@ -68,21 +65,17 @@ def _coerce_optional_int(value: Any) -> int | None:
 
     return None
 
-
 def _require_positive_int(value: Any, *, field_name: str) -> int:
     out = _coerce_optional_int(value)
     if out is None or out < 1:
         raise ValueError(f"{field_name} must be an integer >= 1")
     return out
 
-
 def _sql_escape_literal(value: str) -> str:
     return value.replace("'", "''")
 
-
 def _sql_quote(value: str) -> str:
     return "'" + _sql_escape_literal(value) + "'"
-
 
 def _get_membership_table_name(*, dataset_label_type: str | None) -> str:
     if not dataset_label_type:
@@ -91,7 +84,6 @@ def _get_membership_table_name(*, dataset_label_type: str | None) -> str:
         return _MEMBERSHIP_TABLE_BY_LABEL_TYPE[dataset_label_type]
     except KeyError as e:
         raise ValueError(f"Unsupported dataset_label_type: {dataset_label_type!r}") from e
-
 
 def _extract_versioned_context(dataset_context: Any) -> tuple[str, int, str | None]:
     if not isinstance(dataset_context, dict):
@@ -108,7 +100,6 @@ def _extract_versioned_context(dataset_context: Any) -> tuple[str, int, str | No
     label_type = _optional_string(dataset_context.get("label_type"))
     return dataset_id, new_version, label_type
 
-
 def _extract_delete_context(dataset_context: Any) -> tuple[str, str | None]:
     if not isinstance(dataset_context, dict):
         raise ValueError("dataset_context must be an object")
@@ -120,13 +111,11 @@ def _extract_delete_context(dataset_context: Any) -> tuple[str, str | None]:
     label_type = _optional_string(dataset_context.get("label_type"))
     return dataset_id, label_type
 
-
 def build_dataset_version_delete_prefix(*, dataset_id: str, version: int) -> str:
     dataset_id = _require_nonempty_string(dataset_id, field_name="dataset_id")
     if version < 1:
         raise ValueError(f"version must be >= 1, got {version}")
     return f"datasets/{dataset_id}/v{version}/"
-
 
 def delete_dataset_version_s3_prefix(
     *,
@@ -179,7 +168,6 @@ def delete_dataset_version_s3_prefix(
         "deleted_object_count": deleted_count,
     }
 
-
 def build_delete_dataset_version_membership_sql(
     *,
     iceberg_database_name: str,
@@ -194,7 +182,6 @@ def build_delete_dataset_version_membership_sql(
         f"DELETE FROM {full_table} "
         f"WHERE dataset_id = {dataset_id_sql} AND version = {version}"
     )
-
 
 def delete_dataset_version_iceberg_membership(
     *,
@@ -237,7 +224,6 @@ def delete_dataset_version_iceberg_membership(
         "query_execution_id": query_execution_id,
         "delete_predicate": f"dataset_id={dataset_id!r} AND version={version}",
     }
-
 
 def rollback_dataset_version_ddb(
     *,
@@ -355,7 +341,6 @@ def rollback_dataset_version_ddb(
 
     return summary
 
-
 def rollback_failed_create_or_update(
     *,
     task_name: str,
@@ -440,7 +425,6 @@ def rollback_failed_create_or_update(
 
     summary["ok"] = len(summary["errors"]) == 0
     return summary
-
 
 def finish_failed_delete(
     *,

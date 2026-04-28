@@ -257,6 +257,7 @@ def build_dataset_metadata_summary(
     source_split_status_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
     resolved_source_split_counts_by_split: dict[str, Counter[str]] = {s: Counter() for s in _VALID_SPLITS}
 
+    labels = set()
     for row in split_rows:
         split = _require_valid_split(row.get("split"))
         split_counts[split] += 1
@@ -266,6 +267,7 @@ def build_dataset_metadata_summary(
 
         for class_name in _normalize_string_array(row.get("classes_present")):
             class_counts_by_split[split][class_name] += 1
+            labels.add(class_name)
 
         lighting_bucket = _optional_string(row.get("lighting_bucket"))
         if lighting_bucket:
@@ -291,6 +293,17 @@ def build_dataset_metadata_summary(
         if resolved_source_split:
             resolved_source_split_counts_by_split[split][resolved_source_split] += 1
 
+    classes = sorted(labels)
+
+    if not classes:
+        raise ValueError(
+            f"Dataset metadata effective_classes is empty for "
+            f"dataset_id={dataset_id!r}, version={version!r}, label_type={label_type!r}"
+        )
+
+    class_to_idx = {class_name: idx for idx, class_name in enumerate(classes)}
+    idx_to_class = {str(idx): class_name for class_name, idx in class_to_idx.items()}
+
     effective_split_mode = (
         "honor_source_splits"
         if honor_source_splits
@@ -301,6 +314,9 @@ def build_dataset_metadata_summary(
         "dataset_id": dataset_id,
         "version": version,
         "label_type": label_type,
+        "effective_classes": classes,
+        "class_to_idx": class_to_idx,
+        "idx_to_class": idx_to_class,
         "honor_source_splits": honor_source_splits,
         "split_strategy_name": split_strategy_name,
         "effective_split_mode": effective_split_mode,

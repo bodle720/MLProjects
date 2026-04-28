@@ -16,9 +16,7 @@ dataset reviewer that helps the user quickly notice:
 from dataclasses import dataclass
 from typing import Any
 
-
 _SPLITS = ("train", "val", "test")
-
 
 @dataclass(frozen=True)
 class Suggestion:
@@ -35,7 +33,6 @@ class Suggestion:
             "category": self.category,
         }
 
-
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         f = float(value)
@@ -43,17 +40,14 @@ def _as_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
-
 def _as_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except Exception:
         return default
 
-
 def _pct(value: float) -> str:
     return f"{100.0 * value:.1f}%"
-
 
 def _get_nested_dict(obj: dict[str, Any], *keys: str) -> dict[str, Any]:
     cur: Any = obj
@@ -62,7 +56,6 @@ def _get_nested_dict(obj: dict[str, Any], *keys: str) -> dict[str, Any]:
             return {}
         cur = cur.get(key, {})
     return cur if isinstance(cur, dict) else {}
-
 
 def _add_split_size_suggestions(
     suggestions: list[Suggestion],
@@ -142,7 +135,6 @@ def _add_split_size_suggestions(
                 )
             )
 
-
 def _add_missing_category_suggestions(
     suggestions: list[Suggestion],
     *,
@@ -189,7 +181,6 @@ def _add_missing_category_suggestions(
                 category=category,
             )
         )
-
 
 def _add_distribution_delta_suggestions(
     suggestions: list[Suggestion],
@@ -256,7 +247,6 @@ def _add_distribution_delta_suggestions(
                 category=category,
             )
         )
-
 
 def _add_source_split_resolution_suggestions(
     suggestions: list[Suggestion],
@@ -335,7 +325,6 @@ def _add_source_split_resolution_suggestions(
                 category="source split resolution",
             )
         )
-
 
 def _add_quality_bucket_suggestions(
     suggestions: list[Suggestion],
@@ -426,7 +415,6 @@ def _add_quality_bucket_suggestions(
                     category="quality buckets",
                 )
             )
-
 
 def build_suggestions(bundle: Any) -> list[Suggestion]:
     """

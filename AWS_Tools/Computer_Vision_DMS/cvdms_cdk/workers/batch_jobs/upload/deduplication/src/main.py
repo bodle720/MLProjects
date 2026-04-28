@@ -46,10 +46,8 @@ MAX_GROUP_SIZE = 10000
 
 s3 = boto3.client("s3")
 
-
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _marker_worker_fields() -> Dict[str, Any]:
     return {
@@ -58,14 +56,11 @@ def _marker_worker_fields() -> Dict[str, Any]:
         "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
     }
 
-
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
-
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
-
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -75,13 +70,11 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
-
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
-
 
 def ts_sortable(v: Any) -> str:
     """
@@ -102,7 +95,6 @@ def ts_sortable(v: Any) -> str:
     s = str(v).strip()
     return s if s else "9999-12-31 23:59:59"
 
-
 def pick_representative(group: List[dict]) -> dict:
     if len(group) == 1:
         return group[0]
@@ -112,7 +104,6 @@ def pick_representative(group: List[dict]) -> dict:
         return (ts, r.get("image_id") or "")
 
     return min(group, key=key_fn)
-
 
 def norm_string_labels(row: dict) -> List[str]:
     labels = row.get("string_labels")
@@ -133,7 +124,6 @@ def norm_string_labels(row: dict) -> List[str]:
 
     return sorted(out)
 
-
 def label_signature(row: dict) -> str:
     """
     Deterministic signature for "are these labels identical?"
@@ -150,7 +140,6 @@ def label_signature(row: dict) -> str:
         return "str:" + hashlib.sha256(blob).hexdigest()
 
     return "__MISSING_LABEL_SIG__"
-
 
 def process_manifest(manifest: dict) -> tuple[List[dict], dict]:
     files = manifest.get("files", [])
@@ -275,7 +264,6 @@ def process_manifest(manifest: dict) -> tuple[List[dict], dict]:
 
     return processed_rows, summary
 
-
 def write_processed_outputs(shard_name: str, processed_rows: List[dict], summary: dict) -> dict:
     bucket = FILE_BUCKET_NAME
     jsonl_key = f"{PROCESSED_PREFIX}/shard-{shard_name}.jsonl"
@@ -291,7 +279,6 @@ def write_processed_outputs(shard_name: str, processed_rows: List[dict], summary
         "summary": f"s3://{bucket}/{summary_key}",
         "success": f"s3://{bucket}/{success_key}",
     }
-
 
 def main():
     start = time.time()
@@ -396,7 +383,6 @@ def main():
             f"time_s={elapsed:.1f}"
         ),
     )
-
 
 if __name__ == "__main__":
     main()

@@ -78,10 +78,8 @@ OWNER_SHARDS = 512  # keep aligned with batching MAX_SHARDS
 ddb = boto3.client("dynamodb")
 s3 = boto3.client("s3")
 
-
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _marker_worker_fields() -> Dict[str, Any]:
     return {
@@ -90,14 +88,11 @@ def _marker_worker_fields() -> Dict[str, Any]:
         "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
     }
 
-
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
-
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
-
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -107,17 +102,14 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
-
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
 
-
 def _rollback_seed_key(shard_name: str) -> str:
     return f"{PROCESSED_PREFIX}/rollback-batch/shard-{shard_name}.json"
-
 
 def _write_batch_rollback_seed(
     *,
@@ -154,7 +146,6 @@ def _write_batch_rollback_seed(
     )
     return key
 
-
 def _s3_object_exists(bucket: str, key: str) -> bool:
     try:
         s3.head_object(Bucket=bucket, Key=key)
@@ -164,7 +155,6 @@ def _s3_object_exists(bucket: str, key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
-
 
 def _filter_new_s3_keys_for_rollback(
     *,
@@ -195,7 +185,6 @@ def _filter_new_s3_keys_for_rollback(
             out.append(norm_key)
 
     return out
-
 
 def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
     """
@@ -240,7 +229,6 @@ def put_sha256_mapping_idempotent(sha256_hash: str, image_id: str) -> None:
             f"{TASK_NAME} sha256_hash already mapped to a different image_id: {existing}"
         )
 
-
 def _execute_side_effects(
     *,
     copy_plan_all: List[Tuple[str, str, str, str]],
@@ -254,7 +242,6 @@ def _execute_side_effects(
             sha256_hash=row["sha256"],
             image_id=row["image_id"],
         )
-
 
 def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
     List[Dict[str, Any]],
@@ -620,7 +607,6 @@ def plan_manifest(manifest: Dict[str, Any]) -> Tuple[
         rollback_canonical_label_keys,
     )
 
-
 def write_outputs(
     shard_name: str,
     updated_upload_rows: List[Dict[str, Any]],
@@ -665,7 +651,6 @@ def write_outputs(
         TASK_NAME,
     )
     write_s3_obj(bucket, success_key, b"", "text/plain", TASK_NAME)
-
 
 def main():
     start = time.time()
@@ -807,7 +792,6 @@ def main():
 
     finally:
         _delete_marker_best_effort(active_key)
-
 
 if __name__ == "__main__":
     main()

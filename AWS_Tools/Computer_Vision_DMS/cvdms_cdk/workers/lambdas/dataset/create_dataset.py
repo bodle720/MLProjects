@@ -32,7 +32,6 @@ VALID_LABEL_TYPES = {
 _VALID_SPLITS = {"train", "val", "test"}
 _VALID_SOURCE_SPLIT_STATUSES = {"resolved", "unresolved", "inconsistent"}
 
-
 def _assert_request_shape(
     request: dict[str, Any],
 ) -> tuple[str, str, str | None, dict[str, Any], str | None, bool]:
@@ -77,20 +76,17 @@ def _assert_request_shape(
         honor_source_splits,
     )
 
-
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
 
-
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 def _build_honor_source_split_rows(
     *,
@@ -138,7 +134,6 @@ def _build_honor_source_split_rows(
 
     return split_rows, summary
 
-
 def _canonicalize_split_rows_or_raise(
     *,
     split_rows: list[dict[str, Any]],
@@ -183,7 +178,6 @@ def _canonicalize_split_rows_or_raise(
     )
 
     return canonical_rows, duplicate_collapsed_count
-
 
 def handler(event, context):
     job_id = "unknown"

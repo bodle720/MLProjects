@@ -27,7 +27,6 @@ sf = boto3.client("stepfunctions")
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
 
-
 def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     try:
         resp = ddb.get_item(
@@ -59,7 +58,6 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
         return True, ""
     except Exception as e:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
-
 
 def send_to_dlq(
     job_id: str,
@@ -97,7 +95,6 @@ def send_to_dlq(
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
         return False, msg
 
-
 def fail(
     job_id: str,
     user: str,
@@ -134,7 +131,6 @@ def fail(
         "event_type": event_type,
         "task_type": task_type,
     }
-
 
 def handler(event, context):
     job_id = "unknown"

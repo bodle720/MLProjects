@@ -30,13 +30,11 @@ _VALID_POLICIES = {
     "kickoff_only",
 }
 
-
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 def _extract_error_message(error_value: Any) -> str:
     """
@@ -101,7 +99,6 @@ def _extract_error_message(error_value: Any) -> str:
 
     return text
 
-
 def _parse_record_body(record: dict[str, Any]) -> dict[str, Any] | None:
     body = record.get("body")
     if not isinstance(body, str) or not body.strip():
@@ -113,7 +110,6 @@ def _parse_record_body(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     return parsed if isinstance(parsed, dict) else None
-
 
 def _resolve_effective_policy(
     *,
@@ -145,7 +141,6 @@ def _resolve_effective_policy(
         return "complete_delete"
 
     return "kickoff_only"
-
 
 def _run_durable_policy(
     *,
@@ -190,7 +185,6 @@ def _run_durable_policy(
 
     raise ValueError(f"Unsupported effective_policy: {effective_policy!r}")
 
-
 def _cleanup_temp_prefix(
     *,
     job_id: str,
@@ -221,7 +215,6 @@ def _cleanup_temp_prefix(
             level="error",
         )
         return False, msg
-
 
 def _release_global_lock(
     *,
@@ -271,7 +264,6 @@ def _release_global_lock(
 
     return lock_ok, str(release_msg)
 
-
 def _update_job_terminal_status(
     *,
     job_id: str,
@@ -301,7 +293,6 @@ def _update_job_terminal_status(
     )
 
     return update_success, str(update_msg)
-
 
 def handler(event, context):
     total_records = 0

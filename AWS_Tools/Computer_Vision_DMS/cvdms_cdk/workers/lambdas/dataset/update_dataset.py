@@ -45,20 +45,17 @@ LABEL_TYPE_TO_MEMBERSHIP_TABLE = {
 
 _VALID_SPLITS = {"train", "val", "test"}
 
-
 def _require_nonempty_string(value: Any, *, field_name: str) -> str:
     text = str(value).strip() if value is not None else ""
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
 
-
 def _normalize_optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 def _assert_request_shape(
     request: dict[str, Any],
@@ -108,7 +105,6 @@ def _assert_request_shape(
         description,
     )
 
-
 def _normalize_supported_strategy_or_none(value: Any) -> str | None:
     text = _normalize_optional_string(value)
     if text is None:
@@ -116,7 +112,6 @@ def _normalize_supported_strategy_or_none(value: Any) -> str | None:
     if text not in SUPPORTED_SPLIT_STRATEGIES:
         return None
     return text
-
 
 def _resolve_effective_split_strategy_for_update(
     *,
@@ -224,7 +219,6 @@ def _resolve_effective_split_strategy_for_update(
         f"was supplied in the request."
     )
 
-
 def _canonicalize_split_rows_or_raise(
     *,
     split_rows: list[dict[str, Any]],
@@ -271,7 +265,6 @@ def _canonicalize_split_rows_or_raise(
     )
 
     return canonical_rows, duplicate_collapsed_count
-
 
 def handler(event, context):
     job_id = "unknown"

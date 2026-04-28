@@ -219,7 +219,6 @@ def write_ddb_artifacts(
         "dataset_version_item": dataset_version_item,
     }
 
-
 def build_split_count_summary(*, split_rows: list[dict[str, Any]]) -> dict[str, int]:
     split_counts = Counter()
 
@@ -233,7 +232,6 @@ def build_split_count_summary(*, split_rows: list[dict[str, Any]]) -> dict[str, 
         "total_val_count": split_counts.get("val", 0),
         "total_test_count": split_counts.get("test", 0),
     }
-
 
 def transact_write_dataset_and_version(
     *,
@@ -331,20 +329,17 @@ def _require_valid_split(value: Any) -> str:
         raise ValueError(f"Invalid split: {value!r}")
     return split
 
-
 def _normalize_optional_string(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
 
-
 def _normalize_required_string(value: Any, *, field_name: str) -> str:
     text = _normalize_optional_string(value)
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
     return text
-
 
 def _derive_effective_split_mode(
     *,
@@ -383,7 +378,6 @@ def _derive_effective_split_mode(
         return split_strategy_name
 
     raise ValueError(f"Unsupported split_approach: {split_approach!r}")
-
 
 def _canonicalize_split_rows_for_metadata_or_raise(
     *,
@@ -430,7 +424,6 @@ def _canonicalize_split_rows_for_metadata_or_raise(
 
     return canonical_rows, duplicate_collapsed_count
 
-
 def _default_dataset_description(
     *,
     label_type: str,
@@ -440,7 +433,6 @@ def _default_dataset_description(
     if honor_source_splits:
         return f"{label_type} dataset honoring source splits created at {created_at}"
     return f"{label_type} dataset created at {created_at}"
-
 
 def _default_version_description(
     *,

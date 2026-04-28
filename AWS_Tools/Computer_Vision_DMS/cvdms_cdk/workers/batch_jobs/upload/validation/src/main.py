@@ -53,10 +53,8 @@ PROCESSED_PREFIX = f"temp/image-upload/{JOB_ID}/batches/validation-step/processe
 
 s3 = boto3.client("s3")
 
-
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _marker_worker_fields() -> Dict[str, Any]:
     return {
@@ -65,14 +63,11 @@ def _marker_worker_fields() -> Dict[str, Any]:
         "batch_job_attempt": AWS_BATCH_JOB_ATTEMPT,
     }
 
-
 def _active_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/active/{shard_name}.json"
 
-
 def _completed_marker_key(shard_name: str) -> str:
     return f"temp/image-upload/{JOB_ID}/worker-markers/{STAGE_NAME}/completed/{shard_name}.json"
-
 
 def _write_json_marker(key: str, payload: dict) -> None:
     s3.put_object(
@@ -82,13 +77,11 @@ def _write_json_marker(key: str, payload: dict) -> None:
         ContentType="application/json",
     )
 
-
 def _delete_marker_best_effort(key: str) -> None:
     try:
         s3.delete_object(Bucket=FILE_BUCKET_NAME, Key=key)
     except Exception:
         pass
-
 
 def manifest_shard_name(manifest_s3_uri: str) -> str:
     try:
@@ -100,7 +93,6 @@ def manifest_shard_name(manifest_s3_uri: str) -> str:
     # batch-001.jsonl -> batch-001
     m = re.match(r"^(.*)\.jsonl$", fname)
     return m.group(1) if m else fname
-
 
 def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     # derive deterministic image uuid from job + source-ref
@@ -309,7 +301,6 @@ def process_image(line: dict, shard_name: str, line_idx: int) -> dict:
     row["validation_status"] = "passed"
     return row
 
-
 def write_processed_outputs(shard_name: str, processed_rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
     jsonl_key = f"{PROCESSED_PREFIX}/upload_staging/shard-{shard_name}.jsonl"
     summary_key = f"{PROCESSED_PREFIX}/shard-{shard_name}-summary.json"
@@ -339,7 +330,6 @@ def write_processed_outputs(shard_name: str, processed_rows: List[Dict[str, Any]
         "text/plain",
         TASK_NAME,
     )
-
 
 def main():
     start = time.time()
@@ -483,7 +473,6 @@ def main():
 
     finally:
         _delete_marker_best_effort(active_key)
-
 
 if __name__ == "__main__":
     main()

@@ -21,10 +21,8 @@ import boto3
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError, NoCredentialsError, ProfileNotFound
 
-
 _DATASET_PREFIX = "datasets/"
 _VERSION_RE = re.compile(r"^v(\d+)$")
-
 
 @dataclass(frozen=True)
 class S3ObjectRef:
@@ -35,10 +33,8 @@ class S3ObjectRef:
     def uri(self) -> str:
         return f"s3://{self.bucket}/{self.key}"
 
-
 class S3LoadError(RuntimeError):
     """Raised when the viewer cannot load required S3 data."""
-
 
 def create_boto3_session(
     *,
@@ -70,7 +66,6 @@ def create_boto3_session(
     except ProfileNotFound as exc:
         raise S3LoadError(f"AWS profile not found: {clean_profile!r}") from exc
 
-
 def create_s3_client(
     *,
     profile_name: str | None = None,
@@ -90,7 +85,6 @@ def create_s3_client(
         raise S3LoadError(
             "AWS credentials were not found. Configure credentials or provide an AWS profile."
         ) from exc
-
 
 def _list_common_prefixes(
     s3_client: BaseClient,
@@ -136,7 +130,6 @@ def _list_common_prefixes(
 
     return prefixes
 
-
 def _s3_key_exists(
     s3_client: BaseClient,
     *,
@@ -154,7 +147,6 @@ def _s3_key_exists(
         if code in {"404", "NoSuchKey", "NotFound"}:
             return False
         raise S3LoadError(f"Failed to check S3 object s3://{bucket}/{key}: {exc}") from exc
-
 
 def list_dataset_ids(
     s3_client: BaseClient,
@@ -205,7 +197,6 @@ def list_dataset_ids(
         dataset_ids.append(dataset_id)
 
     return sorted(set(dataset_ids))
-
 
 def list_dataset_versions(
     s3_client: BaseClient,
@@ -260,7 +251,6 @@ def list_dataset_versions(
 
     return sorted(set(versions))
 
-
 def read_text_from_s3(
     s3_client: BaseClient,
     *,
@@ -287,7 +277,6 @@ def read_text_from_s3(
     except UnicodeDecodeError as exc:
         raise S3LoadError(f"Object is not valid UTF-8 text: s3://{bucket}/{key}") from exc
 
-
 def read_json_from_s3(
     s3_client: BaseClient,
     *,
@@ -313,7 +302,6 @@ def read_json_from_s3(
         )
 
     return payload
-
 
 def build_visualization_key(
     *,

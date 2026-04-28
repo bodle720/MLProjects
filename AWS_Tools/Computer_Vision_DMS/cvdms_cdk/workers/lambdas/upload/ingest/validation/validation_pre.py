@@ -49,14 +49,12 @@ def _require_event_key(event: dict, key: str):
         raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
     return event[key]
 
-
 def _head_size_bytes(bucket: str, key: str) -> int:
     try:
         resp = s3.head_object(Bucket=bucket, Key=key)
         return int(resp.get("ContentLength", 0))
     except Exception as e:
         raise RuntimeError(f"{TASK_NAME} Failed head_object for s3://{bucket}/{key}: {e}")
-
 
 def _read_key_bytes(bucket: str, key: str) -> bytes:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -67,12 +65,10 @@ def _read_key_bytes(bucket: str, key: str) -> bytes:
         raise RuntimeError(f"{TASK_NAME} Unexpected non-bytes read from s3://{bucket}/{key}")
     return bytes(data)
 
-
 def _ensure_trailing_newline(data: bytes) -> bytes:
     if not data:
         return b""
     return data if data.endswith(b"\n") else (data + b"\n")
-
 
 def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -105,7 +101,6 @@ def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
 
     return items
 
-
 def count_manifest_lines(batch_items: List[Dict[str, Any]]) -> int:
     """
     Fallback: count non-empty lines across all validation shard manifests referenced
@@ -129,7 +124,6 @@ def count_manifest_lines(batch_items: List[Dict[str, Any]]) -> int:
             if line.decode("utf-8-sig").strip():
                 total += 1
     return total
-
 
 def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
@@ -162,7 +156,6 @@ def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) 
             seen.add(s)
             out.append(s)
     return out
-
 
 def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -245,7 +238,6 @@ def collect_processed_shards(job_id: str, batch_items: List[Dict[str, Any]]) -> 
         "processed_prefix": processed_prefix,
     }
 
-
 def _close_group(
     groups: List[List[Dict[str, Any]]],
     current: List[Dict[str, Any]],
@@ -253,7 +245,6 @@ def _close_group(
     if current:
         groups.append(current)
     return []
-
 
 def group_validation_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """
@@ -307,7 +298,6 @@ def group_validation_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str,
     _close_group(groups, current)
     return groups
 
-
 def _materialize_grouped_upload_staging(
     *,
     job_id: str,
@@ -360,7 +350,6 @@ def _materialize_grouped_upload_staging(
 
     return grouped_key, len(body)
 
-
 def build_grouped_ingest_items(job_id: str, shards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     groups = group_validation_shards(shards)
 
@@ -400,7 +389,6 @@ def build_grouped_ingest_items(job_id: str, shards: List[Dict[str, Any]]) -> Lis
 
     return ingest_items
 
-
 def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
     handoff_prefix = f"temp/image-upload/{job_id}/batches/validation-step/ingest-handoff/"
     handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
@@ -420,7 +408,6 @@ def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, 
         "plan_s3_uri": plan_s3_uri,
         "item_count": len(items),
     }
-
 
 def handler(event, context):
     job_id = _require_event_key(event, "job_id")

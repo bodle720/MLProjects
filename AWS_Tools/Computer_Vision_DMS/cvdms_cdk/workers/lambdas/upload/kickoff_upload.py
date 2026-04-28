@@ -31,7 +31,6 @@ s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
 ddb = boto3.client("dynamodb")
 
-
 def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     """
     Ensures:
@@ -72,7 +71,6 @@ def assert_lock_held_by_job(job_id: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"ddb_get_item_error:{type(e).__name__}:{e}"
 
-
 def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bool, str]:
     job_id = job_id or "unknown"
     user = user or "unknown"
@@ -95,7 +93,6 @@ def send_to_dlq(job_id: str, user: str, event_type: str, error: str) -> Tuple[bo
         log(job_id, user, event_type, LOG_FIREHOSE_STREAM_NAME, msg, level="error")
         return False, msg
 
-
 def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
     job_id = job_id or "unknown"
     user = user or "unknown"
@@ -115,7 +112,6 @@ def fail(job_id: str, user: str, event_type: str, msg: str) -> dict:
         "user": user,
         "event_type": event_type,
     }
-
 
 def handler(event, context):
     job_id = "unknown"

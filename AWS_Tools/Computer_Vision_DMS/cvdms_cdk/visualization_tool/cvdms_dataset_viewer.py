@@ -53,9 +53,7 @@ from helpers.s3_loader import (
     list_dataset_versions,
 )
 
-
 APP_TITLE = "CVDMS Dataset Viewer"
-
 
 def _init_session_state() -> None:
     defaults = {
@@ -71,13 +69,11 @@ def _init_session_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
-
 def _clean_optional_text(value: str | None) -> str | None:
     if value is None:
         return None
     text = value.strip()
     return text or None
-
 
 @st.cache_resource(show_spinner=False)
 def _cached_s3_client(
@@ -88,7 +84,6 @@ def _cached_s3_client(
         profile_name=profile_name,
         region_name=region_name,
     )
-
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _cached_dataset_ids(
@@ -107,7 +102,6 @@ def _cached_dataset_ids(
         bucket=bucket,
         require_visualization_artifacts=require_visualization_artifacts,
     )
-
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _cached_dataset_versions(
@@ -128,7 +122,6 @@ def _cached_dataset_versions(
         dataset_id=dataset_id,
         require_visualization_artifacts=require_visualization_artifacts,
     )
-
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _cached_bundle_status(
@@ -158,19 +151,16 @@ def _cached_bundle_status(
     )
     return summarize_bundle_status(bundle)
 
-
 def _clear_caches() -> None:
     _cached_dataset_ids.clear()
     _cached_dataset_versions.clear()
     _cached_bundle_status.clear()
-
 
 def _render_header() -> None:
     st.title(APP_TITLE)
     st.caption(
         "A local TensorBoard-like viewer for CVDMS dataset version artifacts."
     )
-
 
 def _render_sidebar() -> dict[str, Any] | None:
     st.sidebar.header("Connection")
@@ -339,7 +329,6 @@ def _render_sidebar() -> dict[str, Any] | None:
         "show_raw_artifacts": show_raw_artifacts,
     }
 
-
 def _load_bundle(config: dict[str, Any]):
     s3_client = create_s3_client(
         profile_name=config["profile_name"],
@@ -354,7 +343,6 @@ def _load_bundle(config: dict[str, Any]):
         strict=False,
     )
 
-
 def _render_selected_context(config: dict[str, Any]) -> None:
     st.markdown(
         f"""
@@ -363,7 +351,6 @@ def _render_selected_context(config: dict[str, Any]) -> None:
         **Datasets bucket:** `{config["bucket"]}`
         """
     )
-
 
 def _render_main_dashboard(config: dict[str, Any]) -> None:
     _render_selected_context(config)
@@ -423,7 +410,6 @@ def _render_main_dashboard(config: dict[str, Any]) -> None:
         with tabs[8]:
             render_raw_artifacts(bundle)
 
-
 def main() -> None:
     st.set_page_config(
         page_title=APP_TITLE,
@@ -440,7 +426,6 @@ def main() -> None:
         return
 
     _render_main_dashboard(config)
-
 
 if __name__ == "__main__":
     main()

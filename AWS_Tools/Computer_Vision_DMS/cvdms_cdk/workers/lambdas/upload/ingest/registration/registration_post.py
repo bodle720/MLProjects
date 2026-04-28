@@ -13,19 +13,16 @@ LOG_FIREHOSE_STREAM_NAME = os.environ["LOG_FIREHOSE_STREAM_NAME"]
 
 TASK_NAME = "[REG_INGEST_POST]"
 
-
 def _require_event_key(event: dict, key: str):
     if key not in event:
         raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
     return event[key]
-
 
 def _require_pre_dict(event: dict) -> Dict[str, Any]:
     pre = _require_event_key(event, "pre")
     if not isinstance(pre, dict):
         raise RuntimeError(f"{TASK_NAME} invalid pre payload type: expected dict, got {type(pre).__name__}")
     return pre
-
 
 def _require_pre_int(pre: Dict[str, Any], key: str, *, min_value: int | None = None) -> int:
     if key not in pre:
@@ -44,7 +41,6 @@ def _require_pre_int(pre: Dict[str, Any], key: str, *, min_value: int | None = N
 
     return value
 
-
 def _derive_ctas_table_name(job_id: str, pre: Dict[str, Any]) -> str:
     ctas_table_name = pre.get("ctas_table_name")
     if isinstance(ctas_table_name, str) and ctas_table_name.strip():
@@ -52,7 +48,6 @@ def _derive_ctas_table_name(job_id: str, pre: Dict[str, Any]) -> str:
 
     sanitized_job_id = "".join(c if c.isalnum() else "_" for c in job_id)
     return f"reg_export_{sanitized_job_id}"
-
 
 def handler(event, context):
     try:

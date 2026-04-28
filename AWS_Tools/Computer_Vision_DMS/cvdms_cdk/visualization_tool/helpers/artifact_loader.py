@@ -37,7 +37,6 @@ ARTIFACT_FILENAMES: dict[str, str] = {
     "split_comparison": "split_comparison_metrics.json",
 }
 
-
 @dataclass
 class LoadedArtifact:
     name: str
@@ -49,7 +48,6 @@ class LoadedArtifact:
     @property
     def loaded(self) -> bool:
         return self.payload is not None and self.error is None
-
 
 @dataclass
 class VisualizationBundle:
@@ -102,7 +100,6 @@ class VisualizationBundle:
             )
         return artifact.payload
 
-
 def expected_artifact_refs(
     *,
     bucket: str,
@@ -123,7 +120,6 @@ def expected_artifact_refs(
         refs[name] = S3ObjectRef(bucket=bucket, key=key)
 
     return refs
-
 
 def load_visualization_bundle(
     s3_client: BaseClient,
@@ -195,7 +191,6 @@ def load_visualization_bundle(
             )
 
     return bundle
-
 
 def summarize_bundle_status(bundle: VisualizationBundle) -> dict[str, Any]:
     """

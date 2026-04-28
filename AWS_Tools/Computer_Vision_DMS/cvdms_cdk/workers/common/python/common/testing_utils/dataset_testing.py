@@ -21,7 +21,6 @@ _CACHE_TTL_SEC = 10
 _cached_at: float = 0.0
 _cached_config: dict[str, Any] | None = None
 
-
 def _load_fail_config() -> dict[str, Any]:
     global _cached_at, _cached_config
 
@@ -54,7 +53,6 @@ def _load_fail_config() -> dict[str, Any]:
     _cached_config = parsed
     _cached_at = now
     return parsed
-
 
 def maybe_fail(failpoint_name: str) -> None:
     cfg = _load_fail_config()

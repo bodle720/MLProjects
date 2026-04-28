@@ -17,7 +17,6 @@ from aws_cdk import (
 
 from config_models import BatchingStageConfig
 
-
 class BatchingStage(Construct):
     def __init__(
         self,

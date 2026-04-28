@@ -48,14 +48,12 @@ def _require_event_key(event: dict, key: str):
         raise RuntimeError(f"{TASK_NAME} Missing key: {key!r}, event={json.dumps(event)}")
     return event[key]
 
-
 def _head_size_bytes(bucket: str, key: str) -> int:
     try:
         resp = s3.head_object(Bucket=bucket, Key=key)
         return int(resp.get("ContentLength", 0))
     except Exception as e:
         raise RuntimeError(f"{TASK_NAME} Failed head_object for s3://{bucket}/{key}: {e}")
-
 
 def _read_key_bytes(bucket: str, key: str) -> bytes:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -66,12 +64,10 @@ def _read_key_bytes(bucket: str, key: str) -> bytes:
         raise RuntimeError(f"{TASK_NAME} Unexpected non-bytes read from s3://{bucket}/{key}")
     return bytes(data)
 
-
 def _ensure_trailing_newline(data: bytes) -> bytes:
     if not data:
         return b""
     return data if data.endswith(b"\n") else (data + b"\n")
-
 
 def _write_bytes_key(key: str, body: bytes, content_type: str = "application/x-ndjson") -> None:
     s3.put_object(
@@ -80,7 +76,6 @@ def _write_bytes_key(key: str, body: bytes, content_type: str = "application/x-n
         Body=body,
         ContentType=content_type,
     )
-
 
 def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
     resp = read_obj_with_retry(bucket, key, TASK_NAME)
@@ -115,7 +110,6 @@ def read_batch_plan_items(bucket: str, key: str) -> List[Dict[str, Any]]:
 
     return items
 
-
 def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) -> List[str]:
     """
     Prefer explicit shard from the batching handoff item.
@@ -149,13 +143,11 @@ def extract_expected_shards_from_batch_items(batch_items: List[Dict[str, Any]]) 
             out.append(s)
     return out
 
-
 def _extract_owner_shard_id_from_key(k: str) -> str:
     for part in k.split("/"):
         if part.startswith("owner-"):
             return part[len("owner-") :]
     return ""
-
 
 def collect_processed_shards(
     job_id: str,
@@ -371,12 +363,10 @@ def collect_processed_shards(
         "total_owner_label_files": total_owner_label_files,
     }
 
-
 def _close_group(groups: List[List[Dict[str, Any]]], current: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if current:
         groups.append(current)
     return []
-
 
 def group_target_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     if not GROUPING_ENABLED or len(shards) <= 1:
@@ -423,7 +413,6 @@ def group_target_shards(shards: List[Dict[str, Any]]) -> List[List[Dict[str, Any
     _close_group(groups, current)
     return groups
 
-
 def group_owner_shards(owner_items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     if not GROUPING_ENABLED or len(owner_items) <= 1:
         return [[o] for o in owner_items]
@@ -469,7 +458,6 @@ def group_owner_shards(owner_items: List[Dict[str, Any]]) -> List[List[Dict[str,
     _close_group(groups, current)
     return groups
 
-
 def _materialize_grouped_jsonl_file(
     *,
     source_keys: List[str],
@@ -497,7 +485,6 @@ def _materialize_grouped_jsonl_file(
     body = b"".join(parts)
     _write_bytes_key(dest_key, body)
     return dest_key, len(body)
-
 
 def _materialize_grouped_target_item(
     *,
@@ -575,7 +562,6 @@ def _materialize_grouped_target_item(
         "image_source_membership_key": image_source_membership_key,
     }
 
-
 def _materialize_grouped_owner_item(
     *,
     job_id: str,
@@ -643,7 +629,6 @@ def _materialize_grouped_owner_item(
         "image_source_membership_key": None,
     }
 
-
 def build_grouped_ingest_items(
     job_id: str,
     target_shards: List[Dict[str, Any]],
@@ -674,7 +659,6 @@ def build_grouped_ingest_items(
 
     return grouped_items
 
-
 def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
     handoff_prefix = f"temp/image-upload/{job_id}/batches/registration-step/ingest-handoff/"
     handoff_key = f"{handoff_prefix}{INGEST_HANDOFF_FILE_NAME}"
@@ -694,7 +678,6 @@ def write_ingest_handoff(job_id: str, items: List[Dict[str, Any]]) -> Dict[str, 
         "plan_s3_uri": plan_s3_uri,
         "item_count": len(items),
     }
-
 
 def handler(event, context):
     job_id = _require_event_key(event, "job_id")

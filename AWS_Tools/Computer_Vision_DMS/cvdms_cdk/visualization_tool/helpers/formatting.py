@@ -8,9 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-
 SPLIT_ORDER = ["train", "val", "test"]
-
 
 FEATURE_LABELS: dict[str, str] = {
     "img_height": "Image Height",
@@ -29,14 +27,12 @@ FEATURE_LABELS: dict[str, str] = {
     "colorfulness": "Colorfulness",
 }
 
-
 BUCKET_LABELS: dict[str, str] = {
     "lighting_bucket": "Lighting",
     "blur_bucket": "Blur",
     "contrast_bucket": "Contrast",
     "color_bucket": "Color",
 }
-
 
 def pct(value: Any, *, digits: int = 1) -> str:
     """
@@ -51,7 +47,6 @@ def pct(value: Any, *, digits: int = 1) -> str:
         return "—"
 
     return f"{100.0 * f:.{digits}f}%"
-
 
 def number(value: Any, *, digits: int = 2) -> str:
     """
@@ -70,7 +65,6 @@ def number(value: Any, *, digits: int = 2) -> str:
 
     return f"{f:,.{digits}f}"
 
-
 def integer(value: Any) -> str:
     """
     Format an integer-like value for display.
@@ -82,7 +76,6 @@ def integer(value: Any) -> str:
         return f"{int(value):,}"
     except Exception:
         return str(value)
-
 
 def clean_label(value: Any) -> str:
     """
@@ -100,20 +93,17 @@ def clean_label(value: Any) -> str:
 
     return text.replace("_", " ")
 
-
 def feature_label(feature_name: str) -> str:
     """
     Human-readable label for a numeric feature.
     """
     return FEATURE_LABELS.get(feature_name, clean_label(feature_name).title())
 
-
 def bucket_label(bucket_field: str) -> str:
     """
     Human-readable label for a quality bucket field.
     """
     return BUCKET_LABELS.get(bucket_field, clean_label(bucket_field).title())
-
 
 def split_sort_key(split: str) -> tuple[int, str]:
     """
@@ -123,13 +113,11 @@ def split_sort_key(split: str) -> tuple[int, str]:
         return (SPLIT_ORDER.index(split), split)
     return (len(SPLIT_ORDER), split)
 
-
 def sorted_splits(values: list[str] | set[str]) -> list[str]:
     """
     Sort split names with train/val/test first.
     """
     return sorted(values, key=split_sort_key)
-
 
 def counts_by_split_to_dataframe(
     counts_by_split: dict[str, dict[str, int | float]],
@@ -177,7 +165,6 @@ def counts_by_split_to_dataframe(
     df = df.sort_values(["split", category_name]).reset_index(drop=True)
     return df
 
-
 def percentages_by_split_to_dataframe(
     percentages_by_split: dict[str, dict[str, int | float]],
     *,
@@ -194,7 +181,6 @@ def percentages_by_split_to_dataframe(
         category_name=category_name,
         value_name=value_name,
     )
-
 
 def summary_stats_to_dataframe(summary: dict[str, Any]) -> pd.DataFrame:
     """
@@ -234,7 +220,6 @@ def summary_stats_to_dataframe(summary: dict[str, Any]) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows)
-
 
 def histogram_to_dataframe(histogram: dict[str, Any]) -> pd.DataFrame:
     """
@@ -293,7 +278,6 @@ def histogram_to_dataframe(histogram: dict[str, Any]) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows)
-
 
 def nested_delta_block_to_dataframe(delta_block: dict[str, Any]) -> pd.DataFrame:
     """
