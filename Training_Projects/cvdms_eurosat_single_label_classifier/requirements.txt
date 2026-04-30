@@ -1,5 +1,6 @@
 boto3
 torch
+torchinfo
 torchvision
 tensorboard
 Pillow
