@@ -227,3 +227,4 @@ package-lock.json
 .cdk.staging
 cdk.out
 cdk.context.json
+/Training_Projects/cvdms_eurosat_single_label_classifier/outputs/

@@ -205,6 +205,8 @@ def evaluate_classifier(
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
+        # no need to apply softmax first, only need that if want probabilities:
+        # argmax(logits) is equivalent to argmax(softmax(logits))
         logits = model(images)
         loss = loss_fn(logits, targets)
 

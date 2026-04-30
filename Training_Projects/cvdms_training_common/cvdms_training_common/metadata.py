@@ -11,6 +11,9 @@ Expected CVDMS path shape:
 The metadata file is expected to include version-specific training information,
 including effective_classes, class_to_idx, idx_to_class, and artifact URIs for
 the train/val/test manifests.
+
+The main use is:
+    1. load metadata call to produce a metadata object: load_cvdms_metadata(...)
 """
 
 from dataclasses import dataclass

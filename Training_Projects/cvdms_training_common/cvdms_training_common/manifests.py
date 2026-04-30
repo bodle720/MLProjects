@@ -21,6 +21,10 @@ For single-label classification, each row is expected to include:
 Task-specific Dataset classes can perform stricter validation later, but this
 module handles shared manifest concerns such as split validation, S3 row loading,
 and basic row normalization.
+
+Two main functions to use:
+    1. Load bundle: load_manifest_bundle(...)
+    2. Optionally validate bundle: validate_bundle_basic(...)
 """
 
 from dataclasses import dataclass

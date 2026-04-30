@@ -14,8 +14,6 @@ Run from the project root:
     python source/train.py --config config.yaml
 """
 
-from __future__ import annotations
-
 import argparse
 import random
 from pathlib import Path
