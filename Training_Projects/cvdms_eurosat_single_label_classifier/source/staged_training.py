@@ -16,8 +16,6 @@ The staged logic is intentionally project-specific because layer names such as
 "layer3", "layer4", and "fc" are ResNet-specific.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any, Callable
 

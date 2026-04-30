@@ -1,9 +1,14 @@
-boto3
+--index-url https://download.pytorch.org/whl/cu126
+--extra-index-url https://pypi.org/simple
+
 torch
-torchinfo
 torchvision
+torchaudio
+torchinfo
 tensorboard
+boto3
 Pillow
 pyyaml
+numpy
 matplotlib
 scikit-learn

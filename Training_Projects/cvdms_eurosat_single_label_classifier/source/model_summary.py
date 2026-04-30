@@ -6,8 +6,6 @@ training phase is easy to inspect later. This is especially useful for staged
 fine-tuning, where the set of trainable layers changes by phase.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 
