@@ -1,0 +1,8 @@
+boto3
+torch
+torchvision
+tensorboard
+Pillow
+pyyaml
+matplotlib
+scikit-learn
