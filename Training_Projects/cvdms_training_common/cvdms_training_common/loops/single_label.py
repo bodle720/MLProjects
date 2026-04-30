@@ -282,6 +282,8 @@ def fit_classifier(
     log_val_precision_recall_curve: bool = True,
     log_test_figures: bool = True,
     print_fn: Callable[[str], None] | None = print,
+    train_sampler: Any | None = None,
+    is_main_process: bool = True,
 ) -> FitResult:
     """
     Fit a standard classifier using train/val/test loaders.
@@ -303,6 +305,11 @@ def fit_classifier(
             "epoch" means scheduler.step() after each epoch.
             "val_loss" means scheduler.step(val_loss), useful for ReduceLROnPlateau.
             "none" disables scheduler stepping even if scheduler is provided.
+
+    This version is “DDP-safe” for logging/checkpointing, but it does not yet all-reduce metrics across ranks. So in a
+    true multi-process DDP run, each rank computes metrics on its local shard. Since only rank 0 logs/saves, the saved
+    metrics would reflect rank 0’s shard unless we later add distributed metric aggregation. That is fine for now; before
+    real DDP training, we should add all-reduce support for loss totals, correct counts, total examples, and confusion matrices.
     """
     _validate_epochs(epochs)
 
@@ -315,22 +322,28 @@ def fit_classifier(
     hparams = dict(hyperparameters or {})
     extra = dict(extra_checkpoint_metadata or {})
 
-    if metadata_uri is not None:
-        save_cvdms_training_metadata(
-            path=output_path / "cvdms_training_metadata.json",
+    if is_main_process:
+        if metadata_uri is not None:
+            save_cvdms_training_metadata(
+                path=output_path / "cvdms_training_metadata.json",
+                cvdms_metadata=cvdms_metadata,
+                metadata_uri=metadata_uri,
+                model_name=model_name,
+                hyperparameters=hparams,
+                extra=extra,
+            )
+
+        save_class_map(
+            path=output_path / "class_map.json",
             cvdms_metadata=cvdms_metadata,
-            metadata_uri=metadata_uri,
-            model_name=model_name,
-            hyperparameters=hparams,
-            extra=extra,
         )
 
-    save_class_map(
-        path=output_path / "class_map.json",
-        cvdms_metadata=cvdms_metadata,
+    writer = (
+        SummaryWriter(log_dir=str(tensorboard_dir))
+        if tensorboard_dir and is_main_process
+        else None
     )
 
-    writer = SummaryWriter(log_dir=str(tensorboard_dir)) if tensorboard_dir else None
     history = _new_history()
 
     best_tracker = BestCheckpointTracker(
@@ -342,6 +355,9 @@ def fit_classifier(
 
     try:
         for epoch in range(1, epochs + 1):
+            if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
+                train_sampler.set_epoch(epoch)
+
             train_result = train_one_epoch(
                 model=model,
                 dataloader=train_loader,
@@ -390,41 +406,42 @@ def fit_classifier(
                     val_loss=val_result.loss,
                 )
 
-            save_checkpoint(
-                path=output_path / "last_checkpoint.pt",
-                model=model,
-                epoch=epoch,
-                cvdms_metadata=cvdms_metadata,
-                model_name=model_name,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                metric_name="val_accuracy",
-                metric_value=val_result.accuracy,
-                hyperparameters=hparams,
-                extra=extra,
-            )
+            if is_main_process:
+                save_checkpoint(
+                    path=output_path / "last_checkpoint.pt",
+                    model=model,
+                    epoch=epoch,
+                    cvdms_metadata=cvdms_metadata,
+                    model_name=model_name,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    metric_name="val_accuracy",
+                    metric_value=val_result.accuracy,
+                    hyperparameters=hparams,
+                    extra=extra,
+                )
 
-            best_metric_value = _select_best_metric_value(
-                metric_name=best_metric_name,
-                train_result=train_result,
-                val_result=val_result,
-            )
+                best_metric_value = _select_best_metric_value(
+                    metric_name=best_metric_name,
+                    train_result=train_result,
+                    val_result=val_result,
+                )
 
-            is_new_best = best_tracker.maybe_save(
-                metric_value=best_metric_value,
-                model=model,
-                epoch=epoch,
-                cvdms_metadata=cvdms_metadata,
-                model_name=model_name,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                hyperparameters=hparams,
-                extra=extra,
-            )
+                is_new_best = best_tracker.maybe_save(
+                    metric_value=best_metric_value,
+                    model=model,
+                    epoch=epoch,
+                    cvdms_metadata=cvdms_metadata,
+                    model_name=model_name,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    hyperparameters=hparams,
+                    extra=extra,
+                )
 
-            if print_fn is not None:
-                marker = " *best*" if is_new_best else ""
-                print_fn(_format_epoch_log(epoch, epochs, train_result, val_result) + marker)
+                if print_fn is not None:
+                    marker = " *best*" if is_new_best else ""
+                    print_fn(_format_epoch_log(epoch, epochs, train_result, val_result) + marker)
 
         test_result = evaluate_classifier(
             model=model,
@@ -449,28 +466,29 @@ def fit_classifier(
                 log_test_figures=log_test_figures,
             )
 
-        save_json_artifact(
-            path=output_path / "evaluation_summary.json",
-            payload={
-                "history": history,
-                "best_checkpoint": best_tracker.summary(),
-                "test_metrics": test_summary,
-            },
-        )
-
-        if print_fn is not None:
-            print_fn(
-                " | ".join(
-                    [
-                        "final_test",
-                        f"test_loss={test_result.loss:.4f}",
-                        f"test_acc={test_result.accuracy:.4f}",
-                        f"test_precision={test_result.precision_macro:.4f}",
-                        f"test_recall={test_result.recall_macro:.4f}",
-                        f"test_f1={test_result.f1_macro:.4f}",
-                    ]
-                )
+        if is_main_process:
+            save_json_artifact(
+                path=output_path / "evaluation_summary.json",
+                payload={
+                    "history": history,
+                    "best_checkpoint": best_tracker.summary(),
+                    "test_metrics": test_summary,
+                },
             )
+
+            if print_fn is not None:
+                print_fn(
+                    " | ".join(
+                        [
+                            "final_test",
+                            f"test_loss={test_result.loss:.4f}",
+                            f"test_acc={test_result.accuracy:.4f}",
+                            f"test_precision={test_result.precision_macro:.4f}",
+                            f"test_recall={test_result.recall_macro:.4f}",
+                            f"test_f1={test_result.f1_macro:.4f}",
+                        ]
+                    )
+                )
 
         return FitResult(
             history=history,
