@@ -4,7 +4,6 @@
 # Any script generated logs.
 logs/
 api_logs/
-sample/
 *.log
 
 # Run artifacts
@@ -15,6 +14,7 @@ ec2_results/
 __pycache__/
 *.py[codz]
 *$py.class
+*.pyc
 
 # C extensions
 *.so
@@ -151,6 +151,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv/
 env/
 venv/
 ENV/
@@ -227,4 +228,3 @@ package-lock.json
 .cdk.staging
 cdk.out
 cdk.context.json
-/Training_Projects/cvdms_eurosat_single_label_classifier/outputs/

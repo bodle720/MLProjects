@@ -8,13 +8,13 @@
 #   -> staged ResNet18 fine-tuning
 #   -> TensorBoard + checkpoints + evaluation summary
 
-metadata_uri: "s3://cvdmsv1-storagestack-datasetsbucketcb69a570-a7xzy9shpon5/datasets/eurosat-single-label/v1/metadata/metadata.json"
+metadata_uri: "s3://<your bucket name>/datasets/eurosat-single-label/v1/metadata/metadata.json"
 
 aws:
   # Use null to rely on the default AWS credential chain.
   # For local development, set this to your named AWS CLI profile if needed.
-  profile_name: developers_admin
-  region_name: "us-east-1"
+  profile_name: <your profile name>
+  region_name: <your region>
 
 data:
   batch_size: 32

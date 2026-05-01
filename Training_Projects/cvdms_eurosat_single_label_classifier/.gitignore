@@ -1,0 +1,4 @@
+outputs/
+.venv/
+.idea/
+config.yaml
