@@ -1,4 +1,4 @@
 outputs/
 .venv/
-.idea/
+.idea_old/
 config.yaml
