@@ -1,5 +1,6 @@
 *.swp
 package-lock.json
+make_dataset.py
 __pycache__
 .pytest_cache
 .venv

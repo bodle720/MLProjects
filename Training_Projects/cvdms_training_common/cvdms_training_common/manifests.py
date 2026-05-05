@@ -10,13 +10,20 @@ Expected CVDMS manifest artifact shape:
     manifests/val.jsonl
     manifests/test.jsonl
 
-For single-label classification, each row is expected to include:
+Expected common CVDMS manifest fields:
 
     image_id
     source_ref
     split
     label_type
-    label
+
+Task-specific fields are preserved in row.raw. Examples:
+
+    single-label: label
+    multi-label: labels
+    object-detection: bbox_annotation_ids
+    semantic-segmentation: semantic_mask_ids
+    instance-segmentation: instance_annotation_ids
 
 Task-specific Dataset classes can perform stricter validation later, but this
 module handles shared manifest concerns such as split validation, S3 row loading,
