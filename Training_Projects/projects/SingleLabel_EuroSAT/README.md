@@ -73,3 +73,24 @@ TensorBoard includes standard training diagnostics such as:
 This project serves as a compact proof of concept for using CVDMS dataset outputs in a real PyTorch training workflow.
 
 It is intended as a baseline example, not a final modeling benchmark. The main value is demonstrating that CVDMS can produce versioned dataset artifacts that are directly usable for downstream model training, evaluation, and experiment inspection.
+
+## Mosaic Outputs - Better Dataset Understanding
+
+Below is a collection of mosaic images from the testing split for 
+this EuroSAT-based dataset. This helps us better understand what the images look like and 
+how classes compare between splits of the dataset.
+
+<p align="center">
+  <img src="readme_imgs/test_class-annualcrop_order-class_image_id__grid-10x10__sheet-001.png" alt="Testing Annual Crops" width="900"><br>
+  <em>EuroSAT Annual Crops (test set, 81 samples).</em>
+</p>
+
+<p align="center">
+  <img src="readme_imgs/test_class-forest_order-class_image_id__grid-10x10__sheet-001.png" alt="Testing Forests" width="900"><br>
+  <em>EuroSAT Forests (test set, 84 samples).</em>
+</p>
+
+<p align="center">
+  <img src="readme_imgs/test_class-highway_order-class_image_id__grid-10x10__sheet-001.png" alt="Testing Highways" width="900"><br>
+  <em>EuroSAT Highways (test set, 72 samples).</em>
+</p>
