@@ -11,6 +11,32 @@ It consumes a CVDMS dataset version from S3, including:
 
 The goal is not to build a complex model, but to demonstrate the basic path from a versioned CVDMS dataset into a reproducible PyTorch training workflow.
 
+## Usage
+
+First, inspect the dataset to ensure the CVDMS metadata, manifests, image loading, transforms, and DataLoaders are functioning properly:
+
+```bash
+python source/inspect_dataset.py --config config.yaml
+```
+
+Next, optionally generate image mosaics for visual inspection of the dataset:
+
+```bash
+python source/generate_mosaics.py --config config.yaml --rows 10 --cols 10 --tile-size 128
+```
+
+Finally, train the model as follows:
+
+```bash
+python source/train.py --config config.yaml
+```
+
+View logs in tensorboard by running the following:
+
+```bash
+tensorboard --logdir=outputs/tensorboard
+```
+
 ## What this project demonstrates
 
 This project trains a single-label image classifier using a pretrained ResNet18 model with staged transfer learning:

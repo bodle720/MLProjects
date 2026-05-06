@@ -1,4 +1,4 @@
-# CVDMS EuroSAT single-label classifier configuration.
+# CVDMS BigEarthNet v2 multi-label classifier configuration.
 #
 # This project trains a staged transfer-learning classifier from a CVDMS
 # dataset-version artifact:
@@ -7,8 +7,15 @@
 #   -> PyTorch DataLoaders
 #   -> staged ResNet18 fine-tuning
 #   -> TensorBoard + checkpoints + evaluation summary
+#
+# Multi-label notes:
+#   - targets are multi-hot float vectors
+#   - model outputs raw logits
+#   - loss is BCEWithLogitsLoss
+#   - sigmoid is applied only for metrics/inference
+#   - pos_weight can be derived from train class counts to address imbalance
 
-metadata_uri: "s3://<your bucket name>/datasets/eurosat-single-label/v1/metadata/metadata.json"
+metadata_uri: "s3://<your bucket name>/datasets/bigearthnetv2-multi-label/v1/metadata/metadata.json"
 
 aws:
   # Use null to rely on the default AWS credential chain.
@@ -29,12 +36,29 @@ model:
   name: "resnet18"
   pretrained: true
 
+loss:
+  name: "bce_with_logits"
+
+  # BigEarthNet v2 is heavily imbalanced, so this is enabled from the start.
+  # pos_weight[class] = negative_count / positive_count, using train split counts.
+  use_pos_weight: true
+  pos_weight_source: "train_class_counts"
+
+  # Prevent extremely rare classes from producing very large loss weights.
+  max_pos_weight: 25.0
+
 training:
   seed: 42
   # device null means the code can choose cuda if available, otherwise cpu
   device: null
 
+  # Initial threshold used for threshold-dependent metrics.
+  # The model still outputs raw logits; sigmoid + threshold are metric/inference only.
+  threshold: 0.5
+
   # Best checkpoint is tracked globally across all phases.
+  # For multi-label classification, macro F1 is a good first default because
+  # it gives smaller/rarer classes meaningful influence.
   best_metric_name: "val_f1_macro"
   best_metric_mode: "max"
 
@@ -91,9 +115,22 @@ logging:
   tensorboard_dir: "outputs/tensorboard"
   output_dir: "outputs/model"
 
-  log_train_confusion_matrix: false
-  log_val_confusion_matrix: true
+  # Multi-label classification does not use the normal single-label square
+  # confusion matrix. Prefer PR curves, AP/mAP, per-class metrics, and
+  # threshold diagnostics.
   log_val_precision_recall_curve: true
   log_test_figures: true
+
+  log_threshold_sweep: true
+  threshold_sweep_values:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
 
   print_every_epoch: true

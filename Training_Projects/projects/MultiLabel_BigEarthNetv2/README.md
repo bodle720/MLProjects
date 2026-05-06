@@ -5,6 +5,64 @@ of truth. It trains a PyTorch model on a 17-class BigEarthNet v2 dataset version
 exported from CVDMS, using multi-hot labels, BCE-with-logits loss, thresholded
 predictions, and multi-label evaluation metrics.
 
+## Usage
+
+Run all commands from the project root.
+
+This project uses CVDMS dataset metadata and manifests from S3,
+but image files should be mirrored locally before training.
+Reading thousands of images repeatedly from S3 during each epoch
+is slow and creates unnecessary data-transfer usage. The local
+cache keeps the CVDMS `source_ref` values unchanged while storing
+each image under the same S3 key path beneath the configured
+cache directory. This also removes a common local-training
+bottleneck: the CPU and network spend time fetching, decoding,
+and transforming images while the GPU sits idle waiting for
+the next batch.
+
+First, cache the dataset images:
+
+```bash
+python source/cache_dataset.py --config config.yaml
+````
+
+The cache location is configured in `config.yaml`:
+
+```yaml
+data:
+  image_loader:
+    mode: "local_mirror"
+    cache_dir: "outputs/image_cache/bigearthnetv2_multi_label_v1"
+```
+
+For example, this S3 image:
+
+```text
+s3://bucket/canonical/images/bigearthnetv2/images/training/example.png
+```
+
+is cached locally as:
+
+```text
+outputs/image_cache/bigearthnetv2_multi_label_v1/canonical/images/bigearthnetv2/images/training/example.png
+```
+
+After caching, verify the dataset wiring:
+
+```bash
+python source/inspect_dataset.py --config config.yaml
+```
+
+The inspection script checks that metadata, manifests, local image
+loading, transforms, DataLoaders, and multi-hot labels are working
+correctly. It does not train a model.
+
+Then start training:
+
+```bash
+python source/train.py --config config.yaml
+```
+
 ## Dataset
 
 The following charts were generated from the custom CVDMS visualization tool. 
