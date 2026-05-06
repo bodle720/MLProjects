@@ -146,3 +146,17 @@ python source/generate_mosaics.py --config config.yaml --splits train val test -
 ```
 
 This groups mosaics by exact class combination within each cardinality folder, so images with different multi-label combinations do not mix within the same mosaic sheet.
+
+Below are two mosaic examples from the test set, produced by setting `--order-strategy cardinality_signature`. Images are ordered by label cardinality first, then by exact label signature, so visually and semantically similar examples tend to appear near each other.
+
+<p align="center">
+  <img src="readme_imgs/test_order-cardinality_signature__grid-10x10__sheet-001.png" alt="Test set mosaic sample 1" width="900"><br>
+  <em>First test-set mosaic sheet.</em>
+</p>
+
+<p align="center">
+  <img src="readme_imgs/test_order-cardinality_signature__grid-10x10__sheet-002.png" alt="Test set mosaic sample 2" width="900"><br>
+  <em>Second test-set mosaic sheet.</em>
+</p>
+
+The transition from one label signature to the next is visible across the sheets. This makes the mosaics useful for inspecting how images cluster by label count and unique class combination.

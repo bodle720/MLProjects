@@ -17,6 +17,7 @@ Labels are used only for ordering, grouping, folder layout, and output filenames
 """
 
 import random
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -278,6 +279,7 @@ def generate_multi_label_split_mosaics(
         for (cardinality, signature), group_records in grouped.items():
             card_name = f"card-{cardinality:02d}"
             sig_name = signature
+            sig_slug = compact_signature_slug(sig_name)
             group_key = f"{card_name}/{sig_name}"
             group_counts[group_key] = len(group_records)
 
@@ -286,7 +288,7 @@ def generate_multi_label_split_mosaics(
             prefix = (
                 f"{normalized_split}"
                 f"__{card_name}"
-                f"__sig-{safe_filename_part(sig_name)}"
+                f"__sig-{sig_slug}"
             )
 
             sheets = save_mosaic_sheets(
@@ -629,3 +631,22 @@ def _validate_positive_int(value: Any, field_name: str) -> None:
 
     if value < 1:
         raise ValueError(f"{field_name} must be >= 1, got {value}")
+
+def compact_signature_slug(signature: str, *, max_chars: int = 64) -> str:
+    """
+    Build a filename-safe, path-length-safe slug for a label signature.
+
+    Full BigEarthNet label combinations can be very long, especially on Windows
+    where long absolute paths can fail. This keeps filenames readable while
+    appending a stable hash so truncated signatures remain unique.
+
+    The full untruncated signature is still preserved in result summaries.
+    """
+    safe = safe_filename_part(signature)
+
+    if len(safe) <= max_chars:
+        return safe
+
+    digest = hashlib.sha1(signature.encode("utf-8")).hexdigest()[:10]
+    prefix_len = max(1, max_chars - len("__h-") - len(digest))
+    return f"{safe[:prefix_len].rstrip('_-')}__h-{digest}"
