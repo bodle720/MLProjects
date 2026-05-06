@@ -1,0 +1,99 @@
+# CVDMS EuroSAT single-label classifier configuration.
+#
+# This project trains a staged transfer-learning classifier from a CVDMS
+# dataset-version artifact:
+#
+#   CVDMS metadata.json + train/val/test manifests
+#   -> PyTorch DataLoaders
+#   -> staged ResNet18 fine-tuning
+#   -> TensorBoard + checkpoints + evaluation summary
+
+metadata_uri: "s3://<your bucket name>/datasets/eurosat-single-label/v1/metadata/metadata.json"
+
+aws:
+  # Use null to rely on the default AWS credential chain.
+  # For local development, set this to your named AWS CLI profile if needed.
+  profile_name: <your profile name>
+  region_name: <your region>
+
+data:
+  batch_size: 32
+  num_workers: 0
+  image_size: 224
+  pin_memory: null
+  persistent_workers: null
+  prefetch_factor: null
+  drop_last_train: false
+
+model:
+  name: "resnet18"
+  pretrained: true
+
+training:
+  seed: 42
+  # device null means the code can choose cuda if available, otherwise cpu
+  device: null
+
+  # Best checkpoint is tracked globally across all phases.
+  best_metric_name: "val_f1_macro"
+  best_metric_mode: "max"
+
+  phases:
+    - name: "head_only"
+      max_epochs: 8
+      trainable_layers:
+        - "fc"
+      learning_rates:
+        head: 0.001
+        backbone: null
+      weight_decay: 0.0001
+      early_stopping:
+        enabled: true
+        monitor: "val_f1_macro"
+        mode: "max"
+        patience: 2
+        min_delta: 0.001
+
+    - name: "layer4_finetune"
+      max_epochs: 10
+      trainable_layers:
+        - "layer4"
+        - "fc"
+      learning_rates:
+        head: 0.0003
+        backbone: 0.00005
+      weight_decay: 0.0001
+      early_stopping:
+        enabled: true
+        monitor: "val_f1_macro"
+        mode: "max"
+        patience: 3
+        min_delta: 0.001
+
+    - name: "layer3_layer4_finetune"
+      max_epochs: 12
+      trainable_layers:
+        - "layer3"
+        - "layer4"
+        - "fc"
+      learning_rates:
+        head: 0.0001
+        backbone: 0.00001
+      weight_decay: 0.0001
+      early_stopping:
+        enabled: true
+        monitor: "val_f1_macro"
+        mode: "max"
+        patience: 4
+        min_delta: 0.0005
+
+logging:
+  tensorboard_dir: "outputs/tensorboard"
+  output_dir: "outputs/model"
+
+  log_train_confusion_matrix: false
+  log_val_confusion_matrix: true
+  log_val_precision_recall_curve: true
+  log_test_figures: true
+
+  print_every_epoch: true
