@@ -8,6 +8,6 @@ The following chart are derived from the custom CVDMS visualization tool.
 See [CVDMS CDK infrastructure](../../../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/) for more.
 
 <p align="center">
-  <img src="readme_imgs/split_counts_percentages.png" alt="Split counts" width="600"><br>
+  <img src="readme_imgs/split_counts_percentages.png" alt="Split counts" width="900"><br>
   <em>CVDMS dataset visualization overview for the BigEarthNet v2 multi-label dataset.</em>
 </p>
