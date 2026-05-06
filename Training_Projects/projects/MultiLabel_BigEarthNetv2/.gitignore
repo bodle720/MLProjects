@@ -2,3 +2,5 @@ outputs/
 .venv/
 .idea/
 config.yaml
+__pycache__/
+*.pyc

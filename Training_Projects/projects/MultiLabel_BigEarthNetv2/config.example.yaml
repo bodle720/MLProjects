@@ -14,14 +14,20 @@
 #   - loss is BCEWithLogitsLoss
 #   - sigmoid is applied only for metrics/inference
 #   - pos_weight can be derived from train class counts to address imbalance
+# Metric naming note:
+#   - AP is Average Precision for one class.
+#   - mAP is macro-averaged AP: compute AP per class, then average across classes.
+#   - micro-AP flattens all class decisions before computing AP.
+#   - F1/precision/recall depend on the chosen threshold.
+#   - AP/mAP/micro-AP are threshold-free ranking metrics.
 
-metadata_uri: "s3://<your bucket name>/datasets/bigearthnetv2-multi-label/v1/metadata/metadata.json"
+metadata_uri: "s3://<your bucket>/datasets/bigearthnetv2-multi-label/v1/metadata/metadata.json"
 
 aws:
   # Use null to rely on the default AWS credential chain.
   # For local development, set this to your named AWS CLI profile if needed.
-  profile_name: <your profile name>
-  region_name: <your region>
+  profile_name: null
+  region_name: "us-east-1"
 
 data:
   batch_size: 32
@@ -31,6 +37,10 @@ data:
   persistent_workers: null
   prefetch_factor: null
   drop_last_train: false
+
+  image_loader:
+    mode: "local_mirror"
+    cache_dir: "outputs/image_cache/bigearthnetv2_multi_label_v1"
 
 model:
   name: "resnet18"
@@ -84,9 +94,9 @@ training:
         - "layer4"
         - "fc"
       learning_rates:
-        head: 0.0003
-        backbone: 0.00005
-      weight_decay: 0.0001
+        head: 0.0001
+        backbone: 0.00002
+      weight_decay: 0.001
       early_stopping:
         enabled: true
         monitor: "val_f1_macro"
@@ -95,7 +105,7 @@ training:
         min_delta: 0.001
 
     - name: "layer3_layer4_finetune"
-      max_epochs: 12
+      max_epochs: 3
       trainable_layers:
         - "layer3"
         - "layer4"
@@ -103,7 +113,7 @@ training:
       learning_rates:
         head: 0.0001
         backbone: 0.00001
-      weight_decay: 0.0001
+      weight_decay: 0.001
       early_stopping:
         enabled: true
         monitor: "val_f1_macro"
@@ -120,6 +130,10 @@ logging:
   # threshold diagnostics.
   log_val_precision_recall_curve: true
   log_test_figures: true
+
+  # These save CSV/JSON/PNG outputs under outputs/model/diagnostics/.
+  save_best_validation_diagnostics: true
+  save_test_diagnostics: true
 
   log_threshold_sweep: true
   threshold_sweep_values:

@@ -12,6 +12,16 @@ This script wires together:
 Run from the project root:
 
     python source/train.py --config config.yaml
+
+Metric note
+-----------
+For this project, mAP means macro-averaged Average Precision. In other words,
+`macro_average_precision` is calculated by computing Average Precision (AP)
+separately for each class and then averaging those per-class AP scores.
+
+`micro_average_precision` is different: it flattens all class decisions across
+all examples before computing AP, so user-facing outputs should call it
+micro-AP rather than mAP.
 """
 
 import argparse
@@ -27,8 +37,6 @@ import yaml
 
 from cvdms_training_common.dataloaders.multi_label import build_multi_label_data_bundle
 
-from models import build_model
-from staged_training import run_staged_training
 from helpers import (
     build_project_image_loader,
     require_dict,
@@ -40,6 +48,9 @@ from helpers import (
     require_probability_threshold,
     require_threshold_sweep_values,
 )
+from models import build_model
+from staged_training import run_staged_training
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -52,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -62,6 +74,9 @@ def main() -> None:
     logging_config = require_dict(config.get("logging"), "logging")
     loss_config = require_dict(config.get("loss"), "loss")
     aws_config = config.get("aws") or {}
+
+    if not isinstance(aws_config, dict):
+        raise TypeError(f"aws must be a dictionary when provided, got {type(aws_config).__name__}")
 
     seed = int(training_config.get("seed", 42))
     set_seed(seed)
@@ -98,8 +113,9 @@ def main() -> None:
             f"Expected metadata.label_type='multi-label', got {data_bundle.metadata.label_type!r}"
         )
 
+    model_name = require_nonempty_string(model_config.get("name"), "model.name")
     model = build_model(
-        model_name=require_nonempty_string(model_config.get("name"), "model.name"),
+        model_name=model_name,
         num_classes=data_bundle.num_classes,
         pretrained=bool(model_config.get("pretrained", True)),
     )
@@ -125,7 +141,7 @@ def main() -> None:
         test_loader=data_bundle.test_loader,
         loss_fn=loss_fn,
         cvdms_metadata=data_bundle.metadata,
-        model_name=require_nonempty_string(model_config.get("name"), "model.name"),
+        model_name=model_name,
         phases=phases,
         output_dir=output_dir,
         tensorboard_dir=tensorboard_dir,
@@ -151,6 +167,7 @@ def main() -> None:
             "label_type": data_bundle.metadata.label_type,
             "threshold": threshold,
             "loss": loss_summary,
+            "metric_notes": metric_notes(),
         },
         log_val_precision_recall_curve=bool(
             logging_config.get("log_val_precision_recall_curve", True)
@@ -161,17 +178,21 @@ def main() -> None:
             logging_config.get("threshold_sweep_values"),
             "logging.threshold_sweep_values",
         ),
+        save_best_validation_diagnostics=bool(
+            logging_config.get("save_best_validation_diagnostics", True)
+        ),
+        save_test_diagnostics=bool(logging_config.get("save_test_diagnostics", True)),
         train_sampler=data_bundle.train_sampler,
         is_main_process=True,
         print_fn=print if bool(logging_config.get("print_every_epoch", True)) else None,
     )
 
-    print("")
-    print("Training complete.")
-    print(f"Output directory: {Path(output_dir).resolve()}")
-    if tensorboard_dir:
-        print(f"TensorBoard directory: {Path(str(tensorboard_dir)).resolve()}")
-    print(f"Best checkpoint: {result.get('best_checkpoint', {}).get('best_path')}")
+    print_training_complete_summary(
+        result=result,
+        output_dir=output_dir,
+        tensorboard_dir=tensorboard_dir,
+    )
+
 
 def build_loss_fn(
     *,
@@ -223,6 +244,7 @@ def build_loss_fn(
         "pos_weight": pos_weight_values,
     }
 
+
 def build_pos_weight_from_metadata(
     *,
     metadata,
@@ -232,8 +254,13 @@ def build_pos_weight_from_metadata(
     """
     Build BCEWithLogitsLoss pos_weight from CVDMS train class counts.
 
-    Formula:
-        pos_weight[class_idx] = negative_count / positive_count
+    For class c:
+
+        pos_weight[c] = negative_train_count[c] / positive_train_count[c]
+
+    Larger values make mistakes on positive examples of rare classes more
+    expensive. This is useful for BigEarthNet v2 because the class distribution
+    is intentionally imbalanced.
     """
     raw = getattr(metadata, "raw", None)
     if not isinstance(raw, dict):
@@ -285,6 +312,7 @@ def build_pos_weight_from_metadata(
 
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
+
 def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
 
@@ -298,6 +326,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise TypeError(f"Config must parse to a dictionary, got {type(payload).__name__}")
 
     return payload
+
 
 def make_s3_client(
     *,
@@ -319,6 +348,7 @@ def make_s3_client(
 
     return session.client("s3")
 
+
 def set_seed(seed: int) -> None:
     """
     Set common random seeds for reproducible-ish local experiments.
@@ -336,6 +366,7 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 def resolve_device(value: Any) -> torch.device:
     """
     Resolve training device from config.
@@ -351,6 +382,7 @@ def resolve_device(value: Any) -> torch.device:
         raise RuntimeError("Config requested CUDA, but torch.cuda.is_available() is false")
 
     return device
+
 
 def build_hyperparameter_summary(
     *,
@@ -368,7 +400,76 @@ def build_hyperparameter_summary(
         "model": dict(config.get("model") or {}),
         "loss": dict(loss_summary),
         "training": dict(config.get("training") or {}),
+        "metric_notes": metric_notes(),
     }
+
+
+def metric_notes() -> dict[str, str]:
+    return {
+        "map": (
+            "mAP means macro-averaged Average Precision: compute AP separately "
+            "for each class, then average those per-class AP scores."
+        ),
+        "micro_ap": (
+            "micro-AP flattens all example/class decisions before computing AP. "
+            "It is useful, but it is not the same as mAP."
+        ),
+        "thresholded_metrics": (
+            "Precision, recall, F1, hamming accuracy, hamming loss, and subset "
+            "accuracy use the configured probability threshold to convert sigmoid "
+            "probabilities into binary predictions."
+        ),
+        "ap_metrics": (
+            "AP, mAP, and micro-AP are threshold-free ranking diagnostics based "
+            "on the model's predicted probabilities."
+        ),
+    }
+
+
+def print_training_complete_summary(
+    *,
+    result: dict[str, Any],
+    output_dir: str | Path,
+    tensorboard_dir: str | Path | None,
+) -> None:
+    best_test = result.get("test_metrics_best_checkpoint") or result.get("test_metrics") or {}
+    final_test = result.get("test_metrics_final_model") or {}
+    best_checkpoint = result.get("best_checkpoint") or {}
+
+    print("")
+    print("Training complete.")
+    print(f"Output directory: {Path(output_dir).resolve()}")
+    if tensorboard_dir:
+        print(f"TensorBoard directory: {Path(str(tensorboard_dir)).resolve()}")
+    print(f"Best checkpoint: {best_checkpoint.get('best_path')}")
+
+    if best_test:
+        print(
+            "Primary test result from best checkpoint: "
+            f"loss={_format_optional_metric(best_test.get('loss'))}, "
+            f"f1_macro={_format_optional_metric(best_test.get('f1_macro'))}, "
+            f"mAP={_format_optional_metric(best_test.get('map') or best_test.get('macro_average_precision'))}, "
+            f"micro-AP={_format_optional_metric(best_test.get('micro_ap') or best_test.get('micro_average_precision'))}"
+        )
+
+    if final_test:
+        print(
+            "Reference test result from final model state: "
+            f"loss={_format_optional_metric(final_test.get('loss'))}, "
+            f"f1_macro={_format_optional_metric(final_test.get('f1_macro'))}, "
+            f"mAP={_format_optional_metric(final_test.get('map') or final_test.get('macro_average_precision'))}"
+        )
+
+
+def _format_optional_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
 
 if __name__ == "__main__":
     main()
