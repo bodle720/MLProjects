@@ -8,7 +8,7 @@ predictions, and multi-label evaluation metrics.
 ## Dataset
 
 The following charts were generated from the custom CVDMS visualization tool. 
-Additional screenshots are available in the [readme_imgs](readme_imgs/) folder.
+Shown images are available in the [readme_imgs](readme_imgs/) folder.
 See the [CVDMS CDK infrastructure](../../../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/)
 for more context on the dataset creation pipeline.
 
