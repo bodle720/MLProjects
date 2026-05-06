@@ -6,21 +6,20 @@ This module contains task-specific logic for multi-label classification mosaics:
     - extract source_ref and labels from CVDMS manifest rows
     - validate multi-label rows
     - sort rows deterministically by label cardinality/signature
-    - optionally group mosaics by label cardinality
+    - optionally group mosaics by:
+        * none
+        * cardinality
+        * exact label signature
     - render/save mosaic sheets using mosaic_generators.common_utils
 
 No text, labels, or image IDs are drawn onto the mosaic images themselves.
-Labels are used only for ordering/grouping and output filenames.
+Labels are used only for ordering, grouping, folder layout, and output filenames.
 """
-
-from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
-
-from PIL import Image
+from typing import Any, Sequence
 
 from cvdms_training_common.mosaic_generators.common_utils import (
     ImageLoaderFn,
@@ -38,22 +37,16 @@ _ALLOWED_ORDER_STRATEGIES = {
     "random",
 }
 
+_ALLOWED_GROUP_MODES = {
+    "none",
+    "cardinality",
+    "signature",
+}
+
 @dataclass(frozen=True)
 class MultiLabelMosaicRecord:
     """
     Normalized multi-label manifest row used for mosaic generation.
-
-    Args:
-        source_ref:
-            Image URI/path passed to the configured image loader.
-        labels:
-            Sorted unique class labels for this image.
-        image_id:
-            Optional CVDMS image_id.
-        split:
-            Optional dataset split.
-        raw:
-            Optional raw row payload for debugging or downstream use.
     """
 
     source_ref: str
@@ -95,6 +88,10 @@ class MultiLabelMosaicRecord:
             return "no_labels"
         return "+".join(self.labels)
 
+    @property
+    def safe_label_signature(self) -> str:
+        return safe_filename_part(self.label_signature)
+
     def to_mosaic_item(self) -> MosaicItem:
         return MosaicItem(
             source_ref=self.source_ref,
@@ -130,7 +127,7 @@ class MultiLabelMosaicResult:
     split: str
     output_dir: Path
     order_strategy: str
-    group_by_cardinality: bool
+    group_mode: str
     total_items: int
     group_counts: dict[str, int]
     sheets: list[MosaicSheetResult]
@@ -140,7 +137,7 @@ class MultiLabelMosaicResult:
             "split": self.split,
             "output_dir": str(self.output_dir),
             "order_strategy": self.order_strategy,
-            "group_by_cardinality": self.group_by_cardinality,
+            "group_mode": self.group_mode,
             "total_items": self.total_items,
             "group_counts": dict(self.group_counts),
             "sheets": [sheet.to_dict() for sheet in self.sheets],
@@ -155,7 +152,8 @@ def generate_multi_label_split_mosaics(
     config: MosaicConfig | None = None,
     class_to_idx: dict[str, int] | None = None,
     order_strategy: str = "cardinality_signature",
-    group_by_cardinality: bool = False,
+    group_mode: str = "none",
+    group_by_cardinality: bool | None = None,
     random_seed: int = 42,
     max_items: int | None = None,
     allow_empty_labels: bool = False,
@@ -184,13 +182,18 @@ def generate_multi_label_split_mosaics(
                 source_ref
                 image_id
                 random
+        group_mode:
+            One of:
+                none
+                cardinality
+                signature
         group_by_cardinality:
-            If True, write separate mosaic sets for 1-label, 2-label, 3-label,
-            etc. images.
+            Backward-compatibility bridge. If provided and group_mode remains
+            "none", True maps to "cardinality" and False maps to "none".
         random_seed:
             Seed used only when order_strategy="random".
         max_items:
-            Optional cap after ordering/grouping input rows. Useful for previews.
+            Optional cap after ordering input rows. Useful for previews.
         allow_empty_labels:
             If False, rows with no labels are rejected.
         validate_split:
@@ -199,6 +202,11 @@ def generate_multi_label_split_mosaics(
     resolved_config = config or MosaicConfig()
     normalized_split = _normalize_nonempty_string(split, "split")
     _validate_order_strategy(order_strategy)
+
+    resolved_group_mode = _resolve_group_mode(
+        group_mode=group_mode,
+        group_by_cardinality=group_by_cardinality,
+    )
 
     records = make_multi_label_records(
         rows=rows,
@@ -225,36 +233,11 @@ def generate_multi_label_split_mosaics(
     all_sheets: list[MosaicSheetResult] = []
     group_counts: dict[str, int] = {}
 
-    if group_by_cardinality:
-        grouped = group_records_by_cardinality(records)
-
-        for cardinality, group_records in grouped.items():
-            group_name = f"card-{cardinality:02d}"
-            group_counts[group_name] = len(group_records)
-
-            items = [record.to_mosaic_item() for record in group_records]
-            prefix = (
-                f"{normalized_split}"
-                f"__{group_name}"
-                f"__order-{order_strategy}"
-            )
-
-            sheets = save_mosaic_sheets(
-                items=items,
-                image_loader=image_loader,
-                output_dir=split_output_dir,
-                filename_prefix=prefix,
-                config=resolved_config,
-            )
-            all_sheets.extend(sheets)
-    else:
+    if resolved_group_mode == "none":
         group_counts["all"] = len(records)
 
         items = [record.to_mosaic_item() for record in records]
-        prefix = (
-            f"{normalized_split}"
-            f"__order-{order_strategy}"
-        )
+        prefix = f"{normalized_split}__order-{order_strategy}"
 
         sheets = save_mosaic_sheets(
             items=items,
@@ -265,11 +248,64 @@ def generate_multi_label_split_mosaics(
         )
         all_sheets.extend(sheets)
 
+    elif resolved_group_mode == "cardinality":
+        grouped = group_records_by_cardinality(records)
+
+        for cardinality, group_records in grouped.items():
+            group_name = f"card-{cardinality:02d}"
+            group_counts[group_name] = len(group_records)
+
+            items = [record.to_mosaic_item() for record in group_records]
+            group_output_dir = split_output_dir / group_name
+            prefix = (
+                f"{normalized_split}"
+                f"__{group_name}"
+                f"__order-{order_strategy}"
+            )
+
+            sheets = save_mosaic_sheets(
+                items=items,
+                image_loader=image_loader,
+                output_dir=group_output_dir,
+                filename_prefix=prefix,
+                config=resolved_config,
+            )
+            all_sheets.extend(sheets)
+
+    elif resolved_group_mode == "signature":
+        grouped = group_records_by_signature(records)
+
+        for (cardinality, signature), group_records in grouped.items():
+            card_name = f"card-{cardinality:02d}"
+            sig_name = signature
+            group_key = f"{card_name}/{sig_name}"
+            group_counts[group_key] = len(group_records)
+
+            items = [record.to_mosaic_item() for record in group_records]
+            group_output_dir = split_output_dir / card_name
+            prefix = (
+                f"{normalized_split}"
+                f"__{card_name}"
+                f"__sig-{safe_filename_part(sig_name)}"
+            )
+
+            sheets = save_mosaic_sheets(
+                items=items,
+                image_loader=image_loader,
+                output_dir=group_output_dir,
+                filename_prefix=prefix,
+                config=resolved_config,
+            )
+            all_sheets.extend(sheets)
+
+    else:  # pragma: no cover
+        raise ValueError(f"Unsupported group_mode={resolved_group_mode!r}")
+
     return MultiLabelMosaicResult(
         split=normalized_split,
         output_dir=split_output_dir,
         order_strategy=order_strategy,
-        group_by_cardinality=group_by_cardinality,
+        group_mode=resolved_group_mode,
         total_items=len(records),
         group_counts=group_counts,
         sheets=all_sheets,
@@ -388,6 +424,24 @@ def group_records_by_cardinality(
     return {
         cardinality: grouped[cardinality]
         for cardinality in sorted(grouped)
+    }
+
+def group_records_by_signature(
+    records: Sequence[MultiLabelMosaicRecord],
+) -> dict[tuple[int, str], list[MultiLabelMosaicRecord]]:
+    """
+    Group records by exact label signature, sorted first by cardinality and then
+    alphabetically by signature.
+    """
+    grouped: dict[tuple[int, str], list[MultiLabelMosaicRecord]] = {}
+
+    for record in records:
+        key = (record.cardinality, record.label_signature)
+        grouped.setdefault(key, []).append(record)
+
+    return {
+        key: grouped[key]
+        for key in sorted(grouped, key=lambda item: (item[0], item[1]))
     }
 
 def count_by_cardinality(
@@ -532,11 +586,31 @@ def _validate_labels_in_class_map(
             f"Row {row_index} contains labels not present in class_to_idx: {unknown}"
         )
 
+def _resolve_group_mode(
+    *,
+    group_mode: str,
+    group_by_cardinality: bool | None,
+) -> str:
+    normalized = _normalize_nonempty_string(group_mode, "group_mode")
+    _validate_group_mode(normalized)
+
+    if group_by_cardinality is not None and normalized == "none":
+        return "cardinality" if group_by_cardinality else "none"
+
+    return normalized
+
 def _validate_order_strategy(order_strategy: str) -> None:
     if order_strategy not in _ALLOWED_ORDER_STRATEGIES:
         raise ValueError(
             f"order_strategy must be one of {sorted(_ALLOWED_ORDER_STRATEGIES)}, "
             f"got {order_strategy!r}"
+        )
+
+def _validate_group_mode(group_mode: str) -> None:
+    if group_mode not in _ALLOWED_GROUP_MODES:
+        raise ValueError(
+            f"group_mode must be one of {sorted(_ALLOWED_GROUP_MODES)}, "
+            f"got {group_mode!r}"
         )
 
 def _normalize_nonempty_string(value: Any, field_name: str) -> str:

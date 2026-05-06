@@ -120,3 +120,29 @@ vary more strongly across the image, which corresponds to stronger contrast.
   <img src="readme_imgs/contrast_luma_std.png" alt="Contrast histogram by split" width="900"><br>
   <em>Contrast distribution by split.</em>
 </p>
+
+We can create mosaics of the dataset via the following command:
+
+```bash
+python source/generate_mosaics.py --config config.yaml --splits train val test --rows 10 --cols 10 --tile-size 128 --group-mode none --order-strategy cardinality_signature
+````
+
+This will make mosaics for each split.
+
+`--order-strategy cardinality_signature` means the mosaic script orders images by their multi-label structure rather than by filename or random order. Images are first ordered by label cardinality (number of labels), then by exact label combination, so similar multi-label examples tend to appear near each other.
+
+Alternatively, you can group by label cardinality:
+
+```bash
+python source/generate_mosaics.py --config config.yaml --splits train val test --rows 10 --cols 10 --tile-size 128 --group-mode cardinality
+```
+
+That creates separate mosaic groups for 1-label, 2-label, 3-label, etc. images, which can be useful for understanding label complexity across the dataset.
+
+For the most detailed grouping, you can use exact label-signature grouping:
+
+```bash
+python source/generate_mosaics.py --config config.yaml --splits train val test --rows 10 --cols 10 --tile-size 128 --group-mode signature
+```
+
+This groups mosaics by exact class combination within each cardinality folder, so images with different multi-label combinations do not mix within the same mosaic sheet.

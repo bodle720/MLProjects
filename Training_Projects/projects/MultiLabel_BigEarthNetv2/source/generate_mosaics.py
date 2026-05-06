@@ -10,13 +10,27 @@ Examples:
     python source/generate_mosaics.py --config config.yaml --splits train val test
     python source/generate_mosaics.py --config config.yaml --limit 300
     python source/generate_mosaics.py --config config.yaml --rows 10 --cols 10 --tile-size 128
-    python source/generate_mosaics.py --config config.yaml --group-by-cardinality
+    python source/generate_mosaics.py --config config.yaml --group-mode cardinality
+    python source/generate_mosaics.py --config config.yaml --group-mode signature
 
 This script is manifest-driven, not folder-structure-driven. It reads the CVDMS
 metadata and manifests, orders multi-label rows deterministically, loads images
 through the configured image loader, and writes mosaic PNG files.
 
 No image IDs, labels, or text are drawn onto the mosaic sheets.
+
+Grouping modes:
+
+    none:
+        one ordered mosaic set per split
+
+    cardinality:
+        one folder per split/cardinality, with mixed label signatures in each
+        cardinality group
+
+    signature:
+        one folder per split/cardinality, with separate mosaic files for each
+        exact label signature
 """
 
 import argparse
@@ -33,17 +47,18 @@ from cvdms_training_common.mosaic_generators.multi_label import (
 )
 
 from helpers import (
+    SPLITS,
     build_project_image_loader,
+    iter_jsonl_s3,
+    read_json_from_s3,
     require_dict,
     require_nonempty_string,
     require_positive_int,
-    iter_jsonl_s3,
-    read_json_from_s3,
     resolve_manifest_uris,
-    SPLITS
 )
 
 _ORDER_STRATEGIES = ("cardinality_signature", "source_ref", "image_id", "random")
+_GROUP_MODES = ("none", "cardinality", "signature")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -103,9 +118,14 @@ def parse_args() -> argparse.Namespace:
         help="Ordering strategy for rows before tiling.",
     )
     parser.add_argument(
-        "--group-by-cardinality",
-        action="store_true",
-        help="Write separate mosaic sets for 1-label, 2-label, etc. images.",
+        "--group-mode",
+        choices=list(_GROUP_MODES),
+        default="none",
+        help=(
+            "Mosaic grouping mode. Use 'none' for split-wide mosaics, "
+            "'cardinality' for one group per label count, or 'signature' "
+            "for one mosaic set per exact label combination."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -187,18 +207,18 @@ def main() -> None:
     print("")
     print("CVDMS multi-label mosaic generation")
     print("=" * 80)
-    print(f"metadata_uri:         {metadata_uri}")
-    print(f"dataset_id:           {metadata.get('dataset_id')}")
-    print(f"version:              {metadata.get('version')}")
-    print(f"label_type:           {metadata.get('label_type')}")
-    print(f"num_classes:          {len(class_to_idx)}")
-    print(f"output_dir:           {output_dir}")
-    print(f"splits:               {list(args.splits)}")
-    print(f"grid:                 {mosaic_config.rows}x{mosaic_config.cols}")
-    print(f"tile_size:            {mosaic_config.tile_width}x{mosaic_config.tile_height}")
-    print(f"order_strategy:       {args.order_strategy}")
-    print(f"group_by_cardinality: {args.group_by_cardinality}")
-    print(f"limit_per_split:      {args.limit}")
+    print(f"metadata_uri:   {metadata_uri}")
+    print(f"dataset_id:     {metadata.get('dataset_id')}")
+    print(f"version:        {metadata.get('version')}")
+    print(f"label_type:     {metadata.get('label_type')}")
+    print(f"num_classes:    {len(class_to_idx)}")
+    print(f"output_dir:     {output_dir}")
+    print(f"splits:         {list(args.splits)}")
+    print(f"grid:           {mosaic_config.rows}x{mosaic_config.cols}")
+    print(f"tile_size:      {mosaic_config.tile_width}x{mosaic_config.tile_height}")
+    print(f"order_strategy: {args.order_strategy}")
+    print(f"group_mode:     {args.group_mode}")
+    print(f"limit_per_split:{args.limit}")
 
     all_results: list[dict[str, Any]] = []
 
@@ -225,7 +245,7 @@ def main() -> None:
             config=mosaic_config,
             class_to_idx=class_to_idx,
             order_strategy=args.order_strategy,
-            group_by_cardinality=args.group_by_cardinality,
+            group_mode=args.group_mode,
             random_seed=args.random_seed,
             max_items=args.limit,
             allow_empty_labels=False,
@@ -253,7 +273,7 @@ def main() -> None:
             "tiles_per_sheet": mosaic_config.tiles_per_sheet,
         },
         "order_strategy": args.order_strategy,
-        "group_by_cardinality": args.group_by_cardinality,
+        "group_mode": args.group_mode,
         "limit_per_split": args.limit,
         "splits": all_results,
     }
