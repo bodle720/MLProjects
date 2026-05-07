@@ -1771,9 +1771,21 @@ def _save_result_figures(
             title_prefix=f"{title_prefix} - Precision-Recall",
             annotate_best_f1=False,
         )
+
+        # On Windows, the full absolute path can exceed the traditional path
+        # limit when deeply nested diagnostics folders are combined with long
+        # BigEarthNet class names. Keep figure titles unchanged, but use short,
+        # deterministic filenames for the per-class PR PNG files.
+        per_class_figures_short_names = {
+            _short_class_figure_key(class_name, class_idx): fig
+            for class_idx, class_name in cvdms_metadata.idx_to_class.items()
+            if class_name in per_class_figures
+            for fig in [per_class_figures[class_name]]
+        }
+
         per_class_pr_files = save_figures(
-            per_class_figures,
-            output_path / "precision_recall_by_class",
+            per_class_figures_short_names,
+            output_path / "pr_by_class",
             close=True,
         )
 
@@ -2496,6 +2508,23 @@ def _metric_notes() -> dict[str, str]:
         ),
     }
 
+
+def _short_class_figure_key(class_name: str, class_idx: int) -> str:
+    """
+    Build a short deterministic figure key for class-specific saved PNG files.
+
+    The full class name still appears inside the plot title and in CSV/JSON
+    artifacts. This only shortens the filename to avoid Windows path-length
+    failures when diagnostics are saved inside deeply nested run folders.
+    """
+    safe = "".join(
+        char.lower() if char.isalnum() else "_"
+        for char in class_name.strip()
+    )
+    safe = "_".join(part for part in safe.split("_") if part)
+    if not safe:
+        safe = "class"
+    return f"class_{class_idx:02d}_{safe[:24]}"
 
 def _global_threshold_dir_name(threshold: float) -> str:
     """
