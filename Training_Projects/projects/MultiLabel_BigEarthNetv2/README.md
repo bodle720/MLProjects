@@ -79,7 +79,7 @@ images, 1,000 validation images, and 1,000 test images.
 </p>
 
 The following chart shows the class distribution across the train, validation, and test splits.
-Note the heavy class imbalance.
+Note the heavy class imbalance, which is one of the primary known challenges of this dataset.
 
 <p align="center">
   <img src="readme_imgs/class_split_counts.png" alt="Class counts by split" width="900"><br>
