@@ -534,7 +534,7 @@ def print_training_complete_summary(
         strategy = threshold_strategies.get("per_class_validation_f1") or {}
         threshold_count = len(strategy.get("thresholds_by_class") or {})
         print(
-            "Evaluation-only result from best checkpoint, validation-derived per-class thresholds: "
+            "Test set, best checkpoint, thresholds chosen on validation set: "
             f"loss={_format_optional_metric(best_per_class.get('loss'))}, "
             f"f1_macro={_format_optional_metric(best_per_class.get('f1_macro'))}, "
             f"precision_macro={_format_optional_metric(best_per_class.get('precision_macro'))}, "
