@@ -1,9 +1,6 @@
 # BigEarthNet v2 Multi-Label Classifier
 
-This project demonstrates a multi-label computer vision training workflow using CVDMS dataset artifacts as the source
-of truth. It trains a PyTorch model on a 17-class BigEarthNet v2 dataset version
-exported from CVDMS, using multi-hot labels, BCE-with-logits loss, thresholded
-predictions, and multi-label evaluation metrics.
+This project demonstrates a multi-label computer vision training workflow using CVDMS dataset-version artifacts as the source of truth. It trains a PyTorch ResNet-18 model on a 17-class BigEarthNet v2 dataset exported from CVDMS, using multi-hot labels, `BCEWithLogitsLoss`, thresholded predictions, and multi-label evaluation metrics. Training follows a three-phase transfer-learning schedule: first training only the classifier head, then progressively unfreezing deeper backbone layers while lowering the learning rate for later fine-tuning phases.
 
 ## Usage
 
