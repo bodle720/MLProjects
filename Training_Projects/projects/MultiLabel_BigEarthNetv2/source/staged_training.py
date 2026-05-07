@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torch import nn
 from torch.optim import Optimizer
@@ -59,18 +60,22 @@ from cvdms_training_common.metrics.multi_label import (
     make_conditional_prediction_probability_heatmap_figure,
     make_false_association_probability_heatmap_figure,
     make_missed_vs_extra_heatmap_figure,
+    make_matrix_heatmap_figure,
     make_per_class_metric_bar_figure,
     make_per_class_precision_recall_figures,
     make_precision_recall_figure,
     make_precision_recall_small_multiples_figure,
     make_thresholded_cooccurrence_heatmap_figure,
     matrix_to_nested_list,
+    new_confusion_counts,
     missed_vs_extra_label_matrix,
     per_class_metrics_table,
     per_class_metrics_with_names,
     precision_recall_summary,
+    summary_metrics_from_confusion_counts,
     save_figures,
     threshold_sweep_summary,
+    update_confusion_counts_from_predictions,
     thresholded_true_predicted_cooccurrence_matrix,
     write_json,
     write_metric_rows_csv,
@@ -118,6 +123,7 @@ def run_staged_training(
     threshold_sweep_values: list[float] | None = None,
     save_best_validation_diagnostics: bool = True,
     save_test_diagnostics: bool = True,
+    evaluate_per_class_thresholds: bool = True,
     train_sampler: Any | None = None,
     is_main_process: bool = True,
     print_fn: Callable[[str], None] | None = print,
@@ -150,6 +156,7 @@ def run_staged_training(
     val_needs_pr_data = (
         log_val_precision_recall_curve
         or save_best_validation_diagnostics
+        or evaluate_per_class_thresholds
         or (log_threshold_sweep and bool(threshold_values))
         or _best_metric_requires_pr_data(best_metric_name)
     )
@@ -488,6 +495,27 @@ def run_staged_training(
             device=resolved_device,
         )
 
+        # Re-evaluate the validation set with the actual best checkpoint. This is
+        # used only to derive Project-2-specific per-class thresholds. The test
+        # set is never used to choose thresholds.
+        best_val_result = evaluate_classifier(
+            model=model,
+            dataloader=val_loader,
+            loss_fn=loss_fn,
+            device=resolved_device,
+            num_classes=cvdms_metadata.num_classes,
+            threshold=threshold,
+            collect_pr_data=True,
+            idx_to_class=cvdms_metadata.idx_to_class,
+        )
+
+        best_val_summary = _build_result_summary(
+            result=best_val_result,
+            cvdms_metadata=cvdms_metadata,
+            include_precision_recall=True,
+            threshold_sweep_values=threshold_values if log_threshold_sweep else [],
+        )
+
         best_test_result = evaluate_classifier(
             model=model,
             dataloader=test_loader,
@@ -506,26 +534,71 @@ def run_staged_training(
             threshold_sweep_values=threshold_values if log_threshold_sweep else [],
         )
 
-        diagnostic_artifacts: dict[str, Any] = {}
-        if is_main_process and save_test_diagnostics:
-            diagnostic_artifacts["test_final_model"] = _save_result_artifacts(
-                result=final_test_result,
+        per_class_threshold_strategy: dict[str, Any] | None = None
+        best_val_per_class_threshold_summary: dict[str, Any] | None = None
+        best_test_per_class_threshold_summary: dict[str, Any] | None = None
+
+        if evaluate_per_class_thresholds:
+            per_class_threshold_strategy = _derive_per_class_threshold_strategy(
+                validation_result=best_val_result,
                 cvdms_metadata=cvdms_metadata,
-                output_dir=output_path / "diagnostics" / "test_final_model",
-                split_name="test_final_model",
-                threshold_sweep_values=threshold_values if log_threshold_sweep else [],
-                include_figures=log_test_figures,
-                title_prefix="Test Diagnostics - Final Model State",
+                fallback_threshold=threshold,
             )
-            diagnostic_artifacts["test_best_checkpoint"] = _save_result_artifacts(
+            best_val_per_class_threshold_summary = _build_per_class_threshold_summary(
+                result=best_val_result,
+                cvdms_metadata=cvdms_metadata,
+                threshold_strategy=per_class_threshold_strategy,
+            )
+            best_test_per_class_threshold_summary = _build_per_class_threshold_summary(
                 result=best_test_result,
                 cvdms_metadata=cvdms_metadata,
-                output_dir=output_path / "diagnostics" / "test_best_checkpoint",
-                split_name="test_best_checkpoint",
+                threshold_strategy=per_class_threshold_strategy,
+            )
+
+        diagnostic_artifacts: dict[str, Any] = {}
+        if is_main_process and save_test_diagnostics:
+            diagnostic_artifacts["test_final_model_global_threshold"] = _save_result_artifacts(
+                result=final_test_result,
+                cvdms_metadata=cvdms_metadata,
+                output_dir=output_path / "diagnostics" / "test_final_model" / _global_threshold_dir_name(threshold),
+                split_name="test_final_model_global_threshold",
                 threshold_sweep_values=threshold_values if log_threshold_sweep else [],
                 include_figures=log_test_figures,
-                title_prefix="Test Diagnostics - Best Validation Checkpoint",
+                title_prefix=f"Test Diagnostics - Final Model State - Global Threshold {threshold:.2f}",
             )
+            diagnostic_artifacts["test_best_checkpoint_global_threshold"] = _save_result_artifacts(
+                result=best_test_result,
+                cvdms_metadata=cvdms_metadata,
+                output_dir=output_path / "diagnostics" / "test_best_checkpoint" / _global_threshold_dir_name(threshold),
+                split_name="test_best_checkpoint_global_threshold",
+                threshold_sweep_values=threshold_values if log_threshold_sweep else [],
+                include_figures=log_test_figures,
+                title_prefix=f"Test Diagnostics - Best Validation Checkpoint - Global Threshold {threshold:.2f}",
+            )
+
+            if per_class_threshold_strategy is not None:
+                diagnostic_artifacts["threshold_strategy"] = _save_threshold_strategy_artifacts(
+                    threshold_strategy=per_class_threshold_strategy,
+                    output_dir=output_path / "diagnostics" / "threshold_strategy",
+                )
+                diagnostic_artifacts["best_validation_per_class_thresholds"] = _save_per_class_threshold_artifacts(
+                    result=best_val_result,
+                    cvdms_metadata=cvdms_metadata,
+                    threshold_strategy=per_class_threshold_strategy,
+                    output_dir=output_path / "diagnostics" / "best_validation" / "per_class_thresholds_from_val",
+                    split_name="best_validation_per_class_thresholds_from_val",
+                    include_figures=log_test_figures,
+                    title_prefix="Best Validation Diagnostics - Per-Class Thresholds Derived from Validation",
+                )
+                diagnostic_artifacts["test_best_checkpoint_per_class_thresholds"] = _save_per_class_threshold_artifacts(
+                    result=best_test_result,
+                    cvdms_metadata=cvdms_metadata,
+                    threshold_strategy=per_class_threshold_strategy,
+                    output_dir=output_path / "diagnostics" / "test_best_checkpoint" / "per_class_thresholds_from_val",
+                    split_name="test_best_checkpoint_per_class_thresholds_from_val",
+                    include_figures=log_test_figures,
+                    title_prefix="Test Diagnostics - Best Checkpoint - Per-Class Thresholds from Validation",
+                )
 
         if writer is not None:
             _log_test_to_tensorboard(
@@ -538,13 +611,36 @@ def run_staged_training(
                 threshold_sweep_values=threshold_values,
                 step=global_epoch,
             )
+            if per_class_threshold_strategy is not None and log_test_figures:
+                _log_per_class_threshold_figures_to_tensorboard(
+                    writer=writer,
+                    tag_prefix="diagnostics/test_best_checkpoint_per_class_thresholds_from_val",
+                    result=best_test_result,
+                    cvdms_metadata=cvdms_metadata,
+                    threshold_strategy=per_class_threshold_strategy,
+                    step=global_epoch,
+                    title_prefix="Test Best Checkpoint - Per-Class Thresholds from Validation",
+                )
 
         final_summary = {
             "history": history,
             "phases": phase_summaries,
             "best_checkpoint": best_tracker.summary(),
             "best_checkpoint_load": best_checkpoint_load,
-            "test_metrics_primary": "test_metrics_best_checkpoint",
+            "threshold_strategies": {
+                "global": {
+                    "type": "global",
+                    "threshold": threshold,
+                },
+                "per_class_validation_f1": per_class_threshold_strategy,
+            },
+            "validation_metrics_best_checkpoint_global_threshold": best_val_summary,
+            "validation_metrics_best_checkpoint_per_class_thresholds": best_val_per_class_threshold_summary,
+            "test_metrics_primary": "test_metrics_best_checkpoint_global_threshold",
+            "test_metrics_best_checkpoint_global_threshold": best_test_summary,
+            "test_metrics_best_checkpoint_per_class_thresholds": best_test_per_class_threshold_summary,
+            "test_metrics_final_model_global_threshold": final_test_summary,
+            # Backward-compatible aliases for older scripts/notebooks.
             "test_metrics_best_checkpoint": best_test_summary,
             "test_metrics_final_model": final_test_summary,
             "test_metrics": best_test_summary,
@@ -576,6 +672,21 @@ def run_staged_training(
                         ]
                     )
                 )
+                if best_test_per_class_threshold_summary is not None:
+                    print_fn(
+                        " | ".join(
+                            [
+                                "test_best_checkpoint_per_class_thresholds",
+                                f"test_loss={best_test_per_class_threshold_summary['loss']:.4f}",
+                                f"test_hamming_acc={best_test_per_class_threshold_summary['hamming_accuracy']:.4f}",
+                                f"test_subset_acc={_format_optional_metric(best_test_per_class_threshold_summary['subset_accuracy'])}",
+                                f"test_f1_micro={best_test_per_class_threshold_summary['f1_micro']:.4f}",
+                                f"test_f1_macro={best_test_per_class_threshold_summary['f1_macro']:.4f}",
+                                f"test_mAP={_format_optional_metric(best_test_per_class_threshold_summary['macro_average_precision'])}",
+                                "threshold_source=best_validation",
+                            ]
+                        )
+                    )
                 print_fn(
                     " | ".join(
                         [
@@ -895,6 +1006,562 @@ def _build_diagnostic_matrices_summary(
     }
 
 
+
+def _derive_per_class_threshold_strategy(
+    *,
+    validation_result: EpochResult,
+    cvdms_metadata: CvdmsDatasetMetadata,
+    fallback_threshold: float,
+) -> dict[str, Any]:
+    """
+    Derive one decision threshold per class from the best checkpoint's
+    validation predictions.
+
+    This is intentionally Project-2-specific. It tests whether the model's
+    weaker global-threshold metrics are partly caused by uneven per-class
+    calibration. The validation set chooses thresholds; the test set only uses
+    the frozen thresholds.
+    """
+    if validation_result.probabilities is None or validation_result.targets is None:
+        raise ValueError("validation_result must contain probabilities and targets")
+
+    pr_summary = precision_recall_summary(
+        probabilities=validation_result.probabilities,
+        targets=validation_result.targets,
+        idx_to_class=cvdms_metadata.idx_to_class,
+    )
+
+    thresholds: list[float] = []
+    thresholds_by_class: dict[str, float] = {}
+    rows: list[dict[str, Any]] = []
+
+    for class_idx in range(cvdms_metadata.num_classes):
+        class_name = cvdms_metadata.idx_to_class[class_idx]
+        class_summary = pr_summary.per_class[class_name]
+        threshold_value = class_summary.best_threshold
+        source = "validation_best_f1"
+
+        if threshold_value is None:
+            threshold_value = fallback_threshold
+            source = "fallback_global_threshold"
+
+        threshold_float = float(threshold_value)
+        thresholds.append(threshold_float)
+        thresholds_by_class[class_name] = threshold_float
+        rows.append(
+            {
+                "class_idx": class_idx,
+                "class_name": class_name,
+                "threshold": threshold_float,
+                "source": source,
+                "validation_best_f1": class_summary.best_f1,
+                "validation_best_precision": class_summary.best_precision,
+                "validation_best_recall": class_summary.best_recall,
+                "validation_average_precision": class_summary.average_precision,
+                "validation_positive_count": class_summary.positive_count,
+            }
+        )
+
+    return {
+        "type": "per_class_best_f1_from_validation",
+        "source_split": "validation",
+        "source_model": "best_checkpoint",
+        "fallback_threshold": fallback_threshold,
+        "metric_optimized_per_class": "f1",
+        "important_note": (
+            "Thresholds are chosen from validation predictions only, then frozen "
+            "before test evaluation. Test predictions are not used to choose thresholds."
+        ),
+        "thresholds": thresholds,
+        "thresholds_by_class": thresholds_by_class,
+        "rows": rows,
+    }
+
+
+def _threshold_vector_from_strategy(
+    *,
+    threshold_strategy: dict[str, Any],
+    num_classes: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    raw = threshold_strategy.get("thresholds")
+    if not isinstance(raw, list) or len(raw) != num_classes:
+        raise ValueError(
+            "threshold_strategy['thresholds'] must be a list with one threshold per class"
+        )
+
+    values = [float(value) for value in raw]
+    for idx, value in enumerate(values):
+        _validate_threshold(value, f"threshold_strategy.thresholds[{idx}]")
+    return torch.tensor(values, dtype=dtype)
+
+
+def _predictions_from_threshold_strategy(
+    *,
+    probabilities: torch.Tensor,
+    threshold_strategy: dict[str, Any],
+) -> torch.Tensor:
+    if probabilities.ndim != 2:
+        raise ValueError(
+            "probabilities must have shape [num_examples, num_classes], "
+            f"got {tuple(probabilities.shape)}"
+        )
+
+    probs_cpu = probabilities.detach().cpu()
+    thresholds = _threshold_vector_from_strategy(
+        threshold_strategy=threshold_strategy,
+        num_classes=int(probs_cpu.shape[1]),
+        dtype=probs_cpu.dtype,
+    )
+    return probs_cpu >= thresholds.unsqueeze(0)
+
+
+def _confusion_counts_from_threshold_strategy(
+    *,
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    threshold_strategy: dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    predictions = _predictions_from_threshold_strategy(
+        probabilities=probabilities,
+        threshold_strategy=threshold_strategy,
+    )
+    targets_cpu = targets.detach().cpu().to(dtype=torch.float32)
+    counts = new_confusion_counts(num_classes=int(probabilities.shape[1]))
+    update_confusion_counts_from_predictions(
+        counts,
+        predictions=predictions,
+        targets=targets_cpu,
+    )
+    exact_match_count = int((predictions == targets_cpu.to(dtype=torch.bool)).all(dim=1).sum().item())
+    return counts, predictions, exact_match_count
+
+
+def _build_per_class_threshold_summary(
+    *,
+    result: EpochResult,
+    cvdms_metadata: CvdmsDatasetMetadata,
+    threshold_strategy: dict[str, Any],
+) -> dict[str, Any]:
+    if result.probabilities is None or result.targets is None:
+        raise ValueError("result must contain probabilities and targets")
+
+    counts, predictions, exact_match_count = _confusion_counts_from_threshold_strategy(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+    )
+    summary_metrics = summary_metrics_from_confusion_counts(
+        counts,
+        threshold=0.0,
+        total_examples=int(result.targets.shape[0]),
+        exact_match_count=exact_match_count,
+    ).to_dict()
+    summary_metrics["threshold"] = None
+    summary_metrics["threshold_strategy"] = threshold_strategy
+
+    pr_summary = precision_recall_summary(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        idx_to_class=cvdms_metadata.idx_to_class,
+    )
+    per_class_rows = per_class_metrics_table(
+        counts,
+        idx_to_class=cvdms_metadata.idx_to_class,
+        pr_summary=pr_summary,
+    )
+    _attach_applied_thresholds_to_rows(
+        rows=per_class_rows,
+        threshold_strategy=threshold_strategy,
+    )
+
+    return {
+        "loss": result.loss,
+        **summary_metrics,
+        "accuracy": summary_metrics["hamming_accuracy"],
+        "macro_average_precision": pr_summary.macro_average_precision,
+        "map": pr_summary.macro_average_precision,
+        "micro_average_precision": pr_summary.micro_average_precision,
+        "micro_ap": pr_summary.micro_average_precision,
+        "total_examples": int(result.targets.shape[0]),
+        "exact_match_count": exact_match_count,
+        "elapsed_seconds": result.elapsed_seconds,
+        "confusion_counts": confusion_counts_to_nested_list(counts),
+        "per_class_metrics": per_class_metrics_with_names(
+            counts,
+            idx_to_class=cvdms_metadata.idx_to_class,
+        ),
+        "per_class_metrics_table": per_class_rows,
+        "precision_recall": pr_summary.to_dict(),
+        "diagnostic_matrices": _build_per_class_threshold_matrices_summary(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            threshold_strategy=threshold_strategy,
+        ),
+        "metric_notes": _metric_notes(),
+    }
+
+
+def _attach_applied_thresholds_to_rows(
+    *,
+    rows: list[dict[str, Any]],
+    threshold_strategy: dict[str, Any],
+) -> None:
+    thresholds_by_class = threshold_strategy.get("thresholds_by_class", {})
+    if not isinstance(thresholds_by_class, dict):
+        return
+
+    for row in rows:
+        class_name = str(row.get("class_name"))
+        row["applied_threshold"] = thresholds_by_class.get(class_name)
+        row["threshold_strategy"] = threshold_strategy.get("type")
+
+
+def _build_per_class_threshold_matrices_summary(
+    *,
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    threshold_strategy: dict[str, Any],
+) -> dict[str, Any]:
+    conditional_matrix, conditional_support = conditional_prediction_probability_matrix(
+        probabilities=probabilities,
+        targets=targets,
+    )
+    false_matrix, false_support = false_association_probability_matrix(
+        probabilities=probabilities,
+        targets=targets,
+    )
+    cooccurrence_counts = _thresholded_true_predicted_cooccurrence_matrix_from_predictions(
+        probabilities=probabilities,
+        targets=targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=False,
+    )
+    cooccurrence_rates = _thresholded_true_predicted_cooccurrence_matrix_from_predictions(
+        probabilities=probabilities,
+        targets=targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+    missed_extra_counts = _missed_vs_extra_label_matrix_from_predictions(
+        probabilities=probabilities,
+        targets=targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=False,
+    )
+    missed_extra_rates = _missed_vs_extra_label_matrix_from_predictions(
+        probabilities=probabilities,
+        targets=targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+
+    return {
+        "threshold_strategy": threshold_strategy,
+        "conditional_prediction_probability": {
+            "interpretation": (
+                "Row i selects samples where true class i is present; cell (i,j) "
+                "is the average predicted probability for class j. This is an "
+                "association diagnostic, not a confusion matrix."
+            ),
+            "matrix": matrix_to_nested_list(conditional_matrix),
+            "row_support": conditional_support.astype(int).tolist(),
+        },
+        "false_association_probability": {
+            "interpretation": (
+                "Off-diagonal cell (i,j) averages p(class j) over samples where "
+                "true class i is present and true class j is absent. The diagonal "
+                "is mean p(class i) where true class i is present."
+            ),
+            "matrix": matrix_to_nested_list(false_matrix),
+            "cell_support": false_support.astype(int).tolist(),
+        },
+        "thresholded_true_predicted_cooccurrence_counts": {
+            "threshold_strategy": threshold_strategy.get("type"),
+            "matrix": matrix_to_nested_list(cooccurrence_counts),
+        },
+        "thresholded_true_predicted_cooccurrence_rates": {
+            "threshold_strategy": threshold_strategy.get("type"),
+            "matrix": matrix_to_nested_list(cooccurrence_rates),
+        },
+        "missed_vs_extra_label_counts": {
+            "threshold_strategy": threshold_strategy.get("type"),
+            "matrix": matrix_to_nested_list(missed_extra_counts),
+        },
+        "missed_vs_extra_label_rates": {
+            "threshold_strategy": threshold_strategy.get("type"),
+            "matrix": matrix_to_nested_list(missed_extra_rates),
+        },
+    }
+
+
+def _thresholded_true_predicted_cooccurrence_matrix_from_predictions(
+    *,
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    threshold_strategy: dict[str, Any],
+    normalize_rows: bool,
+) -> np.ndarray:
+    predictions = _predictions_from_threshold_strategy(
+        probabilities=probabilities,
+        threshold_strategy=threshold_strategy,
+    ).numpy().astype(np.float64)
+    targets_np = targets.detach().cpu().numpy().astype(np.float64)
+    matrix = targets_np.T @ predictions
+
+    if not normalize_rows:
+        return matrix
+
+    support = targets_np.sum(axis=0)
+    return np.divide(
+        matrix,
+        support[:, None],
+        out=np.zeros_like(matrix, dtype=np.float64),
+        where=support[:, None] > 0,
+    )
+
+
+def _missed_vs_extra_label_matrix_from_predictions(
+    *,
+    probabilities: torch.Tensor,
+    targets: torch.Tensor,
+    threshold_strategy: dict[str, Any],
+    normalize_rows: bool,
+) -> np.ndarray:
+    predictions = _predictions_from_threshold_strategy(
+        probabilities=probabilities,
+        threshold_strategy=threshold_strategy,
+    ).numpy().astype(bool)
+    targets_bool = targets.detach().cpu().numpy().astype(bool)
+    missed = targets_bool & ~predictions
+    extra = ~targets_bool & predictions
+    matrix = missed.astype(np.float64).T @ extra.astype(np.float64)
+
+    if not normalize_rows:
+        return matrix
+
+    missed_support = missed.sum(axis=0).astype(np.float64)
+    return np.divide(
+        matrix,
+        missed_support[:, None],
+        out=np.zeros_like(matrix, dtype=np.float64),
+        where=missed_support[:, None] > 0,
+    )
+
+
+def _save_threshold_strategy_artifacts(
+    *,
+    threshold_strategy: dict[str, Any],
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    strategy_json = output_path / "per_class_threshold_strategy.json"
+    strategy_csv = output_path / "per_class_thresholds.csv"
+    write_json(threshold_strategy, strategy_json)
+    write_metric_rows_csv(threshold_strategy.get("rows", []), strategy_csv)
+    return {
+        "strategy_json": str(strategy_json),
+        "thresholds_csv": str(strategy_csv),
+    }
+
+
+def _save_per_class_threshold_artifacts(
+    *,
+    result: EpochResult,
+    cvdms_metadata: CvdmsDatasetMetadata,
+    threshold_strategy: dict[str, Any],
+    output_dir: str | Path,
+    split_name: str,
+    include_figures: bool,
+    title_prefix: str,
+) -> dict[str, Any]:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    summary = _build_per_class_threshold_summary(
+        result=result,
+        cvdms_metadata=cvdms_metadata,
+        threshold_strategy=threshold_strategy,
+    )
+    per_class_rows = list(summary["per_class_metrics_table"])
+
+    manifest: dict[str, Any] = {
+        "split_name": split_name,
+        "output_dir": str(output_path),
+        "threshold_strategy": threshold_strategy,
+        "metric_notes": _metric_notes(),
+        "files": {},
+    }
+
+    per_class_csv = output_path / "per_class_metrics.csv"
+    per_class_json = output_path / "per_class_metrics.json"
+    summary_json = output_path / "summary.json"
+    matrices_json = output_path / "diagnostic_matrices.json"
+    thresholds_json = output_path / "threshold_strategy.json"
+    thresholds_csv = output_path / "per_class_thresholds.csv"
+
+    write_metric_rows_csv(per_class_rows, per_class_csv)
+    write_json(per_class_rows, per_class_json)
+    write_json(summary, summary_json)
+    write_json(summary["diagnostic_matrices"], matrices_json)
+    write_json(threshold_strategy, thresholds_json)
+    write_metric_rows_csv(threshold_strategy.get("rows", []), thresholds_csv)
+
+    manifest["files"].update(
+        {
+            "per_class_metrics_csv": str(per_class_csv),
+            "per_class_metrics_json": str(per_class_json),
+            "summary_json": str(summary_json),
+            "diagnostic_matrices_json": str(matrices_json),
+            "threshold_strategy_json": str(thresholds_json),
+            "per_class_thresholds_csv": str(thresholds_csv),
+        }
+    )
+
+    if include_figures:
+        manifest["figures"] = _save_per_class_threshold_figures(
+            result=result,
+            cvdms_metadata=cvdms_metadata,
+            threshold_strategy=threshold_strategy,
+            per_class_rows=per_class_rows,
+            output_dir=output_path / "figures",
+            title_prefix=title_prefix,
+        )
+
+    write_json(manifest, output_path / "artifact_manifest.json")
+    return manifest
+
+
+def _save_per_class_threshold_figures(
+    *,
+    result: EpochResult,
+    cvdms_metadata: CvdmsDatasetMetadata,
+    threshold_strategy: dict[str, Any],
+    per_class_rows: list[dict[str, Any]],
+    output_dir: str | Path,
+    title_prefix: str,
+    threshold_sweep_values: list[float] | None = None,
+) -> dict[str, Any]:
+    if result.probabilities is None or result.targets is None:
+        return {}
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    counts, _, _ = _confusion_counts_from_threshold_strategy(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+    )
+    cooccurrence_rates = _thresholded_true_predicted_cooccurrence_matrix_from_predictions(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+    missed_extra_rates = _missed_vs_extra_label_matrix_from_predictions(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+
+    figures = {
+        "binary_confusion_grid": make_binary_confusion_grid_figure(
+            confusion_counts=counts,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title_prefix=f"{title_prefix} - Per-Class Binary Confusion Matrices",
+        ),
+        "per_class_f1_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="f1",
+            title=f"{title_prefix} - Per-Class F1",
+            ylabel="F1 using validation-derived per-class thresholds",
+        ),
+        "per_class_precision_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="precision",
+            title=f"{title_prefix} - Per-Class Precision",
+            ylabel="Precision using validation-derived per-class thresholds",
+        ),
+        "per_class_recall_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="recall",
+            title=f"{title_prefix} - Per-Class Recall",
+            ylabel="Recall using validation-derived per-class thresholds",
+        ),
+        "thresholded_cooccurrence_heatmap": make_matrix_heatmap_figure(
+            matrix=cooccurrence_rates,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - True Label vs Predicted Label Co-occurrence",
+            xlabel="Predicted-positive class",
+            ylabel="True-present class",
+            colorbar_label="Row-normalized rate",
+            value_format=".2f",
+        ),
+        "missed_vs_extra_heatmap": make_matrix_heatmap_figure(
+            matrix=missed_extra_rates,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - Missed Label vs Extra Label Errors",
+            xlabel="Extra predicted class",
+            ylabel="Missed true class",
+            colorbar_label="Row-normalized rate",
+            value_format=".2f",
+        ),
+        "conditional_prediction_probability_heatmap": make_conditional_prediction_probability_heatmap_figure(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - Conditional Prediction Probability Heatmap",
+        ),
+        "false_association_probability_heatmap": make_false_association_probability_heatmap_figure(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - False-Association Probability Heatmap",
+        ),
+        "precision_recall_combined": make_precision_recall_figure(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title_prefix=f"{title_prefix} - Combined Precision-Recall Curves",
+            annotate_best_f1=False,
+        ),
+        "precision_recall_small_multiples": make_precision_recall_small_multiples_figure(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title_prefix=f"{title_prefix} - PR Curves by Class",
+            annotate_best_f1=False,
+        ),
+    }
+
+    if any(row.get("average_precision") is not None for row in per_class_rows):
+        figures["per_class_ap_bar"] = make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="average_precision",
+            title=f"{title_prefix} - Per-Class Average Precision",
+            ylabel="AP",
+        )
+
+    figure_files = save_figures(figures, output_path, close=True)
+    per_class_pr_files = save_figures(
+        make_per_class_precision_recall_figures(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title_prefix=f"{title_prefix} - Precision-Recall",
+            annotate_best_f1=False,
+        ),
+        output_path / "precision_recall_by_class",
+        close=True,
+    )
+    return {
+        "summary_figures": figure_files,
+        "per_class_precision_recall_figures": per_class_pr_files,
+    }
+
+
 def _save_result_artifacts(
     *,
     result: EpochResult,
@@ -979,6 +1646,7 @@ def _save_result_artifacts(
             per_class_rows=per_class_rows,
             output_dir=output_path / "figures",
             title_prefix=title_prefix,
+            threshold_sweep_values=threshold_sweep_values,
         )
         manifest["figures"] = figure_manifest
 
@@ -993,6 +1661,7 @@ def _save_result_figures(
     per_class_rows: list[dict[str, Any]],
     output_dir: str | Path,
     title_prefix: str,
+    threshold_sweep_values: list[float] | None = None,
 ) -> dict[str, Any]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1076,6 +1745,19 @@ def _save_result_figures(
                     title=f"{title_prefix} - Missed Label vs Extra Label Errors",
                 ),
             }
+        )
+
+    if threshold_sweep_values and result.probabilities is not None and result.targets is not None:
+        sweep_rows = threshold_sweep_summary(
+            probabilities=result.probabilities,
+            targets=result.targets,
+            thresholds=threshold_sweep_values,
+        )
+        figures.update(
+            _make_threshold_sweep_figures(
+                rows=sweep_rows,
+                title_prefix=f"{title_prefix} - Threshold Sweep",
+            )
         )
 
     figure_files = save_figures(figures, output_path, close=True)
@@ -1363,6 +2045,147 @@ def _log_result_figures_to_tensorboard(
             plt.close(fig)
 
 
+
+def _log_per_class_threshold_figures_to_tensorboard(
+    *,
+    writer: SummaryWriter,
+    tag_prefix: str,
+    result: EpochResult,
+    cvdms_metadata: CvdmsDatasetMetadata,
+    threshold_strategy: dict[str, Any],
+    step: int,
+    title_prefix: str,
+) -> None:
+    if result.probabilities is None or result.targets is None:
+        return
+
+    counts, _, _ = _confusion_counts_from_threshold_strategy(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+    )
+    summary = _build_per_class_threshold_summary(
+        result=result,
+        cvdms_metadata=cvdms_metadata,
+        threshold_strategy=threshold_strategy,
+    )
+    per_class_rows = summary["per_class_metrics_table"]
+    cooccurrence_rates = _thresholded_true_predicted_cooccurrence_matrix_from_predictions(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+    missed_extra_rates = _missed_vs_extra_label_matrix_from_predictions(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        threshold_strategy=threshold_strategy,
+        normalize_rows=True,
+    )
+
+    figures = {
+        "binary_confusion_grid": make_binary_confusion_grid_figure(
+            confusion_counts=counts,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title_prefix=f"{title_prefix} - Per-Class Binary Confusion Matrices",
+        ),
+        "per_class_f1_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="f1",
+            title=f"{title_prefix} - Per-Class F1",
+            ylabel="F1 using validation-derived per-class thresholds",
+        ),
+        "per_class_precision_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="precision",
+            title=f"{title_prefix} - Per-Class Precision",
+            ylabel="Precision using validation-derived per-class thresholds",
+        ),
+        "per_class_recall_bar": make_per_class_metric_bar_figure(
+            rows=per_class_rows,
+            metric_key="recall",
+            title=f"{title_prefix} - Per-Class Recall",
+            ylabel="Recall using validation-derived per-class thresholds",
+        ),
+        "thresholded_cooccurrence_heatmap": make_matrix_heatmap_figure(
+            matrix=cooccurrence_rates,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - True Label vs Predicted Label Co-occurrence",
+            xlabel="Predicted-positive class",
+            ylabel="True-present class",
+            colorbar_label="Row-normalized rate",
+            value_format=".2f",
+        ),
+        "missed_vs_extra_heatmap": make_matrix_heatmap_figure(
+            matrix=missed_extra_rates,
+            idx_to_class=cvdms_metadata.idx_to_class,
+            title=f"{title_prefix} - Missed Label vs Extra Label Errors",
+            xlabel="Extra predicted class",
+            ylabel="Missed true class",
+            colorbar_label="Row-normalized rate",
+            value_format=".2f",
+        ),
+    }
+
+    for name, fig in figures.items():
+        try:
+            writer.add_figure(f"{tag_prefix}/{name}", fig, step)
+        finally:
+            plt.close(fig)
+
+
+def _make_threshold_sweep_figures(
+    *,
+    rows: list[dict[str, Any]],
+    title_prefix: str,
+) -> dict[str, Any]:
+    if not rows:
+        return {}
+
+    thresholds = [float(row["threshold"]) for row in rows]
+
+    def _plot_lines(name: str, title: str, metric_keys: list[str], ylabel: str = "Metric value"):
+        fig, ax = plt.subplots(figsize=(8.0, 5.0))
+        for key in metric_keys:
+            values = [np.nan if row.get(key) is None else float(row[key]) for row in rows]
+            ax.plot(thresholds, values, marker="o", linewidth=1.8, label=key)
+        ax.set_title(f"{title_prefix} - {title}")
+        ax.set_xlabel("Global threshold")
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(min(thresholds), max(thresholds))
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+        fig.tight_layout()
+        return name, fig
+
+    figures = dict(
+        [
+            _plot_lines(
+                "macro_precision_recall_f1",
+                "Macro Precision / Recall / F1 vs Threshold",
+                ["precision_macro", "recall_macro", "f1_macro"],
+            ),
+            _plot_lines(
+                "micro_precision_recall_f1",
+                "Micro Precision / Recall / F1 vs Threshold",
+                ["precision_micro", "recall_micro", "f1_micro"],
+            ),
+            _plot_lines(
+                "accuracy",
+                "Accuracy Metrics vs Threshold",
+                ["hamming_accuracy", "subset_accuracy"],
+            ),
+            _plot_lines(
+                "weighted_precision_recall_f1",
+                "Weighted Precision / Recall / F1 vs Threshold",
+                ["precision_weighted", "recall_weighted", "f1_weighted"],
+            ),
+        ]
+    )
+    return figures
+
+
 def _log_threshold_sweep_to_tensorboard(
     *,
     writer: SummaryWriter,
@@ -1371,6 +2194,13 @@ def _log_threshold_sweep_to_tensorboard(
     thresholds: list[float],
     step: int,
 ) -> None:
+    """
+    Log threshold sweep curves to TensorBoard.
+
+    The old implementation wrote one scalar tag per metric per threshold, which
+    created many one-point TensorBoard plots. This Project 2 version logs compact
+    figures instead: threshold on the x-axis, metric value on the y-axis.
+    """
     if result.probabilities is None or result.targets is None:
         return
 
@@ -1379,16 +2209,13 @@ def _log_threshold_sweep_to_tensorboard(
         targets=result.targets,
         thresholds=thresholds,
     )
+    figures = _make_threshold_sweep_figures(rows=rows, title_prefix=tag_prefix.replace("/", " - "))
 
-    for row in rows:
-        threshold_tag = f"{row['threshold']:.2f}"
-        writer.add_scalar(f"{tag_prefix}/f1_macro_at_{threshold_tag}", row["f1_macro"], step)
-        writer.add_scalar(f"{tag_prefix}/f1_micro_at_{threshold_tag}", row["f1_micro"], step)
-        writer.add_scalar(f"{tag_prefix}/precision_macro_at_{threshold_tag}", row["precision_macro"], step)
-        writer.add_scalar(f"{tag_prefix}/recall_macro_at_{threshold_tag}", row["recall_macro"], step)
-        writer.add_scalar(f"{tag_prefix}/hamming_accuracy_at_{threshold_tag}", row["hamming_accuracy"], step)
-        if row["subset_accuracy"] is not None:
-            writer.add_scalar(f"{tag_prefix}/subset_accuracy_at_{threshold_tag}", row["subset_accuracy"], step)
+    for name, fig in figures.items():
+        try:
+            writer.add_figure(f"{tag_prefix}/{name}", fig, step)
+        finally:
+            plt.close(fig)
 
 
 def _format_epoch_log(
@@ -1669,6 +2496,21 @@ def _metric_notes() -> dict[str, str]:
         ),
     }
 
+
+def _global_threshold_dir_name(threshold: float) -> str:
+    """
+    Return a stable, filesystem-friendly folder name for a global threshold.
+
+    Examples:
+        0.5  -> "global_threshold_0_50"
+        0.75 -> "global_threshold_0_75"
+
+    Keeping the threshold in the folder name makes it clear which diagnostics
+    were computed with the default/global scalar threshold versus the separate
+    validation-derived per-class threshold strategy.
+    """
+    _validate_threshold(threshold, "threshold")
+    return f"global_threshold_{float(threshold):.2f}".replace(".", "_")
 
 def _format_optional_metric(value: float | None) -> str:
     if value is None:

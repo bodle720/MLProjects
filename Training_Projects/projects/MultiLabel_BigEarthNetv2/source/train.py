@@ -22,6 +22,18 @@ separately for each class and then averaging those per-class AP scores.
 `micro_average_precision` is different: it flattens all class decisions across
 all examples before computing AP, so user-facing outputs should call it
 micro-AP rather than mAP.
+
+Project 2 thresholding note
+---------------------------
+The normal/global evaluation threshold is controlled by `training.threshold`.
+For Project 2, the staged training workflow can also run a separate
+validation-derived per-class threshold evaluation after training:
+
+    logging.evaluate_per_class_thresholds: true
+
+Those per-class thresholds are derived from the validation split using the
+best validation checkpoint, then frozen before evaluating the test split. This
+is intentionally reported separately from the global-threshold result.
 """
 
 import argparse
@@ -94,17 +106,23 @@ def main() -> None:
         s3_client=s3_client,
     )
 
+    batch_size = require_positive_int(data_config.get("batch_size"), "data.batch_size")
+    image_size = require_positive_int(data_config.get("image_size"), "data.image_size")
+
     data_bundle = build_multi_label_data_bundle(
         metadata_uri=metadata_uri,
-        batch_size=require_positive_int(data_config.get("batch_size"), "data.batch_size"),
+        batch_size=batch_size,
         num_workers=require_nonnegative_int(data_config.get("num_workers", 0), "data.num_workers"),
-        image_size=require_positive_int(data_config.get("image_size"), "data.image_size"),
+        image_size=image_size,
         image_loader=image_loader,
         s3_client=s3_client,
         pin_memory=data_config.get("pin_memory"),
         persistent_workers=data_config.get("persistent_workers"),
         prefetch_factor=data_config.get("prefetch_factor"),
-        drop_last_train=bool(data_config.get("drop_last_train", False)),
+        drop_last_train=read_bool(
+            data_config.get("drop_last_train", False),
+            "data.drop_last_train",
+        ),
         distributed=False,
     )
 
@@ -117,7 +135,7 @@ def main() -> None:
     model = build_model(
         model_name=model_name,
         num_classes=data_bundle.num_classes,
-        pretrained=bool(model_config.get("pretrained", True)),
+        pretrained=read_bool(model_config.get("pretrained", True), "model.pretrained"),
     )
 
     loss_fn, loss_summary = build_loss_fn(
@@ -145,9 +163,9 @@ def main() -> None:
         phases=phases,
         output_dir=output_dir,
         tensorboard_dir=tensorboard_dir,
-        batch_size=require_positive_int(data_config.get("batch_size"), "data.batch_size"),
+        batch_size=batch_size,
         channels=require_positive_int(data_config.get("channels", 3), "data.channels"),
-        image_size=require_positive_int(data_config.get("image_size"), "data.image_size"),
+        image_size=image_size,
         metadata_uri=metadata_uri,
         device=device,
         threshold=threshold,
@@ -169,22 +187,39 @@ def main() -> None:
             "loss": loss_summary,
             "metric_notes": metric_notes(),
         },
-        log_val_precision_recall_curve=bool(
-            logging_config.get("log_val_precision_recall_curve", True)
+        log_val_precision_recall_curve=read_bool(
+            logging_config.get("log_val_precision_recall_curve", True),
+            "logging.log_val_precision_recall_curve",
         ),
-        log_test_figures=bool(logging_config.get("log_test_figures", True)),
-        log_threshold_sweep=bool(logging_config.get("log_threshold_sweep", True)),
+        log_test_figures=read_bool(
+            logging_config.get("log_test_figures", True),
+            "logging.log_test_figures",
+        ),
+        log_threshold_sweep=read_bool(
+            logging_config.get("log_threshold_sweep", True),
+            "logging.log_threshold_sweep",
+        ),
         threshold_sweep_values=require_threshold_sweep_values(
             logging_config.get("threshold_sweep_values"),
             "logging.threshold_sweep_values",
         ),
-        save_best_validation_diagnostics=bool(
-            logging_config.get("save_best_validation_diagnostics", True)
+        save_best_validation_diagnostics=read_bool(
+            logging_config.get("save_best_validation_diagnostics", True),
+            "logging.save_best_validation_diagnostics",
         ),
-        save_test_diagnostics=bool(logging_config.get("save_test_diagnostics", True)),
+        save_test_diagnostics=read_bool(
+            logging_config.get("save_test_diagnostics", True),
+            "logging.save_test_diagnostics",
+        ),
+        evaluate_per_class_thresholds=read_bool(
+            logging_config.get("evaluate_per_class_thresholds", True),
+            "logging.evaluate_per_class_thresholds",
+        ),
         train_sampler=data_bundle.train_sampler,
         is_main_process=True,
-        print_fn=print if bool(logging_config.get("print_every_epoch", True)) else None,
+        print_fn=print
+        if read_bool(logging_config.get("print_every_epoch", True), "logging.print_every_epoch")
+        else None,
     )
 
     print_training_complete_summary(
@@ -210,7 +245,10 @@ def build_loss_fn(
             f"Unsupported loss.name={loss_name!r}; expected 'bce_with_logits'"
         )
 
-    use_pos_weight = bool(loss_config.get("use_pos_weight", False))
+    use_pos_weight = read_bool(
+        loss_config.get("use_pos_weight", False),
+        "loss.use_pos_weight",
+    )
     pos_weight_source = str(loss_config.get("pos_weight_source", "train_class_counts")).strip()
     max_pos_weight = loss_config.get("max_pos_weight")
 
@@ -400,6 +438,7 @@ def build_hyperparameter_summary(
         "model": dict(config.get("model") or {}),
         "loss": dict(loss_summary),
         "training": dict(config.get("training") or {}),
+        "logging": dict(config.get("logging") or {}),
         "metric_notes": metric_notes(),
     }
 
@@ -423,7 +462,35 @@ def metric_notes() -> dict[str, str]:
             "AP, mAP, and micro-AP are threshold-free ranking diagnostics based "
             "on the model's predicted probabilities."
         ),
+        "global_threshold": (
+            "The global-threshold evaluation uses the same scalar threshold for "
+            "every class, usually training.threshold = 0.5."
+        ),
+        "validation_derived_per_class_thresholds": (
+            "Project 2 optionally derives one threshold per class from the validation "
+            "split using the best validation checkpoint. Those thresholds are frozen "
+            "before test evaluation and reported separately from the global-threshold result."
+        ),
     }
+
+
+def read_bool(value: Any, field_name: str) -> bool:
+    """
+    Read a YAML boolean config value.
+
+    This intentionally rejects strings such as "false" because bool("false")
+    evaluates to True in Python. Use real YAML booleans instead:
+
+        good:  false
+        bad:   "false"
+    """
+    if isinstance(value, bool):
+        return value
+
+    raise TypeError(
+        f"{field_name} must be a YAML boolean true/false, got {value!r} "
+        f"({type(value).__name__})"
+    )
 
 
 def print_training_complete_summary(
@@ -432,9 +499,20 @@ def print_training_complete_summary(
     output_dir: str | Path,
     tensorboard_dir: str | Path | None,
 ) -> None:
-    best_test = result.get("test_metrics_best_checkpoint") or result.get("test_metrics") or {}
-    final_test = result.get("test_metrics_final_model") or {}
+    best_global = (
+        result.get("test_metrics_best_checkpoint_global_threshold")
+        or result.get("test_metrics_best_checkpoint")
+        or result.get("test_metrics")
+        or {}
+    )
+    best_per_class = result.get("test_metrics_best_checkpoint_per_class_thresholds") or {}
+    final_global = (
+        result.get("test_metrics_final_model_global_threshold")
+        or result.get("test_metrics_final_model")
+        or {}
+    )
     best_checkpoint = result.get("best_checkpoint") or {}
+    threshold_strategies = result.get("threshold_strategies") or {}
 
     print("")
     print("Training complete.")
@@ -443,21 +521,33 @@ def print_training_complete_summary(
         print(f"TensorBoard directory: {Path(str(tensorboard_dir)).resolve()}")
     print(f"Best checkpoint: {best_checkpoint.get('best_path')}")
 
-    if best_test:
+    if best_global:
         print(
-            "Primary test result from best checkpoint: "
-            f"loss={_format_optional_metric(best_test.get('loss'))}, "
-            f"f1_macro={_format_optional_metric(best_test.get('f1_macro'))}, "
-            f"mAP={_format_optional_metric(best_test.get('map') or best_test.get('macro_average_precision'))}, "
-            f"micro-AP={_format_optional_metric(best_test.get('micro_ap') or best_test.get('micro_average_precision'))}"
+            "Primary test result from best checkpoint, global threshold: "
+            f"loss={_format_optional_metric(best_global.get('loss'))}, "
+            f"f1_macro={_format_optional_metric(best_global.get('f1_macro'))}, "
+            f"mAP={_format_optional_metric(best_global.get('map') or best_global.get('macro_average_precision'))}, "
+            f"micro-AP={_format_optional_metric(best_global.get('micro_ap') or best_global.get('micro_average_precision'))}"
         )
 
-    if final_test:
+    if best_per_class:
+        strategy = threshold_strategies.get("per_class_validation_f1") or {}
+        threshold_count = len(strategy.get("thresholds_by_class") or {})
         print(
-            "Reference test result from final model state: "
-            f"loss={_format_optional_metric(final_test.get('loss'))}, "
-            f"f1_macro={_format_optional_metric(final_test.get('f1_macro'))}, "
-            f"mAP={_format_optional_metric(final_test.get('map') or final_test.get('macro_average_precision'))}"
+            "Evaluation-only result from best checkpoint, validation-derived per-class thresholds: "
+            f"loss={_format_optional_metric(best_per_class.get('loss'))}, "
+            f"f1_macro={_format_optional_metric(best_per_class.get('f1_macro'))}, "
+            f"precision_macro={_format_optional_metric(best_per_class.get('precision_macro'))}, "
+            f"recall_macro={_format_optional_metric(best_per_class.get('recall_macro'))}, "
+            f"threshold_count={threshold_count}"
+        )
+
+    if final_global:
+        print(
+            "Reference test result from final model state, global threshold: "
+            f"loss={_format_optional_metric(final_global.get('loss'))}, "
+            f"f1_macro={_format_optional_metric(final_global.get('f1_macro'))}, "
+            f"mAP={_format_optional_metric(final_global.get('map') or final_global.get('macro_average_precision'))}"
         )
 
 

@@ -131,6 +131,12 @@ logging:
   log_val_precision_recall_curve: true
   log_test_figures: true
 
+  # Project specific evaluation experiment.
+  # After training, derive one threshold per class from the validation split
+  # using the best checkpoint, then evaluate test with those frozen thresholds.
+  # This is reported separately from the normal global-threshold result.
+  evaluate_per_class_thresholds: true
+
   # These save CSV/JSON/PNG outputs under outputs/model/diagnostics/.
   save_best_validation_diagnostics: true
   save_test_diagnostics: true
