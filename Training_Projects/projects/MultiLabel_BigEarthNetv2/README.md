@@ -160,3 +160,49 @@ Below are two mosaic examples from the test set, produced by setting `--order-st
 </p>
 
 The transition from one label signature to the next is visible across the sheets. This makes the mosaics useful for inspecting how images cluster by label count and unique class combination.
+
+## Training Trouble
+
+BigEarthNet v2 is a challenging multi-label dataset because several land-cover classes are visually and semantically similar. Classes such as `broad_leaved_forest`, `coniferous_forest`, `mixed_forest`, and `transitional_woodland_shrub` often overlap in appearance, while agricultural classes such as `arable_land`, `pastures`, `complex_cultivation_patterns`, and `land_principally_occupied_by_agriculture_with_significant_areas_of_natural_vegetation` can also look very similar from overhead imagery. This makes class separation difficult and helps explain why thresholded classification performance is more modest than in simpler single-label settings. At the same time, the model is not simply failing: it learns more visually distinct classes well. It shows strong performance on visually distinctive classes such as `marine_waters`, and reasonable performance on well-represented classes such as `arable_land`, `coniferous_forest`, and `mixed_forest`.
+
+To test whether part of the problem was threshold calibration rather than representation quality alone, I ran an additional experiment using the best validation checkpoint. Instead of applying a single global threshold of 0.5 to every class, I selected a separate threshold per class using validation predictions only, froze those thresholds, and then evaluated them on the test set. This improved thresholded metrics modestly: macro F1 increased from 0.5521 to 0.5603, micro F1 from 0.6530 to 0.6602, hamming accuracy from 0.8612 to 0.8714, and subset accuracy from 0.1490 to 0.1640. The main tradeoff was that macro precision improved while macro recall dropped, showing that the per-class thresholds mostly helped by reducing class-specific over-prediction. In other words, threshold tuning helped, but it did not fully solve the problem.
+
+The diagnostic matrices make the remaining issue clearer: the mistakes are structured rather than random. The model tends to group classes into meaningful clusters, especially forest / woodland / shrub classes and agriculture / pasture / cultivation classes. One especially notable pattern is that `transitional_woodland_shrub` often acts as a broad catch-all prediction when the model is uncertain among nearby vegetation-heavy classes. This is a useful result in its own right, because it shows the model has learned meaningful visual structure, but that the dataset itself contains genuine ambiguity and overlap between related labels.
+
+Below is a summary of the test set performance before and after per-class thresholding.
+
+__Test-set metric comparison (best checkpoint)__
+
+| Metric           | Global threshold 0.5 | Per-class thresholds from validation |    Change |
+| ---------------- | -------------------: | -----------------------------------: | --------: |
+| Macro precision  |               0.4824 |                               0.5394 |   +0.0570 |
+| Macro recall     |               0.6727 |                               0.6033 |   -0.0694 |
+| Macro F1         |               0.5521 |                               0.5603 |   +0.0083 |
+| Micro F1         |               0.6530 |                               0.6602 |   +0.0072 |
+| Hamming accuracy |               0.8612 |                               0.8714 |   +0.0102 |
+| Subset accuracy  |               0.1490 |                               0.1640 |   +0.0150 |
+| mAP              |               0.5761 |                               0.5761 | unchanged |
+
+
+__Missed-vs-extra label heatmap.__
+
+Rows indicate true labels that the model missed, while columns indicate extra labels that the model incorrectly predicted. Bright off-diagonal cells show the most common substitution-like mistakes. The strongest patterns occur among visually and semantically similar land-cover groups, especially forest/woodland/shrub classes and agricultural mosaic classes.
+
+<p align="center">
+  <img src="readme_imgs/missed_vs_extra_heatmap.png" alt="Missed versus extra label heatmap on the test set" width="900"><br>
+  <em>Missed versus extra label heatmap on the test set using the best checkpoint model.</em>
+</p>
+
+The vertical bands show classes that are frequently predicted as extra labels across many missed true classes. In this run, those bands are concentrated around semantically broad or visually similar land-cover categories.
+
+__Common confusion patterns__
+
+| Pattern | Interpretation |
+| --- | --- |
+| Forest classes → `transitional_woodland_shrub` | The model often groups wooded or patchy vegetation scenes into a broad shrub/woodland class. |
+| `broad_leaved_forest` / `mixed_forest` / `coniferous_forest` | Forest-type boundaries are visually subtle from overhead imagery. |
+| `pastures` / `complex_cultivation_patterns` / `arable_land` | Agricultural land-cover categories share field textures and mosaic patterns. |
+| `land_principally_occupied_by_agriculture_with_significant_areas_of_natural_vegetation` | This class is inherently mixed, so confusion with agriculture and shrub/woodland classes is expected. |
+| `marine_waters` | This class remains comparatively clean, supporting that the model can learn visually distinctive labels. |
+
+A [separate false-association probability heatmap](readme_imgs/false_association_probability_heatmap.png) was also generated to inspect soft probability-level associations, but the missed-vs-extra matrix is used here because it most directly reflects thresholded prediction mistakes.
