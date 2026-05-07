@@ -206,3 +206,4 @@ __Common confusion patterns__
 | `marine_waters` | This class remains comparatively clean, supporting that the model can learn visually distinctive labels. |
 
 A [separate false-association probability heatmap](readme_imgs/false_association_probability_heatmap.png) was also generated to inspect soft probability-level associations, but the missed-vs-extra matrix is used here because it most directly reflects thresholded prediction mistakes.
+Further, some of the other images created by the project can be found [here](readme_imgs/), such as bar charts, an additional confusion matrix, and PR curves.
