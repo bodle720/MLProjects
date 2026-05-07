@@ -1545,15 +1545,28 @@ def _save_per_class_threshold_figures(
         )
 
     figure_files = save_figures(figures, output_path, close=True)
+    per_class_figures = make_per_class_precision_recall_figures(
+        probabilities=result.probabilities,
+        targets=result.targets,
+        idx_to_class=cvdms_metadata.idx_to_class,
+        title_prefix=f"{title_prefix} - Precision-Recall",
+        annotate_best_f1=False,
+    )
+
+    # On Windows, deeply nested diagnostics folders plus long BigEarthNet
+    # class names can exceed path-length limits. Keep full class names in
+    # plot titles and CSV/JSON artifacts, but use short deterministic PNG
+    # filenames for per-class PR figures.
+    per_class_figures_short_names = {
+        _short_class_figure_key(class_name, class_idx): fig
+        for class_idx, class_name in cvdms_metadata.idx_to_class.items()
+        if class_name in per_class_figures
+        for fig in [per_class_figures[class_name]]
+    }
+
     per_class_pr_files = save_figures(
-        make_per_class_precision_recall_figures(
-            probabilities=result.probabilities,
-            targets=result.targets,
-            idx_to_class=cvdms_metadata.idx_to_class,
-            title_prefix=f"{title_prefix} - Precision-Recall",
-            annotate_best_f1=False,
-        ),
-        output_path / "precision_recall_by_class",
+        per_class_figures_short_names,
+        output_path / "pr_by_class",
         close=True,
     )
     return {
