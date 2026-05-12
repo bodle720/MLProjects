@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#
+# To deploy, run two deploy steps:
 # cdk deploy cvdmsv1-LoggingStack cvdmsv1-StorageStack --profile <profile name>
 # cdk deploy cvdmsv1-UploadStack cvdmsv1-DatasetStack --profile <profile name>
 
