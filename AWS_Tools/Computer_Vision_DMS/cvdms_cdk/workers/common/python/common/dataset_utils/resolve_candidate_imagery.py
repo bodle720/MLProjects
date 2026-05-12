@@ -631,14 +631,16 @@ def _build_object_detection_base_candidate_select(
     selection_config: dict[str, Any],
     common_filters: list[str],
 ) -> str:
-    class_list_sql = _sql_list(selection_config["allowed_classes"])
+    class_list_sql = _sql_list(
+        [str(v).strip().lower() for v in selection_config["allowed_classes"]]
+    )
     common_ci_cols = _build_common_ci_select_list(dataset_label_type="object-detection")
     common_ci_group_by = _build_common_ci_group_by_list()
     where_sql = _join_where_clauses(
         [
             *common_filters,
             f"il.label_type = '{_sql_escape_literal(query_label_type)}'",
-            f"EXISTS (SELECT 1 FROM UNNEST(bb.classes_present) AS t(class_name) WHERE class_name IN ({class_list_sql}))",
+            f"LOWER(TRIM(CAST(t.class_name AS varchar))) IN ({class_list_sql})",
         ]
     )
 
@@ -647,8 +649,8 @@ SELECT
 {common_ci_cols},
     CAST(NULL AS varchar) AS label,
     CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
-    ARRAY_SORT(ARRAY_AGG(fl.bbox_annotation_id)) AS bbox_annotation_ids,
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.class_name))) AS classes_present,
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.bbox_annotation_id))) AS bbox_annotation_ids,
     CAST(NULL AS array(varchar)) AS semantic_mask_ids,
     CAST(NULL AS array(varchar)) AS instance_annotation_ids
 FROM {iceberg_database_name}.canonical_imagery ci
@@ -656,12 +658,13 @@ JOIN (
     SELECT DISTINCT
         ci.image_id,
         bb.bbox_annotation_id,
-        bb.classes_present
+        LOWER(TRIM(CAST(t.class_name AS varchar))) AS class_name
     FROM {iceberg_database_name}.canonical_imagery ci
     JOIN {iceberg_database_name}.image_labels il
         ON ci.image_id = il.image_id
     JOIN {iceberg_database_name}.canonical_bounding_boxes bb
         ON il.label_id = bb.bbox_annotation_id
+    CROSS JOIN UNNEST(bb.classes_present) AS t(class_name)
     {where_sql}
 ) fl
     ON ci.image_id = fl.image_id
@@ -677,14 +680,16 @@ def _build_semantic_segmentation_base_candidate_select(
     selection_config: dict[str, Any],
     common_filters: list[str],
 ) -> str:
-    class_list_sql = _sql_list(selection_config["allowed_classes"])
+    class_list_sql = _sql_list(
+        [str(v).strip().lower() for v in selection_config["allowed_classes"]]
+    )
     common_ci_cols = _build_common_ci_select_list(dataset_label_type="semantic-segmentation")
     common_ci_group_by = _build_common_ci_group_by_list()
     where_sql = _join_where_clauses(
         [
             *common_filters,
             f"il.label_type = '{_sql_escape_literal(query_label_type)}'",
-            f"EXISTS (SELECT 1 FROM UNNEST(sm.classes_present) AS t(class_name) WHERE class_name IN ({class_list_sql}))",
+            f"LOWER(TRIM(CAST(t.class_name AS varchar))) IN ({class_list_sql})",
         ]
     )
 
@@ -693,21 +698,22 @@ SELECT
 {common_ci_cols},
     CAST(NULL AS varchar) AS label,
     CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.class_name))) AS classes_present,
     CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
-    ARRAY_SORT(ARRAY_AGG(fl.semantic_mask_id)) AS semantic_mask_ids,
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.semantic_mask_id))) AS semantic_mask_ids,
     CAST(NULL AS array(varchar)) AS instance_annotation_ids
 FROM {iceberg_database_name}.canonical_imagery ci
 JOIN (
     SELECT DISTINCT
         ci.image_id,
         sm.semantic_mask_id,
-        sm.classes_present
+        LOWER(TRIM(CAST(t.class_name AS varchar))) AS class_name
     FROM {iceberg_database_name}.canonical_imagery ci
     JOIN {iceberg_database_name}.image_labels il
         ON ci.image_id = il.image_id
     JOIN {iceberg_database_name}.canonical_semantic_masks sm
         ON il.label_id = sm.semantic_mask_id
+    CROSS JOIN UNNEST(sm.classes_present) AS t(class_name)
     {where_sql}
 ) fl
     ON ci.image_id = fl.image_id
@@ -723,14 +729,16 @@ def _build_instance_segmentation_base_candidate_select(
     selection_config: dict[str, Any],
     common_filters: list[str],
 ) -> str:
-    class_list_sql = _sql_list(selection_config["allowed_classes"])
+    class_list_sql = _sql_list(
+        [str(v).strip().lower() for v in selection_config["allowed_classes"]]
+    )
     common_ci_cols = _build_common_ci_select_list(dataset_label_type="instance-segmentation")
     common_ci_group_by = _build_common_ci_group_by_list()
     where_sql = _join_where_clauses(
         [
             *common_filters,
             f"il.label_type = '{_sql_escape_literal(query_label_type)}'",
-            f"EXISTS (SELECT 1 FROM UNNEST(ia.classes_present) AS t(class_name) WHERE class_name IN ({class_list_sql}))",
+            f"LOWER(TRIM(CAST(t.class_name AS varchar))) IN ({class_list_sql})",
         ]
     )
 
@@ -739,21 +747,22 @@ SELECT
 {common_ci_cols},
     CAST(NULL AS varchar) AS label,
     CAST(NULL AS array(varchar)) AS labels,
-    ARRAY_SORT(ARRAY_DISTINCT(FLATTEN(ARRAY_AGG(fl.classes_present)))) AS classes_present,
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.class_name))) AS classes_present,
     CAST(NULL AS array(varchar)) AS bbox_annotation_ids,
     CAST(NULL AS array(varchar)) AS semantic_mask_ids,
-    ARRAY_SORT(ARRAY_AGG(fl.instance_annotation_id)) AS instance_annotation_ids
+    ARRAY_SORT(ARRAY_DISTINCT(ARRAY_AGG(fl.instance_annotation_id))) AS instance_annotation_ids
 FROM {iceberg_database_name}.canonical_imagery ci
 JOIN (
     SELECT DISTINCT
         ci.image_id,
         ia.instance_annotation_id,
-        ia.classes_present
+        LOWER(TRIM(CAST(t.class_name AS varchar))) AS class_name
     FROM {iceberg_database_name}.canonical_imagery ci
     JOIN {iceberg_database_name}.image_labels il
         ON ci.image_id = il.image_id
     JOIN {iceberg_database_name}.canonical_instance_annotations ia
         ON il.label_id = ia.instance_annotation_id
+    CROSS JOIN UNNEST(ia.classes_present) AS t(class_name)
     {where_sql}
 ) fl
     ON ci.image_id = fl.image_id
