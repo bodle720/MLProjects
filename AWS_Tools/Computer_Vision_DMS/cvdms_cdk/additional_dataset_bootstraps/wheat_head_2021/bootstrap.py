@@ -276,16 +276,17 @@ def build_object_detection_candidates(
     split_csv_path: Path,
     images_dir: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-
     image_lookup, duplicate_image_key_count = build_image_lookup_map(images_dir)
 
-    candidates: list[dict[str, Any]] = []
+    candidates_by_image_path: dict[str, dict[str, Any]] = {}
+
     rows_seen = 0
     no_box_rows = 0
     missing_image_rows = 0
     rows_with_no_valid_boxes = 0
     invalid_box_count = 0
     valid_box_count = 0
+    positive_rows_merged_into_existing_image = 0
 
     with split_csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -321,25 +322,58 @@ def build_object_detection_candidates(
                 rows_with_no_valid_boxes += 1
                 continue
 
-            candidates.append(
-                {
-                    "image_name": image_name,
+            image_key = str(image_path.resolve())
+
+            if image_key not in candidates_by_image_path:
+                candidates_by_image_path[image_key] = {
+                    "image_name": image_path.stem,
                     "image_path": image_path,
                     "domain": domain,
-                    "annotations": annotations,
-                    "annotation_count": len(annotations),
+                    "domains": {domain},
+                    "source_csv_image_names": {image_name},
+                    "annotations": [],
+                    "source_csv_row_count": 0,
                 }
-            )
+            else:
+                positive_rows_merged_into_existing_image += 1
+
+            candidate = candidates_by_image_path[image_key]
+            candidate["annotations"].extend(annotations)
+            candidate["domains"].add(domain)
+            candidate["source_csv_image_names"].add(image_name)
+            candidate["source_csv_row_count"] += 1
+
+    candidates = []
+    for candidate in candidates_by_image_path.values():
+        domains = sorted(candidate["domains"])
+        source_csv_image_names = sorted(candidate["source_csv_image_names"])
+
+        candidates.append(
+            {
+                "image_name": candidate["image_name"],
+                "image_path": candidate["image_path"],
+                "domain": domains[0] if len(domains) == 1 else ",".join(domains),
+                "domains": domains,
+                "source_csv_image_names": source_csv_image_names,
+                "source_csv_row_count": candidate["source_csv_row_count"],
+                "annotations": candidate["annotations"],
+                "annotation_count": len(candidate["annotations"]),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["image_name"])
 
     stats = {
         "csv_rows_seen": rows_seen,
         "csv_no_box_rows_skipped": no_box_rows,
         "csv_missing_image_rows_skipped": missing_image_rows,
         "csv_rows_with_no_valid_boxes_skipped": rows_with_no_valid_boxes,
+        "csv_positive_rows_merged_into_existing_image": positive_rows_merged_into_existing_image,
         "valid_box_count": valid_box_count,
         "invalid_box_count": invalid_box_count,
         "image_file_count": count_unique_image_paths(image_lookup),
         "duplicate_image_key_count": duplicate_image_key_count,
+        "unique_positive_image_count": len(candidates),
     }
 
     return candidates, stats
