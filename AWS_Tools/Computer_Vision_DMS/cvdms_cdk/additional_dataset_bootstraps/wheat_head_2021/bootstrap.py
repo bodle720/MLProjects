@@ -276,7 +276,8 @@ def build_object_detection_candidates(
     split_csv_path: Path,
     images_dir: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    image_stem_to_path, duplicate_image_stem_count = build_image_stem_map(images_dir)
+
+    image_lookup, duplicate_image_key_count = build_image_lookup_map(images_dir)
 
     candidates: list[dict[str, Any]] = []
     rows_seen = 0
@@ -303,7 +304,7 @@ def build_object_detection_candidates(
             boxes_string = require_nonempty_csv_value(row, "BoxesString")
             domain = require_nonempty_csv_value(row, "domain")
 
-            image_path = image_stem_to_path.get(image_name)
+            image_path = resolve_image_path_from_lookup(image_lookup, image_name)
             if image_path is None:
                 missing_image_rows += 1
                 continue
@@ -337,29 +338,74 @@ def build_object_detection_candidates(
         "csv_rows_with_no_valid_boxes_skipped": rows_with_no_valid_boxes,
         "valid_box_count": valid_box_count,
         "invalid_box_count": invalid_box_count,
-        "image_file_count": len(image_stem_to_path),
-        "duplicate_image_stem_count": duplicate_image_stem_count,
+        "image_file_count": count_unique_image_paths(image_lookup),
+        "duplicate_image_key_count": duplicate_image_key_count,
     }
 
     return candidates, stats
 
 
-def build_image_stem_map(images_dir: Path) -> tuple[dict[str, Path], int]:
-    image_stem_to_path: dict[str, Path] = {}
-    duplicate_count = 0
+def build_image_lookup_map(images_dir: Path) -> tuple[dict[str, Path], int]:
+    image_lookup: dict[str, Path] = {}
+    duplicate_key_count = 0
 
     for image_path in sorted(images_dir.rglob(f"*{EXPECTED_IMAGE_EXTENSION}")):
         if not image_path.is_file():
             continue
 
-        stem = image_path.stem
-        if stem in image_stem_to_path:
-            duplicate_count += 1
-            continue
+        keys = {
+            image_path.stem,
+            image_path.name,
+            image_path.stem.lower(),
+            image_path.name.lower(),
+        }
 
-        image_stem_to_path[stem] = image_path
+        try:
+            relative = image_path.relative_to(images_dir)
+            keys.add(relative.as_posix())
+            keys.add(relative.as_posix().lower())
+        except ValueError:
+            pass
 
-    return image_stem_to_path, duplicate_count
+        for key in keys:
+            if key in image_lookup and image_lookup[key] != image_path:
+                duplicate_key_count += 1
+                continue
+
+            image_lookup[key] = image_path
+
+    return image_lookup, duplicate_key_count
+
+
+def resolve_image_path_from_lookup(image_lookup: dict[str, Path], image_name: str) -> Path | None:
+    raw = image_name.strip()
+    candidates = [
+        raw,
+        raw.lower(),
+        Path(raw).name,
+        Path(raw).name.lower(),
+        Path(raw).stem,
+        Path(raw).stem.lower(),
+    ]
+
+    if not raw.lower().endswith(EXPECTED_IMAGE_EXTENSION):
+        candidates.extend(
+            [
+                f"{raw}{EXPECTED_IMAGE_EXTENSION}",
+                f"{raw}{EXPECTED_IMAGE_EXTENSION}".lower(),
+            ]
+        )
+
+    for candidate in candidates:
+        image_path = image_lookup.get(candidate)
+        if image_path is not None:
+            return image_path
+
+    return None
+
+
+def count_unique_image_paths(image_lookup: dict[str, Path]) -> int:
+    return len({path.resolve() for path in image_lookup.values()})
 
 
 def require_nonempty_csv_value(row: dict[str, Any], column_name: str) -> str:

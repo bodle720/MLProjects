@@ -26,15 +26,25 @@ Rows with `BoxesString = no_box` are skipped by this bootstrapper because the ge
 
 ## Example commands
 
-Run from the `cvdms_cdk` root.
+Run from the `cvdms_cdk` root. Omit `--max-items` to include all images available.
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split train --max-items 5000
 ```
 
+or, for all the images,
+
+```bash
+python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split train
+```
+
+Similarly, for the validation and test splits, run:
+
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split val --max-items 1000 --reuse-from-run-dir "C:\cvdms_files\runs\wheat_head_2021_object_detection_YYYYMMDD_HHMMSS_train"
 ```
+
+and
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split test --max-items 1000 --reuse-from-run-dir "C:\cvdms_files\runs\wheat_head_2021_object_detection_YYYYMMDD_HHMMSS_train"
