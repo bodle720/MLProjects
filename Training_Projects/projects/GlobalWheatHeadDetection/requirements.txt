@@ -1,0 +1,19 @@
+--index-url https://download.pytorch.org/whl/cu126
+--extra-index-url https://pypi.org/simple
+
+-e ../../cvdms_training_common
+
+torch
+torchvision
+torchaudio
+
+boto3
+botocore
+ultralytics
+pyyaml
+mlflow
+tensorboard
+psutil
+nvidia-ml-py
+pandas
+pillow
