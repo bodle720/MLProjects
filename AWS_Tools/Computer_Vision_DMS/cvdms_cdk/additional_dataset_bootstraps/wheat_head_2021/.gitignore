@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+_work/
+downloads/
+extracted/
+manifest.jsonl
+manifest.csv
+summary.json
+failures.json
+*.zip
+*.part
