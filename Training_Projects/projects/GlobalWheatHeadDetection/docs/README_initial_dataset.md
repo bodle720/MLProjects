@@ -5,7 +5,7 @@
 
 This project uses the **Global Wheat Head Detection 2021** dataset as the source dataset for an end-to-end object detection workflow. The task is to detect and localize individual wheat heads in field imagery using bounding-box annotations.
 
-This is a single-class object detection dataset. The class used in this project is:
+This is a single-class object detection dataset. The class used in this project is `wheat_head`
 
 The dataset is well suited for a portfolio object-detection project because it is not a trivial COCO-style transfer-learning example. It is a dense small-object detection problem: many images contain dozens of wheat heads, often packed closely together, partially occluded, or visually similar to the surrounding crop structure. This makes the task more challenging than sparse object detection because the model must maintain high recall while separating nearby object instances.
 
