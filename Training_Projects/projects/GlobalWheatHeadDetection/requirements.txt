@@ -3,17 +3,32 @@
 
 -e ../../cvdms_training_common
 
+# PyTorch CUDA stack.
 torch
 torchvision
-torchaudio
 
+# AWS / CVDMS local data prep.
 boto3
 botocore
+
+# YOLO training/inference.
 ultralytics
+opencv-python
+
+# Configs and experiment tracking.
 pyyaml
 mlflow
 tensorboard
+
+# System metrics for MLflow.
 psutil
 nvidia-ml-py
+
+# Data/plotting/image utilities.
 pandas
 pillow
+matplotlib
+numpy
+
+# Optional analysis helpers.
+scikit-learn
