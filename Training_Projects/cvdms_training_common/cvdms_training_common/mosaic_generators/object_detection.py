@@ -1152,13 +1152,28 @@ def _float_from_value(
     row_index: int,
     box_index: int,
 ) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         raise TypeError(
             f"Row {row_index} box {box_index} field {field_name!r} "
             f"must be numeric, got {value!r}"
         )
 
-    return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Row {row_index} box {box_index} field {field_name!r} "
+                f"must be parseable as float, got {value!r}"
+            ) from exc
+
+    raise TypeError(
+        f"Row {row_index} box {box_index} field {field_name!r} "
+        f"must be numeric or numeric string, got {value!r}"
+    )
 
 def _resample_filter() -> int:
     try:

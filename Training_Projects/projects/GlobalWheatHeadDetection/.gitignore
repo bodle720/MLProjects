@@ -1,0 +1,134 @@
+# ---------------------------------------------------------------------
+# Local config / secrets
+# ---------------------------------------------------------------------
+
+config.yaml
+training/config.yaml
+
+# Keep public example configs tracked.
+!config.example.yaml
+!training/config.example.yaml
+
+
+# ---------------------------------------------------------------------
+# Python / virtual environments
+# ---------------------------------------------------------------------
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+env/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+
+# ---------------------------------------------------------------------
+# IDE / OS files
+# ---------------------------------------------------------------------
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+
+# ---------------------------------------------------------------------
+# CVDMS original dataset artifacts copied from S3
+# ---------------------------------------------------------------------
+# These may contain private bucket names, S3 URIs, dataset metadata, and
+# generated CVDMS dataset-version artifacts.
+
+training/data/original/manifests/*.json
+training/data/original/manifests/*.jsonl
+training/data/original/manifests/*.csv
+training/data/original/manifests/*.sql
+
+# Allow lightweight placeholders/docs.
+!training/data/original/manifests/.gitkeep
+!training/data/original/manifests/README.md
+
+
+# ---------------------------------------------------------------------
+# Local cached CVDMS data
+# ---------------------------------------------------------------------
+# Images and CVDMS label JSONs downloaded by training/data/cache_dataset.py.
+
+training/data/cached/
+!training/data/cached/.gitkeep
+!training/data/cached/README.md
+
+
+# ---------------------------------------------------------------------
+# Dataset exploration outputs
+# ---------------------------------------------------------------------
+# Mosaics, plots, profiling exports, temporary analysis outputs.
+# Move selected final README figures into docs/ if they should be tracked.
+
+training/data/mosaics/
+training/data/exploration/
+training/data/plots/
+training/data/profile/
+training/data/reports/
+
+
+# ---------------------------------------------------------------------
+# Converted YOLO datasets
+# ---------------------------------------------------------------------
+# Generated from cached CVDMS artifacts. These can be regenerated and may
+# contain many copied images/labels.
+
+training/data/yolo/
+training/converted_cvdms_to_yolo/
+
+
+# ---------------------------------------------------------------------
+# YOLO / training outputs
+# ---------------------------------------------------------------------
+
+training/train_yolo/run_dirs/
+training/train_yolo/runs/
+training/train_yolo/outputs/
+training/train_yolo/reports/
+training/train_yolo/prediction_examples/
+
+# Model weights/checkpoints.
+*.pt
+*.pth
+*.onnx
+*.engine
+*.mlmodel
+*.torchscript
+*.tflite
+*.pb
+
+
+# ---------------------------------------------------------------------
+# MLflow / TensorBoard artifacts
+# ---------------------------------------------------------------------
+
+mlruns/
+mlartifacts/
+training/mlruns/
+training/mlartifacts/
+training/train_yolo/mlruns/
+training/train_yolo/mlartifacts/
+
+events.out.tfevents*
+
+
+# ---------------------------------------------------------------------
+# Temporary files
+# ---------------------------------------------------------------------
+
+*.tmp
+*.temp
+*.part
+*.log
