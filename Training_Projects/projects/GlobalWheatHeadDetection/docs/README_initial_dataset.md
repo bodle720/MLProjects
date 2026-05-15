@@ -241,21 +241,6 @@ These mosaics show that the dataset contains dense object instances and meaningf
 
 ## Training Plan
 
-The next stage is to convert the cached CVDMS dataset artifacts into Ultralytics YOLO format and fine-tune a pretrained YOLO detector.
-
-The high-level training workflow is:
-
-```text
-CVDMS manifests and bbox labels
--> local cache
--> YOLO-format dataset
--> Ultralytics YOLO fine-tuning
--> MLflow experiment tracking
--> explicit validation and test evaluation
--> model registry selection
--> FastAPI/Docker serving
-```
-
 Because CVDMS detected split-level drift in color, lighting, and contrast, the first training runs should include targeted photometric augmentation. The goal is not to hide the distribution shift, but to make the detector more robust to the kinds of visual variation already observed in the dataset.
 
 Planned augmentation strategy:
@@ -271,19 +256,6 @@ mosaic disabled near the end of training
 ```
 
 The geometric augmentations should remain moderate. This is a dense small-object detection task, so overly aggressive geometric transforms could make object localization less realistic. Photometric augmentation is the most directly motivated response to the CVDMS findings.
-
-The first baseline run will fine-tune a pretrained YOLO detector on the converted YOLO dataset. Validation metrics will be used for model selection, while the test split will be reserved for final reporting.
-
-Future evaluation should also slice model performance by CVDMS quality buckets, such as:
-
-```text
-lighting_bucket
-contrast_bucket
-color_bucket
-blur_bucket
-```
-
-This would allow the project to report not only aggregate mAP, precision, and recall, but also whether the detector performs differently under specific visual conditions.
 
 ## Dataset Source
 
