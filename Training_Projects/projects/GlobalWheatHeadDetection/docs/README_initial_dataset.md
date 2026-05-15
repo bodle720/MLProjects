@@ -209,8 +209,6 @@ false negatives in low-visibility regions
 duplicate or missed detections in dense clusters
 ```
 
-This makes the dataset useful for an employer-facing project. The project is not only “train YOLO on a public dataset.” It demonstrates a workflow where dataset-management tooling surfaces split-level visual drift, and those findings influence the training and evaluation plan.
-
 ## Truth Visualization and Mosaics
 
 The following examples show ground-truth bounding boxes. The red boxes mark individual wheat-head instances.
