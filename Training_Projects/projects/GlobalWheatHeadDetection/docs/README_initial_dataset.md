@@ -13,7 +13,7 @@ The Global Wheat Head Detection 2021 dataset extends the earlier 2020 dataset wi
 
 ## CVDMS Dataset Formation
 
-The dataset was ingested into CVDMS and then formed into a versioned CVDMS object-detection dataset. See the [CVDMS CDK infrastructure](../../../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/) for the underlying AWS/CDK data-management system.
+The dataset was ingested into CVDMS and then formed into a versioned CVDMS object-detection dataset. See the [CVDMS CDK infrastructure](../../../../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/) for the underlying AWS/CDK data-management system.
 
 CVDMS preserved the official source train, validation, and test splits for this dataset. This matters because the dataset was not randomly re-split after ingestion. Instead, the model-training workflow uses the same split structure provided by the dataset source.
 
