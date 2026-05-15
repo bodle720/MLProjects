@@ -72,6 +72,8 @@ The plots below use two kinds of features:
 
 The distinction is important. For example, `colorfulness` is a continuous numeric value, while `color_bucket` is a categorical summary such as `low`, `medium`, or `high`.
 
+For a full list of metrics computed by CVDMS, see [this README section.](../../../../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/README_stacks.md#image-features)
+
 ### Continuous Metrics
 
 * **Colorfulness**: A numeric measure of how visually colorful an image is. CVDMS uses a colorfulness metric based on color-channel variation and color bias. Low values indicate dull, gray, washed-out, or nearly monochrome imagery. High values indicate more vivid or chromatically rich imagery.
