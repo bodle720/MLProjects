@@ -460,19 +460,19 @@ def cached_row_from_manifest_row(
         split=row_split,
         row=dict(row),
         source_ref=source_ref,
-        local_image_path=local_cache_path_for_s3_uri(
-            uri=source_ref,
+        local_image_path=local_image_cache_path(
+            source_ref=source_ref,
             output_dir=output_dir,
-            kind="images",
+            split=row_split,
         ),
         bbox_label_uris=bbox_label_uris,
         local_label_paths=[
-            local_cache_path_for_s3_uri(
-                uri=label_uri,
+            local_label_cache_path(
+                annotation_id=annotation_id,
                 output_dir=output_dir,
-                kind="labels",
+                split=row_split,
             )
-            for label_uri in bbox_label_uris
+            for annotation_id in bbox_annotation_ids
         ],
     )
 
@@ -551,14 +551,34 @@ def build_bbox_label_uri(
 
     return f"{clean_prefix}/{filename}"
 
-def local_cache_path_for_s3_uri(
+def local_image_cache_path(
     *,
-    uri: str,
+    source_ref: str,
     output_dir: Path,
-    kind: str,
+    split: str,
 ) -> Path:
-    parsed = parse_s3_uri(uri)
-    return output_dir / kind / parsed.bucket / parsed.key
+    parsed = parse_s3_uri(source_ref)
+    filename = Path(parsed.key).name
+
+    if not filename:
+        raise ValueError(f"Could not derive image filename from source_ref: {source_ref}")
+
+    return output_dir / "images" / split / filename
+
+def local_label_cache_path(
+    *,
+    annotation_id: str,
+    output_dir: Path,
+    split: str,
+) -> Path:
+    clean_id = annotation_id.strip()
+
+    if clean_id.endswith(".json"):
+        filename = clean_id
+    else:
+        filename = f"{clean_id}.json"
+
+    return output_dir / "labels" / split / filename
 
 def build_initial_summary(cached_rows: list[CachedRow]) -> CacheSummary:
     image_paths = {row.local_image_path for row in cached_rows}
