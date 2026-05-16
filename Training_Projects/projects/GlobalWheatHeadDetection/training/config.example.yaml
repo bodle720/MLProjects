@@ -327,16 +327,6 @@ paths:
   #   training/train_yolo/run_dirs/<experiment_name>/<resolved_run_name>/
   run_root_dir: training/train_yolo/run_dirs
 
-  # Optional folder for future exported summaries, model cards, or copied reports.
-  outputs_dir: training/train_yolo/outputs
-
-  # Optional folder for future standalone reports.
-  reports_dir: training/train_yolo/reports
-
-  # Optional folder for future qualitative prediction examples.
-  prediction_examples_dir: training/train_yolo/prediction_examples
-
-
 mlflow:
   # Enable MLflow tracking.
   enabled: true

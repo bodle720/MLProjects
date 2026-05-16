@@ -35,12 +35,8 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
         weights_path = self._resolve_artifact_path(context.artifacts["weights"])
         self.model = YOLO(str(weights_path))
 
-    def predict(
-        self,
-        context: Any,
-        model_input: Any,
-        params: dict[str, Any] | None = None,
-    ) -> Any:
+    def predict(self, context, model_input, params=None):
+
         import pandas as pd
 
         rows = self._normalize_input(model_input)

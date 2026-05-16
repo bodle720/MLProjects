@@ -150,11 +150,6 @@ def build_resolved_config(config: dict[str, Any], project_root: Path) -> dict[st
         )
     )
 
-    for key in ["outputs_dir", "reports_dir", "prediction_examples_dir"]:
-        value = paths_cfg.get(key)
-        if value:
-            paths_cfg[f"{key}_resolved"] = str(resolve_project_path(project_root, value))
-
     return resolved
 
 def validate_device_value(value: Any, field_name: str) -> None:
@@ -361,11 +356,6 @@ def validate_training_inputs(config: dict[str, Any]) -> None:
     validate_evaluation_section(config)
 
     run_root_dir.mkdir(parents=True, exist_ok=True)
-
-    for key in ["outputs_dir_resolved", "reports_dir_resolved", "prediction_examples_dir_resolved"]:
-        value = paths_cfg.get(key)
-        if value:
-            Path(value).mkdir(parents=True, exist_ok=True)
 
     conversion_report = dataset_cfg.get("conversion_report_resolved")
     if conversion_report and not Path(conversion_report).exists():
