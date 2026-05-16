@@ -1,86 +1,129 @@
-# training.yaml
+# training/config.example.yaml
 #
-# Local training config.
-# This file should be ignored by Git.
+# Public example training config for Project 3:
+# Global Wheat Head Detection 2021 YOLO object-detection training.
 #
-# Public template:
-#   configs/training/training.example.yaml
+# Copy this file to:
+#   training/config.yaml
+# ---------------------------------------------------------------------------
+# Frequently changed run identity settings
+# ---------------------------------------------------------------------------
 #
-# This config assumes upstream data-prep has already happened:
+# These two values control both:
 #
-#   CVDMS dataset version
-#   -> local caching / mirroring
-#   -> optional dataset mosaics and exploration plots
-#   -> CVDMS-to-YOLO conversion
-#   -> YOLO-format dataset on local disk
+#   1. Local run directory layout:
+#        training/train_yolo/run_dirs/<experiment_name>/<resolved_run_name>/
 #
-# This training config only deals with:
+#   2. MLflow organization:
+#        MLflow experiment name = experiment_name
+#        MLflow run name        = resolved_run_name
 #
-#   YOLO dataset reference
-#   YOLO fine-tuning settings
-#   explicit val/test evaluation
-#   TensorBoard logging
-#   MLflow tracking
-#   model registry naming
+# If run_name already exists under the experiment folder, the training script
+# appends _1, _2, _3, ... to create a unique resolved run name.
+run:
+  # Parent experiment name for local run folders and MLflow.
+  experiment_name: &experiment_name global-wheat-head-detection
+
+  # Base run name / MLflow run name for this specific training attempt.
+  run_name: &run_name baseline_001_yolo11n_e50_img640_b8
+
 
 project:
-  # Stable repo/app identity. Keep constant.
-  name: wheat_head_yolo_mlflow_fastapi
+  # Stable repo/project identity. Keep this mostly constant across runs.
+  name: global-wheat-head-detection
 
-  # Short human-readable project description.
-  description: YOLO wheat-head object detection training, MLflow tracking, and FastAPI serving
+  # Human-readable project title.
+  display_name: Global Wheat Head Detection 2021
+
+  # Short project description for logs, summaries, and MLflow metadata.
+  description: >
+    YOLO object-detection training workflow for dense single-class wheat-head
+    detection using a CVDMS-exported Global Wheat Head Detection 2021 dataset.
+
+  # High-level ML task type.
+  task: object-detection
 
 
 dataset:
-  # Local name for this exported YOLO-format dataset.
+  # Local name for this YOLO-format export.
   name: global-wheat-head-2021-v1
 
-  # YOLO dataset YAML produced by the earlier conversion step.
-  dataset_yaml: training/converted_cvdms_to_yolo/global-wheat-head-2021-v1/dataset.yaml
-
-  # Detailed conversion report saved during the earlier YOLO export.
-  # This is useful to log as an MLflow artifact, but training does not depend on
-  # CVDMS directly.
-  conversion_report: training/converted_cvdms_to_yolo/global-wheat-head-2021-v1/conversion_report_detailed.json
-
-  # Informational dataset source tag for logs/MLflow.
+  # System that produced the dataset artifacts.
   source_system: cvdms
 
-  # CVDMS label/task type that produced this YOLO dataset.
+  # CVDMS label/task type.
   label_type: object-detection
+
+  # Original CVDMS dataset ID.
+  cvdms_dataset_id: global-wheat-head-2021
+
+  # Original CVDMS dataset version.
+  cvdms_dataset_version: 1
+
+  # YOLO dataset YAML produced by the CVDMS-to-YOLO converter.
+  dataset_yaml: training/data/yolo/global-wheat-head-2021-v1/dataset.yaml
+
+  # Detailed conversion report saved during CVDMS-to-YOLO export.
+  conversion_report: training/data/yolo/global-wheat-head-2021-v1/conversion_report_detailed.json
+
+  # Informational notes for humans, README writing, and MLflow params.
+  notes:
+    # Single class used by this dataset.
+    class_name: wheat_head
+
+    # Number of detection classes.
+    class_count: 1
+
+    # Official upstream train/val/test splits were preserved.
+    split_policy: official_source_splits_preserved
+
+    # Number of training images.
+    train_images: 3605
+
+    # Number of validation images.
+    val_images: 1448
+
+    # Number of test images.
+    test_images: 1334
+
+    # Average boxes per training image from the conversion report.
+    train_avg_boxes_per_image: 45.4
+
+    # Average boxes per validation image from the conversion report.
+    val_avg_boxes_per_image: 30.6
+
+    # Average boxes per test image from the conversion report.
+    test_avg_boxes_per_image: 50.5
 
 
 model:
-  # Starting pretrained YOLO weights.
-  #
-  # Good first choices:
-  #   yolo26n.pt or yolo11n.pt = fastest baseline
-  #   yolo26s.pt or yolo11s.pt = stronger small model
-  #   yolo26m.pt or yolo11m.pt = stronger if GPU memory allows
-  weights: training/train_yolo/weights/yolo26s.pt
+  # You may use either:
+  #   yolo11n.pt
+  # or:
+  #   training/train_yolo/weights/yolo11n.pt
+  weights: yolo11n.pt
 
-  # YOLO model family label for logging.
-  family: yolo26
+  # If model.weights is a known Ultralytics pretrained filename and the local
+  # file does not exist, download/cache it here.
+  weights_dir: training/train_yolo/weights
 
-  # Model size label: n/s/m/l/x, etc.
-  size: s
+  # Allow automatic pretrained-weight download/caching for known YOLO weight names.
+  auto_download_weights: true
+
+  family: yolo11
+  size: n
 
 
 training:
-  # Base run name. If already used under this experiment, the code appends:
-  #   _1, _2, _3, ...
-  # The resolved name becomes the folder name, Ultralytics run name,
-  # TensorBoard run, and MLflow run.
-  run_name: baseline_yolo26s_img1024
+  # Base run name. This is anchored from the top-level run section so the main
+  # run identity is easy to edit.
+  run_name: *run_name
 
   # Number of training epochs.
-  epochs: 100
+  epochs: 50
 
   # Input image size used by YOLO.
-  #
-  # Wheat heads are small/dense, so 1024 is a better first serious baseline than
-  # 640 if GPU memory allows. If memory is tight, reduce to 768 or 640.
-  imgsz: 1024
+  imgsz: 640
 
   # Batch size. Increase on GPU if memory allows.
   batch: 8
@@ -96,15 +139,12 @@ training:
   workers: 0
 
   # Freeze layers during fine-tuning:
-  #   null = no explicit freeze / full fine-tune
+  #   null = no explicit freeze
   #   10   = freeze first 10 layers
-  #
-  # Recommendation: start Project 3 with full fine-tuning as the baseline.
-  # Later, a frozen-layer run can be treated as an ablation experiment.
   freeze: null
 
   # Early stopping patience in epochs.
-  patience: 25
+  patience: 20
 
   # Random seed for repeatability.
   seed: 42
@@ -112,16 +152,13 @@ training:
   # Request deterministic behavior where supported.
   deterministic: true
 
-  # Save YOLO plots such as curves/confusion matrices.
+  # Save YOLO plots such as curves, confusion matrices, and PR/F1/P/R curves.
   plots: true
 
   # Dataset caching:
-  #   false = no Ultralytics cache
+  #   false = no cache
   #   ram   = cache in memory
   #   disk  = cache on disk
-  #
-  # Since the YOLO dataset should already be local after conversion, false is
-  # a safe first default.
   cache: false
 
   # Optimizer:
@@ -131,7 +168,7 @@ training:
   # Initial learning rate. null means use Ultralytics/default/auto.
   lr0: null
 
-  # Final LR factor. null means use Ultralytics/default/auto.
+  # Final learning-rate factor. null means use Ultralytics/default/auto.
   lrf: null
 
   # Optimizer momentum. null means use Ultralytics/default/auto.
@@ -146,58 +183,49 @@ training:
   # Warmup momentum. null means use Ultralytics default.
   warmup_momentum: null
 
-  # Warmup bias LR. null means use Ultralytics default.
+  # Warmup bias learning rate. null means use Ultralytics default.
   warmup_bias_lr: null
 
-  # Use cosine LR schedule if true. null means use Ultralytics default.
+  # Use cosine learning-rate schedule if true. null means use Ultralytics default.
   cos_lr: null
 
-  # Automatic mixed precision. null means use Ultralytics default.
-  amp: null
+  # Automatic mixed precision. true is usually preferred on supported GPUs.
+  amp: true
 
-  # Single-class training mode.
-  #
-  # Keep false unless intentionally collapsing all classes into one. Since this
-  # YOLO dataset already has one class, false is clearer and preserves normal
-  # class-name behavior.
-  single_cls: false
+  # Rotation augmentation in degrees. null means use Ultralytics default.
+  degrees: null
 
-  # Rectangular training. null means use Ultralytics default.
-  rect: null
+  # Translation augmentation fraction. null means use Ultralytics default.
+  translate: null
 
-  # Photometric augmentation.
-  #
-  # CVDMS dataset exploration found split-level drift in lighting, color, and
-  # contrast buckets, so these are intentionally not left null for the baseline.
-  hsv_h: 0.015
-  hsv_s: 0.70
-  hsv_v: 0.40
+  # Scale augmentation range. null means use Ultralytics default.
+  scale: null
 
-  # Geometry augmentation.
-  #
-  # Keep geometry moderate for dense small-object detection.
-  degrees: 0.0
-  translate: 0.10
-  scale: 0.50
-  shear: 0.0
-  perspective: 0.0
+  # Shear augmentation in degrees. null means use Ultralytics default.
+  shear: null
 
-  # Flip augmentation.
-  fliplr: 0.50
-  flipud: 0.0
+  # Perspective augmentation amount. null means use Ultralytics default.
+  perspective: null
 
-  # Mosaic/MixUp.
-  mosaic: 1.0
-  mixup: 0.0
+  # Horizontal flip probability. null means use Ultralytics default.
+  fliplr: null
 
-  # Disable mosaic during final N epochs. This helps late training see more
-  # natural images after earlier mosaic-heavy augmentation.
-  close_mosaic: 10
+  # Vertical flip probability. null means use Ultralytics default.
+  flipud: null
+
+  # Mosaic augmentation probability. null means use Ultralytics default.
+  mosaic: null
+
+  # MixUp augmentation probability. null means use Ultralytics default.
+  mixup: null
+
+  # Disable mosaic during final N epochs. null means use Ultralytics default.
+  close_mosaic: null
 
 
 evaluation:
   # Evaluate best.pt on the validation split after training.
-  # This is the split used for model selection / champion promotion.
+  # This split is used for model selection / champion promotion.
   val:
     # Enable explicit post-training validation evaluation.
     enabled: true
@@ -205,7 +233,7 @@ evaluation:
     # YOLO split to evaluate.
     split: val
 
-    # Save evaluation plots.
+    # Save validation evaluation plots.
     plots: true
 
     # null means reuse training.imgsz.
@@ -226,11 +254,9 @@ evaluation:
     # IoU threshold. null means use Ultralytics default.
     iou: null
 
-    # Max detections per image.
-    #
-    # Wheat-head scenes can be dense, so this is set higher than the default-style
-    # placeholder used in the tutorial project.
-    max_det: 1000
+    # Max detections per image. Dense wheat imagery may need a higher value than
+    # generic object-detection datasets.
+    max_det: 300
 
     # Save COCO-style JSON predictions if supported/needed.
     save_json: false
@@ -242,7 +268,7 @@ evaluation:
     save_conf: false
 
   # Evaluate best.pt on the final held-out test split after training.
-  # This is for final reporting, not model selection.
+  # This split is for final reporting, not model selection.
   test:
     # Enable explicit post-training test evaluation.
     enabled: true
@@ -250,7 +276,7 @@ evaluation:
     # YOLO split to evaluate.
     split: test
 
-    # Save evaluation plots.
+    # Save test evaluation plots.
     plots: true
 
     # null means reuse training.imgsz.
@@ -271,8 +297,9 @@ evaluation:
     # IoU threshold. null means use Ultralytics default.
     iou: null
 
-    # Dense wheat-head scenes can contain many objects.
-    max_det: 1000
+    # Max detections per image. Dense wheat imagery may need a higher value than
+    # generic object-detection datasets.
+    max_det: 300
 
     # Save COCO-style JSON predictions if supported/needed.
     save_json: false
@@ -291,7 +318,7 @@ tensorboard:
   # Add readable config text to TensorBoard.
   log_config_text: true
 
-  # Add explicit best.pt eval metrics to TensorBoard.
+  # Add explicit best.pt val/test eval metrics to TensorBoard.
   log_eval_metrics: true
 
 
@@ -299,6 +326,15 @@ paths:
   # Repeated run layout:
   #   training/train_yolo/run_dirs/<experiment_name>/<resolved_run_name>/
   run_root_dir: training/train_yolo/run_dirs
+
+  # Optional folder for future exported summaries, model cards, or copied reports.
+  outputs_dir: training/train_yolo/outputs
+
+  # Optional folder for future standalone reports.
+  reports_dir: training/train_yolo/reports
+
+  # Optional folder for future qualitative prediction examples.
+  prediction_examples_dir: training/train_yolo/prediction_examples
 
 
 mlflow:
@@ -308,11 +344,12 @@ mlflow:
   # Local MLflow tracking server URI.
   tracking_uri: http://127.0.0.1:5000
 
-  # MLflow experiment name; also used as the local parent run folder.
-  experiment_name: wheat-head-yolo-experiment
+  # MLflow experiment name. This is anchored from the top-level run section so
+  # the main run identity is easy to edit.
+  experiment_name: *experiment_name
 
-  # Registered model name for later promotion scripts.
-  registered_model_name: YoloWheatHeadDetector
+  # Registered model name for later model-selection/promotion scripts.
+  registered_model_name: GlobalWheatHeadDetector
 
   # Alias for the deployed/best model version later.
   champion_alias: champion
@@ -335,9 +372,12 @@ mlflow:
 
   # Extra MLflow tags for filtering/searching runs.
   tags:
-    project: wheat_head_yolo_mlflow_fastapi
+    project: global-wheat-head-detection
     task: object_detection
     framework: ultralytics
     dataset_source: cvdms
     dataset_name: global-wheat-head-2021-v1
+    label_type: object_detection
+    model_family: yolo11
     run_group: baseline
+    portfolio_project: "true"

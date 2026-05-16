@@ -96,6 +96,7 @@ training/train_yolo/runs/
 training/train_yolo/outputs/
 training/train_yolo/reports/
 training/train_yolo/prediction_examples/
+training/train_yolo/weights/
 
 # Model weights/checkpoints.
 *.pt
