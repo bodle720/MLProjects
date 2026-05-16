@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import mlflow
+from mlflow.models.signature import ModelSignature
+from mlflow.types.schema import ColSpec, Schema
 
 from .config_loader import flatten_dict
 from deployment.model_runtime.ultralytics_pyfunc import UltralyticsYoloPyfuncModel
@@ -321,6 +323,41 @@ def configure_system_metrics(config: dict[str, Any]) -> bool:
 def get_project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
+def build_yolo_pyfunc_signature() -> ModelSignature:
+    """Build an explicit MLflow signature for the YOLO pyfunc wrapper.
+
+    The pyfunc model expects a pandas DataFrame with at least:
+
+        image_path
+
+    It returns:
+
+        image_path
+        detections_json
+
+    Optional inference controls such as conf/iou/imgsz/device are supported by
+    the wrapper as input DataFrame columns, but they are intentionally omitted
+    from the strict signature so the minimal serving contract stays simple.
+    """
+
+    input_schema = Schema(
+        [
+            ColSpec("string", "image_path"),
+        ]
+    )
+
+    output_schema = Schema(
+        [
+            ColSpec("string", "image_path"),
+            ColSpec("string", "detections_json"),
+        ]
+    )
+
+    return ModelSignature(
+        inputs=input_schema,
+        outputs=output_schema,
+    )
+
 def log_best_model_as_pyfunc(
     config: dict[str, Any],
     best_model_path: Path,
@@ -377,6 +414,8 @@ def log_best_model_as_pyfunc(
     project_root = get_project_root()
     deployment_code_path = project_root / "deployment"
 
+    signature = build_yolo_pyfunc_signature()
+
     model_info = log_pyfunc_model_compat(
         model_name="best_yolo_model",
         python_model=UltralyticsYoloPyfuncModel(),
@@ -388,10 +427,18 @@ def log_best_model_as_pyfunc(
         code_paths=[
             str(deployment_code_path),
         ],
+        signature=signature,
     )
 
+    model_uri = getattr(model_info, "model_uri", None)
+    if model_uri is None:
+        active_run = mlflow.active_run()
+        if active_run is not None:
+            model_uri = f"runs:/{active_run.info.run_id}/best_yolo_model"
+
     mlflow.set_tag("best_mlflow_model_name", "best_yolo_model")
-    mlflow.set_tag("best_mlflow_model_uri", model_info.model_uri)
+    if model_uri:
+        mlflow.set_tag("best_mlflow_model_uri", model_uri)
     mlflow.set_tag("best_weights_artifact_path", "model/best/best.pt")
 
 def log_pyfunc_model_compat(
@@ -401,6 +448,7 @@ def log_pyfunc_model_compat(
     pip_requirements: list[str],
     metadata: dict[str, Any],
     code_paths: list[str] | None = None,
+    signature: ModelSignature | None = None,
 ):
     try:
         return mlflow.pyfunc.log_model(
@@ -410,6 +458,7 @@ def log_pyfunc_model_compat(
             pip_requirements=pip_requirements,
             metadata=metadata,
             code_paths=code_paths,
+            signature=signature,
         )
     except TypeError:
         return mlflow.pyfunc.log_model(
@@ -419,4 +468,5 @@ def log_pyfunc_model_compat(
             pip_requirements=pip_requirements,
             metadata=metadata,
             code_paths=code_paths,
+            signature=signature,
         )
