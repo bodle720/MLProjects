@@ -113,6 +113,7 @@ training/train_yolo/weights/
 # MLflow / TensorBoard artifacts
 # ---------------------------------------------------------------------
 
+mlflow.db
 mlruns/
 mlartifacts/
 training/mlruns/
