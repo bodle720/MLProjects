@@ -358,6 +358,23 @@ def build_yolo_pyfunc_signature() -> ModelSignature:
         outputs=output_schema,
     )
 
+def build_yolo_pyfunc_input_example():
+    """Build a minimal MLflow input example for the YOLO pyfunc wrapper.
+
+    This example documents the expected DataFrame shape. The image path is a
+    placeholder and is not meant to be used as a real training/evaluation image.
+    """
+
+    import pandas as pd
+
+    return pd.DataFrame(
+        [
+            {
+                "image_path": "example_image_path.jpg",
+            }
+        ]
+    )
+
 def log_best_model_as_pyfunc(
     config: dict[str, Any],
     best_model_path: Path,
@@ -415,6 +432,7 @@ def log_best_model_as_pyfunc(
     deployment_code_path = project_root / "deployment"
 
     signature = build_yolo_pyfunc_signature()
+    input_example = build_yolo_pyfunc_input_example()
 
     model_info = log_pyfunc_model_compat(
         model_name="best_yolo_model",
@@ -428,6 +446,7 @@ def log_best_model_as_pyfunc(
             str(deployment_code_path),
         ],
         signature=signature,
+        input_example=input_example,
     )
 
     model_uri = getattr(model_info, "model_uri", None)
@@ -449,6 +468,7 @@ def log_pyfunc_model_compat(
     metadata: dict[str, Any],
     code_paths: list[str] | None = None,
     signature: ModelSignature | None = None,
+    input_example: Any | None = None,
 ):
     try:
         return mlflow.pyfunc.log_model(
@@ -459,6 +479,7 @@ def log_pyfunc_model_compat(
             metadata=metadata,
             code_paths=code_paths,
             signature=signature,
+            input_example=input_example,
         )
     except TypeError:
         return mlflow.pyfunc.log_model(
@@ -469,4 +490,5 @@ def log_pyfunc_model_compat(
             metadata=metadata,
             code_paths=code_paths,
             signature=signature,
+            input_example=input_example,
         )
