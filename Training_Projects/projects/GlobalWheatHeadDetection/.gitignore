@@ -86,8 +86,6 @@ training/data/reports/
 # contain many copied images/labels.
 
 training/data/yolo/
-training/converted_cvdms_to_yolo/
-
 
 # ---------------------------------------------------------------------
 # YOLO / training outputs

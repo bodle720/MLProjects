@@ -17,7 +17,7 @@ CACHED_MANIFEST_DIR = CACHED_DATA_ROOT / "manifests"
 CACHED_IMAGES_DIR = CACHED_DATA_ROOT / "images"
 CACHED_LABELS_DIR = CACHED_DATA_ROOT / "labels"
 
-CONVERTED_YOLO_ROOT = TRAINING_ROOT / "converted_cvdms_to_yolo"
+CONVERTED_YOLO_ROOT = DATA_ROOT / "yolo"
 
 try:
     from .conversion_helpers.conversion_report import (

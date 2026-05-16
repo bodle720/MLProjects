@@ -257,6 +257,22 @@ mosaic disabled near the end of training
 
 The geometric augmentations should remain moderate. This is a dense small-object detection task, so overly aggressive geometric transforms could make object localization less realistic. Photometric augmentation is the most directly motivated response to the CVDMS findings.
 
+## Additional Notes: Object-Density Drift
+
+During CVDMS-to-YOLO conversion, the conversion report revealed another useful
+dataset characteristic: the official splits differ in the average number of
+wheat-head boxes per image.
+
+- train: ~45.4 boxes/image
+- val:   ~30.6 boxes/image
+- test:  ~50.5 boxes/image
+
+This means the validation split is less densely annotated on average than the
+training and test splits, while the test split is the densest. In addition to the
+lighting, color, and contrast differences identified during CVDMS exploration,
+this object-density difference is another reason to evaluate the model carefully
+across splits rather than relying on a single aggregate metric alone.
+
 ## Dataset Source
 
 DAVID Etienne. (2021). Global Wheat Head Dataset 2021 (1.0) [Data set]. Zenodo. [https://doi.org/10.5281/zenodo.5092309](https://doi.org/10.5281/zenodo.5092309)
