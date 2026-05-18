@@ -97,7 +97,7 @@ dataset:
 
 
 model:
-  # You may use either:
+  # You may use either a string arg or a path, e.g.:
   #   yolo11n.pt
   # or:
   #   training/train_yolo/weights/yolo11n.pt
@@ -110,6 +110,7 @@ model:
   # Allow automatic pretrained-weight download/caching for known YOLO weight names.
   auto_download_weights: true
 
+  # Metadata only, not currently validated against specified weight param above.
   family: yolo11
   size: n
 
