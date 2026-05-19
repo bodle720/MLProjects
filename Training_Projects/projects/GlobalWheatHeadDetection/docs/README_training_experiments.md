@@ -46,7 +46,8 @@ The first baseline used YOLO11n as a lightweight starting point. It trained clea
 | `baseline_001_yolo11n_e30_img640_b16_w4`      | YOLO11n |     30 |    16 |       4 |        ~0.912 |     ~0.838 |    ~0.909 |       ~0.499 |         ~0.784 |      ~0.597 |     ~0.659 |        ~0.280 | ~31.7 min |
 | `baseline_002_yolo11s_e30_img640_b16_w4`      | YOLO11s |     30 |    16 |       4 |         0.916 |      0.864 |     0.928 |        0.517 |          0.805 |       0.642 |      0.699 |         0.319 |   ~40 min |
 | `baseline_003_yolo11s_e50_img640_b16_w4`      | YOLO11s |     50 |    16 |       4 |         0.922 |      0.862 |     0.929 |        0.526 |          0.818 |       0.638 |      0.706 |         0.309 |   ~60 min |
-| `baseline_004_aug1_yolo11s_e30_img640_b16_w4` | YOLO11s |     30 |    16 |       4 |         0.918 |      0.858 |     0.925 |        0.522 |          0.809 |       0.634 |      0.702 |         0.303 |   ~38 min |
+| `baseline_004_aug1_yolo11s_e30_img640_b16_w4` | YOLO11s |     30 |    16 |       4 |         0.918 |      0.859 |     0.926 |        0.516 |          0.787 |       0.623 |      0.686 |         0.300 |   ~38 min |
+| `baseline_005_yolo11s_e30_img768_b8_w4`       | YOLO11s |     30 |     8 |       4 |         0.928 |      0.852 |     0.926 |        0.516 |          0.807 |       0.624 |      0.702 |         0.315 |   ~50 min |
 
 ## Interpretation
 
@@ -58,3 +59,4 @@ The first baseline used YOLO11n as a lightweight starting point. It trained clea
   ```
   
     This suggests that the larger YOLO11s model is learning useful additional structure rather than only improving on the validation split. The YOLO11s run costs more runtime and thermal load.
+-  **YOLO11s image size 768:** Thermally costly without improving validation mAP50-95.
