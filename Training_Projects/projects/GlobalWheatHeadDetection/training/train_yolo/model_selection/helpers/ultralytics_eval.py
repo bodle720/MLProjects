@@ -126,15 +126,25 @@ def _extract_speed_metrics(metrics) -> dict:
             "speed_inference_ms_per_image": None,
             "speed_loss_ms_per_image": None,
             "speed_postprocess_ms_per_image": None,
+            "speed_total_inference_pipeline_ms_per_image": None,
         }
 
-    return {
-        "speed_preprocess_ms_per_image": _to_float(speed.get("preprocess")),
-        "speed_inference_ms_per_image": _to_float(speed.get("inference")),
-        "speed_loss_ms_per_image": _to_float(speed.get("loss")),
-        "speed_postprocess_ms_per_image": _to_float(speed.get("postprocess")),
-    }
+    preprocess = _to_float(speed.get("preprocess"))
+    inference = _to_float(speed.get("inference"))
+    loss = _to_float(speed.get("loss"))
+    postprocess = _to_float(speed.get("postprocess"))
 
+    total_pipeline = None
+    if preprocess is not None and inference is not None and postprocess is not None:
+        total_pipeline = preprocess + inference + postprocess
+
+    return {
+        "speed_preprocess_ms_per_image": preprocess,
+        "speed_inference_ms_per_image": inference,
+        "speed_loss_ms_per_image": loss,
+        "speed_postprocess_ms_per_image": postprocess,
+        "speed_total_inference_pipeline_ms_per_image": total_pipeline,
+    }
 
 def _extract_results_dir(metrics) -> str | None:
     save_dir = _safe_getattr(metrics, "save_dir")
