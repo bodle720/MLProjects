@@ -274,7 +274,11 @@ def build_train_args(config: dict[str, Any]) -> dict[str, Any]:
         "flipud": training_cfg.get("flipud"),
         "mosaic": training_cfg.get("mosaic"),
         "mixup": training_cfg.get("mixup"),
+        "copy_paste": training_cfg.get("copy_paste"),
         "close_mosaic": training_cfg.get("close_mosaic"),
+        "hsv_h": training_cfg.get("hsv_h"),
+        "hsv_s": training_cfg.get("hsv_s"),
+        "hsv_v": training_cfg.get("hsv_v"),
     }
 
     return {
@@ -517,6 +521,17 @@ def add_training_config_text(writer, config: dict[str, Any]) -> None:
         "mosaic",
         "mixup",
         "close_mosaic",
+        "degrees",
+        "translate",
+        "scale",
+        "shear",
+        "perspective",
+        "fliplr",
+        "flipud",
+        "copy_paste",
+        "hsv_h",
+        "hsv_s",
+        "hsv_v",
     ]
 
     lines = [

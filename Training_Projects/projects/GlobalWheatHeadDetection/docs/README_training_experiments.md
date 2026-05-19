@@ -41,10 +41,12 @@ This provided a good practical balance between throughput, memory use, and stabi
 
 The first baseline used YOLO11n as a lightweight starting point. It trained cleanly and established the initial validation/test performance gap. The next baseline moved to YOLO11s to test whether a larger model could improve performance on the harder test split without becoming impractical on the local GPU.
 
-| Run                                      |   Model | Epochs | Batch | Workers | Val Precision | Val Recall | Val mAP50 | Val mAP50-95 | Test Precision | Test Recall | Test mAP50 | Test mAP50-95 |   Runtime |
-| ---------------------------------------- | ------: | -----: | ----: | ------: | ------------: | ---------: | --------: | -----------: | -------------: | ----------: | ---------: | ------------: | --------: |
-| `baseline_001_yolo11n_e30_img640_b16_w4` | YOLO11n |     30 |    16 |       4 |        ~0.912 |     ~0.838 |    ~0.909 |       ~0.499 |         ~0.784 |      ~0.597 |     ~0.659 |        ~0.280 | ~31.7 min |
-| `baseline_002_yolo11s_e30_img640_b16_w4` | YOLO11s |     30 |    16 |       4 |         0.916 |      0.864 |     0.928 |        0.517 |          0.805 |       0.642 |      0.699 |         0.319 |   ~40 min |
+| Run                                           |   Model | Epochs | Batch | Workers | Val Precision | Val Recall | Val mAP50 | Val mAP50-95 | Test Precision | Test Recall | Test mAP50 | Test mAP50-95 |   Runtime |
+| --------------------------------------------- | ------: | -----: | ----: | ------: | ------------: | ---------: | --------: | -----------: | -------------: | ----------: | ---------: | ------------: | --------: |
+| `baseline_001_yolo11n_e30_img640_b16_w4`      | YOLO11n |     30 |    16 |       4 |        ~0.912 |     ~0.838 |    ~0.909 |       ~0.499 |         ~0.784 |      ~0.597 |     ~0.659 |        ~0.280 | ~31.7 min |
+| `baseline_002_yolo11s_e30_img640_b16_w4`      | YOLO11s |     30 |    16 |       4 |         0.916 |      0.864 |     0.928 |        0.517 |          0.805 |       0.642 |      0.699 |         0.319 |   ~40 min |
+| `baseline_003_yolo11s_e50_img640_b16_w4`      | YOLO11s |     50 |    16 |       4 |         0.922 |      0.862 |     0.929 |        0.526 |          0.818 |       0.638 |      0.706 |         0.309 |   ~60 min |
+| `baseline_004_aug1_yolo11s_e30_img640_b16_w4` | YOLO11s |     30 |    16 |       4 |         0.918 |      0.858 |     0.925 |        0.522 |          0.809 |       0.634 |      0.702 |         0.303 |   ~38 min |
 
 ## Interpretation
 
