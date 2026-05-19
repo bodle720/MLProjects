@@ -1,5 +1,5 @@
 # To run:
-# python training/train_yolo/model_selection/sweep_postprocess.py --experiment-name GlobalWheatHeadDetection --data-yaml training/data/yolo/global-wheat-head-2021-v1/dataset.yaml
+# python training/train_yolo/model_selection/sweep_postprocess.py --experiment-name global-wheat-head-detection --data-yaml training/data/yolo/global-wheat-head-2021-v1/dataset.yaml
 
 import argparse
 import sys

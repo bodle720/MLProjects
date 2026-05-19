@@ -163,8 +163,7 @@ def find_optional_metadata_artifacts(client: MlflowClient, run_id: str) -> dict:
 
 
 def make_run_artifact_download_dir(download_root: Path, run_name: str, run_id: str) -> Path:
-    run_slug = slugify(run_name)
-    path = download_root / f"{run_slug}_{run_id[:8]}"
+    path = download_root / f"run_{run_id[:8]}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

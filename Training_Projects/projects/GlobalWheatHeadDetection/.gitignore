@@ -132,3 +132,9 @@ events.out.tfevents*
 *.temp
 *.part
 *.log
+
+# Model-selection sweep outputs
+_model_select/
+
+# Optional: legacy/older model-selection output location
+training/train_yolo/model_selection/outputs/

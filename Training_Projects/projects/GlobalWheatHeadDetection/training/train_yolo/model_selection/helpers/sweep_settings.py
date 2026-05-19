@@ -8,10 +8,14 @@ from pathlib import Path
 # training/train_yolo/model_selection/helpers/sweep_settings.py
 MODEL_SELECTION_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_YOLO_ROOT = Path(__file__).resolve().parents[2]
+TRAINING_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
-OUTPUT_ROOT = MODEL_SELECTION_ROOT / "outputs" / "inference_config_sweeps"
-DOWNLOADED_ARTIFACTS_DIRNAME = "downloaded_artifacts"
-ULTRALYTICS_VAL_RUNS_DIRNAME = "ultralytics_val_runs"
+# Keep this short because Windows path length can break artifact downloads.
+OUTPUT_ROOT = PROJECT_ROOT / "_model_select" / "sweeps"
+
+DOWNLOADED_ARTIFACTS_DIRNAME = "artifacts"
+ULTRALYTICS_VAL_RUNS_DIRNAME = "val_runs"
 
 # ---------------------------------------------------------------------
 # MLflow
@@ -34,13 +38,17 @@ SELECTION_METRIC = "box_map50_95"
 # 512 is included as a low-cost deployment option.
 # 640 is the main training/evaluation baseline.
 # 768 is the high-detail option that may help small dense objects but is thermally heavier.
-IMG_SIZES = [512, 640, 768]
+# IMG_SIZES = [512, 640, 768]
+#
+# # NMS IoU threshold search.
+# IOU_VALUES = [0.70, 0.80, 0.85, 0.90]
+#
+# # Maximum detections per image.
+# MAX_DET_VALUES = [300, 500, 1000]
 
-# NMS IoU threshold search.
-IOU_VALUES = [0.70, 0.80, 0.85, 0.90]
-
-# Maximum detections per image.
-MAX_DET_VALUES = [300, 500, 1000]
+IMG_SIZES = [640]
+IOU_VALUES = [0.85]
+MAX_DET_VALUES = [500]
 
 # ---------------------------------------------------------------------
 # Ultralytics validation settings
