@@ -10,9 +10,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import pandas as pd
 
 import mlflow
 import mlflow.pyfunc
+from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 
 
@@ -31,7 +33,7 @@ from helpers import sweep_settings as settings
 
 SELECTION_SOURCE_FILENAME = "best_overall_val.json"
 SELECTION_NAME = "primary"
-REGISTERED_MODEL_NAME = "GlobalWheatHeadDetectorHeavy"
+REGISTERED_MODEL_NAME = "GlobalWheatHeadDetector"
 MODEL_ALIAS = "champion"
 MODEL_ARTIFACT_PATH = "final_model"
 
@@ -214,9 +216,8 @@ def build_serving_config(candidate: dict) -> dict:
         "iou": float(candidate["iou"]),
         "imgsz": int(candidate["imgsz"]),
         "max_det": int(candidate["max_det"]),
-        "device": SERVING_DEVICE,
+        "device": "0" if SERVING_DEVICE is None else str(SERVING_DEVICE),
     }
-
 
 def package_selected_checkpoint(candidate: dict, output_dir: Path) -> Path:
     source_path = Path(candidate["best_pt_local_path"])
@@ -410,11 +411,43 @@ def log_selected_model_to_mlflow(
 
         mlflow.log_artifacts(str(output_dir), artifact_path="selection_package")
 
+        input_example = pd.DataFrame(
+            [
+                {
+                    "image_path": "example.png",
+                }
+            ]
+        )
+
+        output_example = pd.DataFrame(
+            [
+                {
+                    "image_path": "example.png",
+                    "detections_json": "[]",
+                }
+            ]
+        )
+
+        params_example = {
+            "conf": serving_config["conf"],
+            "iou": serving_config["iou"],
+            "imgsz": serving_config["imgsz"],
+            "max_det": serving_config["max_det"],
+            "device": serving_config["device"],
+        }
+
+        signature = infer_signature(
+            model_input=input_example,
+            model_output=output_example,
+            params=params_example,
+        )
+
         model_info = mlflow.pyfunc.log_model(
             artifact_path=MODEL_ARTIFACT_PATH,
             python_model=UltralyticsYoloPyfuncModel(),
             artifacts={"weights": str(packaged_weights_path)},
             code_paths=[str(PYFUNC_WRAPPER_PATH)],
+            signature=signature,
             registered_model_name=REGISTERED_MODEL_NAME,
         )
 
@@ -467,6 +500,7 @@ def log_selection_params(candidate: dict, eval_config: dict, serving_config: dic
         "serving_iou": serving_config["iou"],
         "serving_imgsz": serving_config["imgsz"],
         "serving_max_det": serving_config["max_det"],
+        "serving_device": serving_config["device"],
     }
 
     mlflow.log_params({key: value for key, value in params.items() if value is not None})
@@ -575,7 +609,13 @@ def print_summary(
     print(f"Test precision:     {test_metrics.get('box_precision')}")
     print(f"Test recall:        {test_metrics.get('box_recall')}")
     print(f"Eval config:        imgsz={eval_config['imgsz']}, iou={eval_config['iou']}, max_det={eval_config['max_det']}")
-    print(f"Serving config:     conf={serving_config['conf']}, imgsz={serving_config['imgsz']}, iou={serving_config['iou']}, max_det={serving_config['max_det']}")
+    print(
+        f"Serving config:     conf={serving_config['conf']}, "
+        f"imgsz={serving_config['imgsz']}, "
+        f"iou={serving_config['iou']}, "
+        f"max_det={serving_config['max_det']}, "
+        f"device={serving_config['device']}"
+    )
     print(f"Registered model:   {mlflow_result['registered_model_name']}")
     print(f"Version:            {mlflow_result['registered_model_version']}")
     print(f"Alias:              {mlflow_result['registered_model_alias']}")

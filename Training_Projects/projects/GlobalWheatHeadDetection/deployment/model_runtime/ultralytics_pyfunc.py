@@ -1,5 +1,4 @@
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +36,9 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
             detections_json
 
         detections_json is a JSON string containing a list of detections.
+
+    In prediction: If both a DataFrame column and params provide the same key, params wins
+    because it is applied after row values.
     """
 
     PREDICT_KWARGS = ["conf", "iou", "imgsz", "max_det", "device"]
@@ -147,15 +149,11 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
             return False
 
         try:
-            if value != value:
-                return False
-        except Exception:
-            pass
+            import pandas as pd
 
-        try:
-            if hasattr(value, "isna") and value.isna():
+            if pd.isna(value):
                 return False
-        except Exception:
+        except (TypeError, ValueError):
             pass
 
         return True
