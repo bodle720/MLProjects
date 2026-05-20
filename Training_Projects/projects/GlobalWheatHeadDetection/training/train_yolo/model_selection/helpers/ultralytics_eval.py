@@ -304,9 +304,26 @@ def evaluate_candidate_grid(
     records = []
     failures = []
 
+    total_configs = (
+        len(settings.IMG_SIZES)
+        * len(settings.IOU_VALUES)
+        * len(settings.MAX_DET_VALUES)
+    )
+    config_index = 0
+
     for imgsz in settings.IMG_SIZES:
         for iou in settings.IOU_VALUES:
             for max_det in settings.MAX_DET_VALUES:
+                config_index += 1
+
+                print(
+                    "\n"
+                    f"[{candidate.get('run_name')}] "
+                    f"config {config_index}/{total_configs}: "
+                    f"imgsz={imgsz}, iou={iou}, max_det={max_det}",
+                    flush=True,
+                )
+
                 try:
                     record = evaluate_candidate_config(
                         candidate=candidate,
@@ -318,7 +335,24 @@ def evaluate_candidate_grid(
                         output_dir=output_dir,
                     )
                     records.append(record)
+
+                    print(
+                        f"[done] {candidate.get('run_name')} | "
+                        f"imgsz={imgsz}, iou={iou}, max_det={max_det} | "
+                        f"box_map50_95={record.get('box_map50_95')} | "
+                        f"inference_ms={record.get('speed_inference_ms_per_image')} | "
+                        f"pipeline_ms={record.get('speed_total_inference_pipeline_ms_per_image')}",
+                        flush=True,
+                    )
+
                 except Exception as exc:
+                    print(
+                        f"[failed] {candidate.get('run_name')} | "
+                        f"imgsz={imgsz}, iou={iou}, max_det={max_det} | "
+                        f"{repr(exc)}",
+                        flush=True,
+                    )
+
                     failures.append({
                         "run_id": candidate.get("run_id"),
                         "run_name": candidate.get("run_name"),
@@ -342,12 +376,29 @@ def evaluate_all_candidate_grids(
     all_records = []
     all_failures = []
 
-    total = len(candidates)
-    cntr = 0
-    for candidate in candidates:
-        cntr += 1
-        perc_complete = round(((cntr - 1) / total) * 100, 4)
-        print(f"===========On candidate {cntr} of {total}, completed {perc_complete}%===============")
+    total_candidates = len(candidates)
+    total_evals = (
+        total_candidates
+        * len(settings.IMG_SIZES)
+        * len(settings.IOU_VALUES)
+        * len(settings.MAX_DET_VALUES)
+    )
+
+    completed_evals = 0
+
+    for candidate_index, candidate in enumerate(candidates, start=1):
+        completed_before_candidate = completed_evals
+        percent_complete = round((completed_before_candidate / total_evals) * 100, 2)
+
+        print(
+            "\n"
+            "============================================================\n"
+            f"Candidate {candidate_index}/{total_candidates}: {candidate.get('run_name')}\n"
+            f"Completed evaluations: {completed_before_candidate}/{total_evals} "
+            f"({percent_complete}%)\n"
+            "============================================================",
+            flush=True,
+        )
 
         records, failures = evaluate_candidate_grid(
             candidate=candidate,
@@ -355,7 +406,20 @@ def evaluate_all_candidate_grids(
             split=split,
             output_dir=output_dir,
         )
+
         all_records.extend(records)
         all_failures.extend(failures)
+
+        completed_evals += len(records) + len(failures)
+        percent_complete = round((completed_evals / total_evals) * 100, 2)
+
+        print(
+            "\n"
+            f"Finished candidate {candidate_index}/{total_candidates}: "
+            f"{candidate.get('run_name')}\n"
+            f"Completed evaluations: {completed_evals}/{total_evals} "
+            f"({percent_complete}%)",
+            flush=True,
+        )
 
     return all_records, all_failures

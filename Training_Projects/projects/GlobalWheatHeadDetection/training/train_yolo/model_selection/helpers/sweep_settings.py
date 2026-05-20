@@ -58,8 +58,8 @@ CONF = 0.001
 DEVICE = 0
 
 # Batch/workers for validation. These are not training params.
-BATCH = 16
-WORKERS = 4
+BATCH = 4
+WORKERS = 0
 
 # Keep plots off for the grid sweep to avoid producing many heavy artifacts.
 PLOTS = False
