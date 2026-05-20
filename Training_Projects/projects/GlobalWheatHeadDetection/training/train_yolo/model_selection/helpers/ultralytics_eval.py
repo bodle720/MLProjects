@@ -342,7 +342,13 @@ def evaluate_all_candidate_grids(
     all_records = []
     all_failures = []
 
+    total = len(candidates)
+    cntr = 0
     for candidate in candidates:
+        cntr += 1
+        perc_complete = round(((cntr - 1) / total) * 100, 4)
+        print(f"===========On candidate {cntr} of {total}, completed {perc_complete}%===============")
+
         records, failures = evaluate_candidate_grid(
             candidate=candidate,
             data_yaml=data_yaml,

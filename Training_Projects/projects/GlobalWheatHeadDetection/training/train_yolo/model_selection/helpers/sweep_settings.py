@@ -38,17 +38,13 @@ SELECTION_METRIC = "box_map50_95"
 # 512 is included as a low-cost deployment option.
 # 640 is the main training/evaluation baseline.
 # 768 is the high-detail option that may help small dense objects but is thermally heavier.
-# IMG_SIZES = [512, 640, 768]
+IMG_SIZES = [512, 640, 768]
 #
 # # NMS IoU threshold search.
-# IOU_VALUES = [0.70, 0.80, 0.85, 0.90]
+IOU_VALUES = [0.70, 0.80, 0.85, 0.90]
 #
 # # Maximum detections per image.
-# MAX_DET_VALUES = [300, 500, 1000]
-
-IMG_SIZES = [640]
-IOU_VALUES = [0.85]
-MAX_DET_VALUES = [500]
+MAX_DET_VALUES = [300, 500, 1000]
 
 # ---------------------------------------------------------------------
 # Ultralytics validation settings
