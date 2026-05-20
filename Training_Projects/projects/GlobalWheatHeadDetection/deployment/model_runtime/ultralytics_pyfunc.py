@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,15 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
             conf
             iou
             imgsz
+            max_det
+            device
+
+    Optional pyfunc params:
+
+            conf
+            iou
+            imgsz
+            max_det
             device
 
     Output:
@@ -29,6 +39,8 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
         detections_json is a JSON string containing a list of detections.
     """
 
+    PREDICT_KWARGS = ["conf", "iou", "imgsz", "max_det", "device"]
+
     def load_context(self, context: Any) -> None:
         from ultralytics import YOLO
 
@@ -36,7 +48,6 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
         self.model = YOLO(str(weights_path))
 
     def predict(self, context, model_input, params=None):
-
         import pandas as pd
 
         rows = self._normalize_input(model_input)
@@ -50,16 +61,16 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
                 "verbose": False,
             }
 
-            for key in ["conf", "iou", "imgsz", "device"]:
+            for key in self.PREDICT_KWARGS:
                 value = row.get(key)
-                if value is not None:
-                    predict_kwargs[key] = value
+                if self._has_value(value):
+                    predict_kwargs[key] = self._coerce_predict_arg(key, value)
 
             if params:
-                for key in ["conf", "iou", "imgsz", "device"]:
+                for key in self.PREDICT_KWARGS:
                     value = params.get(key)
-                    if value is not None:
-                        predict_kwargs[key] = value
+                    if self._has_value(value):
+                        predict_kwargs[key] = self._coerce_predict_arg(key, value)
 
             results = self.model.predict(**predict_kwargs)
             detections = []
@@ -123,11 +134,54 @@ class UltralyticsYoloPyfuncModel(mlflow.pyfunc.PythonModel):
                     "conf": record.get("conf"),
                     "iou": record.get("iou"),
                     "imgsz": record.get("imgsz"),
+                    "max_det": record.get("max_det"),
                     "device": record.get("device"),
                 }
             )
 
         return normalized
+
+    @staticmethod
+    def _has_value(value: Any) -> bool:
+        if value is None:
+            return False
+
+        try:
+            if value != value:
+                return False
+        except Exception:
+            pass
+
+        try:
+            if hasattr(value, "isna") and value.isna():
+                return False
+        except Exception:
+            pass
+
+        return True
+
+    @staticmethod
+    def _coerce_predict_arg(key: str, value: Any) -> Any:
+        if key in {"conf", "iou"}:
+            return float(value)
+
+        if key in {"imgsz", "max_det"}:
+            return int(value)
+
+        if key == "device":
+            if isinstance(value, str):
+                stripped = value.strip()
+                try:
+                    return int(stripped)
+                except ValueError:
+                    return stripped
+
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+
+            return value
+
+        return value
 
     @staticmethod
     def _result_to_detections(result: Any) -> list[dict[str, Any]]:
