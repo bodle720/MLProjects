@@ -1,8 +1,21 @@
 # Global Wheat Head Detection 2021 CVDMS Bootstrapper
 
-Standalone bootstrapper for preparing the Global Wheat Head Detection 2021 dataset for CVDMS object-detection ingestion. It downloads/reuses the Zenodo `gwhd_2021.zip` archive, extracts the official split CSVs and images, uploads selected images to the private CVDMS S3 bucket, and writes CVDMS-ready `manifest.jsonl`, `manifest.csv`, `summary.json`, and `failures.json` files.
+Standalone bootstrapper for preparing the Global Wheat Head Detection 2021 dataset for CVDMS object-detection ingestion.
 
-This is intentionally dataset-specific code and is not part of the reusable `dataset_bootstrap` package. It supports one task, object detection, with one class: `wheat_head`. The upstream dataset provides official `train`, `val`, and `test` splits, so later CVDMS dataset construction should use `honor_source_splits = true`.
+This script downloads or reuses the Zenodo `gwhd_2021.zip` archive, extracts the official split CSVs and images, uploads selected images to a private CVDMS S3 bucket, and writes CVDMS-ready output files:
+
+* `manifest.jsonl`
+* `manifest.csv`
+* `summary.json`
+* `failures.json`
+
+This is intentionally dataset-specific code and is not part of the reusable `dataset_bootstrap/` package.
+
+The upstream dataset provides official `train`, `val`, and `test` splits, so later CVDMS dataset construction should use:
+
+```python
+honor_source_splits = True
+```
 
 ## Location
 
@@ -19,32 +32,36 @@ Task: object-detection
 Class: wheat_head
 Splits: train, val, test
 Images: PNG
-Boxes: [x_min,y_min,x_max,y_max]
+Boxes: [x_min, y_min, x_max, y_max]
 ```
 
-Rows with `BoxesString = no_box` are skipped by this bootstrapper because the generated CVDMS object-detection manifest rows require at least one annotation.
+Rows with `BoxesString = no_box` are skipped because CVDMS object-detection manifest rows require at least one annotation.
 
-## Example commands
+## Example Commands
 
-Run from the `cvdms_cdk` root. Omit `--max-items` to include all images available.
+Run from the `cvdms_cdk` root.
+
+### Train split
+
+Use `--max-items` for a smaller sample:
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split train --max-items 5000
 ```
 
-or, for all the images,
+Omit `--max-items` to include all available images:
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split train
 ```
 
-Similarly, for the validation and test splits, run:
+### Validation and test splits
+
+Use `--reuse-from-run-dir` to reuse the train run’s downloaded and extracted source files:
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split val --max-items 1000 --reuse-from-run-dir "C:\cvdms_files\runs\wheat_head_2021_object_detection_YYYYMMDD_HHMMSS_train"
 ```
-
-and
 
 ```bash
 python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_aws_profile --bucket your-bucket-name --split test --max-items 1000 --reuse-from-run-dir "C:\cvdms_files\runs\wheat_head_2021_object_detection_YYYYMMDD_HHMMSS_train"
@@ -52,13 +69,15 @@ python -m additional_dataset_bootstraps.wheat_head_2021.main --aws-profile your_
 
 ## Output
 
-Each run creates a timestamped local folder under `--output-root`, defaulting to:
+Each run creates a timestamped local folder under `--output-root`.
+
+Default output root:
 
 ```text
 C:\cvdms_files\runs\
 ```
 
-The run folder contains:
+Each run folder contains:
 
 ```text
 _work/downloads/
@@ -75,7 +94,7 @@ Images are uploaded to S3 under:
 s3://<bucket>/<s3-prefix>/global_wheat_head_2021/object-detection/images/<split>/<image_name>.png
 ```
 
-Use `--reuse-from-run-dir` to reuse a previous run’s downloaded/extracted source files while still creating fresh manifests and S3 uploads for the current run.
+Use `--reuse-from-run-dir` to reuse a previous run’s downloaded and extracted source files while still creating fresh manifests and S3 uploads for the current split.
 
 ## Attribution
 

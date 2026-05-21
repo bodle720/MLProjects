@@ -25,7 +25,7 @@ Image ingestion workflows write canonical imagery and label artifacts to the **f
 and label metadata is stored in **Iceberg tables** located in the Iceberg storage bucket and
 registered in the Glue Data Catalog. Upload events are generated via S3 notifications when a
 job manifest is uploaded and are pushed to the `UploadEventsQueue`, which later triggers the
-upload workflow. Failures from asynchronous services are routed to a **global dead-letter queue
+upload workflow. Failures from asynchronous services are routed to a workflow **dead-letter queue
 (DLQ)** that is consumed by a cleanup Lambda responsible for releasing locks, cleaning temporary
 files, and restoring system consistency.
 
@@ -44,15 +44,15 @@ datasets_bucket
 └── datasets/
     └── <dataset_id>/
         ├── v1/
-        │   └── manifest.jsonl
+        │   └── manifests/
         └── v2/
-            └── manifest.jsonl
+            └── manifests/
 ```
 
 For example:
 
 ```
-s3://<cvdms-datasets-bucket-name>/datasets/wildlife_detector/v1/manifest.jsonl
+s3://<cvdms-datasets-bucket-name>/datasets/wildlife_detector/v1/manifests/train.jsonl
 ```
 
 Metadata about datasets and their versions is stored in DynamoDB, allowing the system to track the latest version
@@ -308,7 +308,7 @@ Cleanup
 ```
 
 Each stage performs a specific responsibility in the dataset ingestion process.
-The `upload_staging` table acts as an immutable audit log for every
+The `upload_staging` table acts as an audit log for every
 image processed during the upload workflow. Each stage updates
 records within this table, allowing the pipeline to verify ingestion
 completeness and maintain traceability of every uploaded image and
@@ -633,3 +633,173 @@ These modules provide utilities for interacting with:
 
 Centralizing this logic keeps ingestion code consistent
 across workers and Lambdas.
+
+## <u>Dataset Stack</u>
+
+### Dataset Stack Architecture
+
+The **Dataset Stack** implements the workflow for creating, updating, deleting, and visualizing versioned datasets after imagery and labels have already been registered by the upload workflow.
+
+Where the Upload Stack focuses on ingesting raw imagery and labels into the canonical catalog, the Dataset Stack focuses on selecting from that catalog and producing reproducible dataset versions for downstream training.
+
+The stack supports three main dataset operations:
+
+* `create_dataset`
+* `update_dataset`
+* `delete_dataset`
+
+It also runs visualization generation for create and update operations so dataset versions can be inspected in the local Streamlit visualization tool.
+
+### High-Level Dataset Pipeline
+
+Dataset operation requests are submitted through the programmatic API and routed through the dataset workflow.
+
+```text
+Dataset API request
+        ↓
+Dataset submission event
+        ↓
+DatasetEventsQueue
+        ↓
+Kickoff Lambda
+        ↓
+Dataset Step Functions State Machine
+```
+
+The state machine routes work by `task_type`.
+
+```text
+create_dataset
+        ↓
+Create Dataset Lambda
+        ↓
+Generate Visualization Lambda
+        ↓
+Cleanup Lambda
+
+update_dataset
+        ↓
+Update Dataset Lambda
+        ↓
+Generate Visualization Lambda
+        ↓
+Cleanup Lambda
+
+delete_dataset
+        ↓
+Delete Dataset Lambda
+        ↓
+Cleanup Lambda
+```
+
+Unsupported task types are routed to a Step Functions failure state.
+
+### Dataset Operations
+
+#### Create Dataset
+
+The create operation builds a new dataset from canonical imagery and label tables.
+
+Responsibilities include:
+
+* validating the dataset request
+* applying the selection configuration
+* selecting matching images and labels from Iceberg tables
+* generating split assignments
+* writing task-specific dataset membership rows
+* creating dataset artifacts in the datasets bucket
+* updating DynamoDB dataset metadata
+
+Create operations produce a new dataset version.
+
+#### Update Dataset
+
+The update operation creates a new immutable version of an existing dataset.
+
+Responsibilities include:
+
+* loading the existing dataset context
+* applying the requested update operation
+* preserving or rebalancing splits depending on the request
+* writing new membership rows for the new version
+* writing updated dataset artifacts
+* updating dataset version metadata
+
+The previous dataset versions remain available for reproducibility.
+
+#### Delete Dataset
+
+The delete operation removes dataset metadata and dataset artifacts for the requested dataset.
+
+Unlike create and update operations, delete operations do not run visualization generation. After the delete task completes, the workflow proceeds directly to cleanup.
+
+### Visualization Generation
+
+For create and update operations, the Dataset Stack runs a visualization generation task before cleanup.
+
+This task writes dataset-level summary artifacts used by the Streamlit visualization tool, including split distributions, class distributions, image-quality summaries, and related dataset inspection outputs.
+
+These artifacts allow users to inspect a dataset version before using it for model training.
+
+### Cleanup Step
+
+The cleanup task finalizes the dataset workflow.
+
+Responsibilities include:
+
+* releasing workflow locks
+* updating job status
+* cleaning temporary dataset operation files
+* finalizing workflow metadata
+
+Temporary dataset operation files are stored under:
+
+```text
+temp/dataset-ops/
+```
+
+### Dataset DLQ Handling
+
+The Dataset Stack uses a dataset-specific DLQ processor for workflow failures.
+
+Create, update, and visualization failures use rollback behavior intended to clean up incomplete new dataset versions. Delete failures use delete-specific cleanup behavior.
+
+The workflow attaches DLQ context including:
+
+* `job_id`
+* `user`
+* `event_type`
+* `task_type`
+* `dataset_context`
+* failed stage
+* DLQ policy
+* serialized error information
+
+This gives the DLQ processor enough context to restore consistency after failed dataset operations.
+
+### Shared Resources and Permissions
+
+Dataset workflow Lambdas receive access to the shared CVDMS resources needed for dataset construction and cleanup, including:
+
+* `JobTable`
+* `DatasetsTable`
+* `DatasetVersionsTable`
+* `LockTable`
+* file bucket
+* datasets bucket
+* Iceberg bucket
+* Athena workgroup
+* Glue catalog tables
+* Firehose logging stream
+
+The Dataset Stack also creates its own Lambda layer from `workers/common`, allowing dataset Lambdas to reuse the same shared helpers used elsewhere in the system.
+
+### Failure Testing Parameter
+
+The Dataset Stack creates an SSM parameter used to test dataset workflow failure handling:
+
+```text
+/cvdms/<app_name>/dataset/testing/fail_control
+```
+
+This parameter can be manually updated during development to trigger controlled failures and validate DLQ behavior.

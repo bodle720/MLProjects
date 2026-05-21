@@ -1,81 +1,135 @@
-# CVDMS Introduction
+# Computer Vision Dataset Management System
 
-CVDMS (Computer Vision Data Management System) provides a **durable, canonical
-data management layer for imagery and labels** used in machine learning
-workflows. While platforms such as Amazon SageMaker excel at labeling orchestration
-and model training, they generally do not provide a durable system for
-managing image assets, labels, and datasets consistently across projects,
-teams, and time.
+CVDMS is an AWS CDK-based system for managing computer vision imagery, labels, and reproducible dataset versions.
 
-CVDMS fills that gap by treating imagery and labels as **first-class, canonical
-data assets**. It enforces global deduplication, stable canonical identities
-for images, and reproducible dataset definitions so that teams can reliably
-track which data exists, how it has been labeled, and where it has been used.
-This ensures datasets can be regenerated exactly, labels from multiple tools
-can be unified under a consistent schema, and training pipelines remain portable
-across environments.
+It provides a durable, canonical data layer beneath model training workflows. Images and labels are ingested once, normalized into consistent internal schemas, deduplicated, registered as canonical assets, and then reused to create versioned datasets for training and evaluation.
 
-Beyond storage and lineage, CVDMS also emphasizes **dataset understanding and
-transparency**. By computing dataset-level statistics, derived metadata, and visualization-friendly summaries, CVDMS
-enables practitioners to explore and understand their training data more effectively. This improves
-**data quality awareness, debugging, and model performance explainability**,
-allowing teams to identify imbalance, distribution issues, or labeling
-inconsistencies before they impact training results.
+The goal is to make computer vision data more reproducible, inspectable, and portable across projects. CVDMS tracks what data exists, how it has been labeled, which dataset versions were created from it, and where the resulting train/validation/test artifacts are stored.
 
-In short, CVDMS complements tools like SageMaker by providing the **data management
-foundation beneath model training systems**—ensuring image assets are canonical,
-datasets are reproducible, and the structure and characteristics of training data
-remain understandable and auditable over time.
+CVDMS supports:
 
-## Uploading Images and Adding Labels
+* single-label classification
+* multi-label classification
+* object detection
+* semantic segmentation
+* instance segmentation
 
-The Upload flow combines:
+## Main Workflows
 
-- Step Functions orchestration
-- AWS Batch workers
-- Lambda ingestion stages
-- Iceberg-backed tables
-- shared infrastructure constructs
+### Upload Workflow
 
+The upload workflow ingests imagery and labels into the canonical CVDMS catalog.
 
-to create a pipeline that is:
+It validates manifests, normalizes supported label formats, computes image statistics, detects duplicate imagery, registers canonical images and labels, and writes structured metadata to Iceberg-backed tables.
 
-- deterministic and idempotent
-- atomic
-- race-safe
-- scalable
+See:
 
+* [`README_upload.md`](README_upload.md)
+* [`sample_walkthrough_upload.ipynb`](sample_walkthrough_upload.ipynb)
 
-This architecture allows CVDMS to perform **large-scale
-dataset ingestion while maintaining strict guarantees about
-data integrity, duplicate detection, and label enrichment.**
-See the documentation section below for a notebook demonstrating
-how to upload images and labels using the CVDMS upload client.
-The sample CSV and JSONL files in the `samples/` folder may contain
-image label pairs with no labels or duplicate entries, simply for testing 
-the capability of the code to detect such cases.
+### Dataset Operations
 
-## Data Sources
+Dataset operations create reproducible dataset versions from registered canonical imagery and labels.
 
-This repository uses multiple datasets for bootstrap / demonstration purposes.
+The dataset API supports creating datasets, updating datasets through add/remove operations, retrieving dataset metadata, preserving source splits when needed, and deleting datasets.
 
-### **EuroSAT** remote sensing dataset
-- **Citation**  
-Helber, P., Bischke, B., Dengel, A., & Borth, D. (2018). *EuroSAT: A Novel Dataset and Deep Learning Benchmark for Land Use and Land Cover Classification* (Version v2) [Dataset]. Zenodo. https://doi.org/10.5281/zenodo.7711810
+See:
 
-- **License**  
-The Zenodo dataset record lists the dataset under the MIT License.  
-Please also review the Copernicus Sentinel Data Terms and Conditions noted by the dataset authors.
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7711810.svg)](https://doi.org/10.5281/zenodo.7711810)
+* [`README_datasets.md`](README_datasets.md)
+* [`sample_walkthrough_datasets.ipynb`](sample_walkthrough_datasets.ipynb)
 
+### Dataset Visualization
+
+The visualization tool is a local Streamlit app for inspecting generated dataset versions.
+
+It helps review class distributions, split balance, image-quality buckets, and other dataset summary artifacts before model training.
+
+See:
+
+* [`visualization_tool/README.md`](visualization_tool/README.md)
+
+## Infrastructure
+
+The CDK app is organized into separate stacks for logging, storage, upload processing, and dataset operations.
+
+See:
+
+* [`README_stacks.md`](README_stacks.md)
+
+## Key Files and Folders
+
+### `app.py`
+
+Main CDK app entry point. It wires together the logging, storage, upload, and dataset stacks.
+
+Deployment is done in two stages:
+
+```bash
+cdk deploy cvdmsv1-LoggingStack cvdmsv1-StorageStack --profile <profile-name>
+cdk deploy cvdmsv1-UploadStack cvdmsv1-DatasetStack --profile <profile-name>
+```
+
+### `config.py`
+
+Infrastructure configuration for Lambda memory, timeouts, AWS Batch settings, and related CDK deployment parameters.
+
+### `cvdms_platform/`
+
+Programmatic API for interacting with deployed CVDMS infrastructure.
+
+Main API entry point:
+
+* [`cvdms_platform/cvdms.py`](cvdms_platform/cvdms.py)
+
+This provides the `CvdmsApp` interface used by the sample notebooks.
+
+### `dataset_bootstrap/`
+
+Generic sample-data bootstrap utilities for downloading selected datasets and creating manifests across supported task types.
+
+Main entry point:
+
+* [`dataset_bootstrap/main.py`](dataset_bootstrap/main.py)
+
+### `additional_dataset_bootstraps/`
+
+Dataset-specific bootstrap utilities that extend the generic bootstrap workflow.
+
+Current example:
+
+* [`additional_dataset_bootstraps/wheat_head_2021/README.md`](additional_dataset_bootstraps/wheat_head_2021/README.md)
+
+### `stacks/`
+
+CDK stack code and helper constructs used to define the AWS infrastructure.
+
+### `workers/`
+
+Lambda, AWS Batch, and shared helper code used by the upload and dataset workflows.
 
 ## Documentation
 
-- **Infrastructure Stacks** – architecture and AWS resources  
-  - [README_stacks.md](README_stacks.md)
-- **Upload Workflow** – manifest formats and ingestion pipeline  
-  - [README_upload.md](README_upload.md)
-- **Upload Walkthrough for Upload** – sample notebook to show the upload steps 
-  - [sample_walkthrough_upload.ipynb](sample_walkthrough_upload.ipynb)
-- **Upload Walkthrough for Datasets** – sample notebook to show the various dataset operations 
-  - [sample_walkthrough_datasets.ipynb](sample_walkthrough_datasets.ipynb)
+* [`README_upload.md`](README_upload.md) — upload formats, manifest normalization, and upload workflow
+* [`README_datasets.md`](README_datasets.md) — dataset API, dataset versioning, split logic, and dataset artifacts
+* [`README_stacks.md`](README_stacks.md) — AWS infrastructure stacks and workflow architecture
+* [`visualization_tool/README.md`](visualization_tool/README.md) — local dataset visualization app
+* [`additional_dataset_bootstraps/wheat_head_2021/README.md`](additional_dataset_bootstraps/wheat_head_2021/README.md) — Global Wheat Head Detection bootstrap utility
+
+## Example Notebooks
+
+* [`sample_walkthrough_upload.ipynb`](sample_walkthrough_upload.ipynb)
+  Demonstrates how to upload a prepared manifest into CVDMS.
+
+* [`sample_walkthrough_datasets.ipynb`](sample_walkthrough_datasets.ipynb)
+  Demonstrates dataset operations such as create, update, get, and delete.
+
+## Future Improvements
+
+Possible future improvements include:
+
+* Better duplicate detection using perceptual hashing or image-similarity methods.
+* More robust duplicate handling across different file extensions, compression levels, resizing, and slight pixel changes.
+* Additional dataset bootstrap utilities for public computer vision datasets.
+* Expanded visualization summaries for dataset drift, class imbalance, and image-quality differences.
+* Additional export helpers for model-specific training formats.
+

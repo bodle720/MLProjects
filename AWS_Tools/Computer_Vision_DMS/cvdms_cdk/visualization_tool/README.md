@@ -10,7 +10,7 @@ The viewer expects CVDMS dataset artifacts in the datasets bucket under:
 
 ```text
 datasets/<dataset_id>/v<version>/visualization/
-````
+```
 
 For example:
 

@@ -1,44 +1,45 @@
-# AWS Python Tutorial Suite
+# AWS Tools
 
-This directory contains Python applications leveraging various AWS services. Some serve both as step-by-step tutorials and as frameworks you can adapt for your own needs—swap in your own logic, buckets, and VPC settings in place of the existing examples.
+This folder contains AWS-focused projects and reusable cloud engineering examples.
+
+The flagship project in this folder is the **Computer Vision Dataset Management System (CVDMS)**, an AWS CDK-based system for ingesting, validating, organizing, versioning, and exporting computer vision datasets.
 
 ## Projects
 
-1. **Running_Workers_on_EC2_using_ECR**  
-   A comprehensive walkthrough demonstrating how to:
-   - Build a Docker image containing a Python worker.  
-   - Push that image to Amazon ECR.  
-   - Launch EC2 instances with a UserData bootstrap script.  
-   - Use AWS Systems Manager (SSM) to pull and run the Docker container on each instance.  
-   - Save each worker’s output as a Parquet file under `ec2_results/output_{input_value}.parquet` in S3.  
-   - Terminate the EC2 instances automatically once tasks complete.  
+### Computer Vision Dataset Management System
 
-   Use this code as a template for running containerized workloads on EC2 without manual SSH or SCP.
+[`Computer_Vision_DMS/cvdms_cdk/`](Computer_Vision_DMS/cvdms_cdk/)
 
-2. **S3_Functionalities**  
-   A focused collection of scripts showing how to:
-   - Upload and download various object types (JSON, CSV, Parquet, etc.) to and from Amazon S3.  
-   - Normalize Python dictionaries into pandas DataFrames.  
-   - Write DataFrames to Parquet and store them in S3.  
-   - Retrieve objects and load them back into your Python environment.  
+CVDMS is the largest AWS project in this folder. It uses AWS CDK, Step Functions, Lambda, AWS Batch, S3, DynamoDB, Glue, Athena, and Apache Iceberg-backed dataset tables to manage computer vision datasets.
 
-   Includes reusable helper functions (`helpers.py`) for common S3 operations.
+The system supports dataset ingestion, validation, deduplication, registration, dataset versioning, split generation, and export of train/validation/test artifacts for downstream model training.
 
-3. **Parallel_Computing_with_Batch**  
-   A scalable template for parallel workloads using **AWS Batch**, originally built for stock feature generation but easily adaptable to other domains.
-   - Programmatically configure **AWS Batch** via `boto3`, including Job Queues, Job Definitions, and Compute Environments.  
-   - Launch thousands of jobs in parallel to process financial data or any other repeatable task.  
-   - Read and write data to **Amazon S3** for downstream model training, backtesting, or archival.  
-   - Monitor and analyze worker performance—track **CPU and memory usage** to optimize job definitions and compute resource allocation.
-  
-4. **Lambda_Functions_for_Image_Processing**  
-   Two examples of constructing AWS Lambda functions for image processing tasks like normalization and contrast enhancement
-   - Walkthrough of a ZIP-based Lambda (`NormalizeLambda`) using a modular dependency layer with NumPy and Pillow
-   - Walkthrough of a Docker-based Lambda (`ContrastEnhanceClaheLambda`) using scikit-image for CLAHE contrast enhancement
-   - Covers the full lifecycle: packaging, deployment, invocation, and result inspection
-   - Applies each Lambda to a sample image (`curious_cat.jpg`) and saves outputs to S3
-   - Visualizes pixel intensity histograms before and after processing for auditability
+CVDMS provides the dataset artifacts used by the training projects in [`../Training_Projects/`](../Training_Projects/).
 
+### Lambda Functions for Image Processing
 
+[`Lambda_Functions_for_Image_Processing/`](Lambda_Functions_for_Image_Processing/)
 
+Examples of AWS Lambda functions for image processing workflows, including ZIP-based Lambda packaging, Docker-based Lambda packaging, dependency layers, S3 input/output, and image-processing result inspection.
 
+### Parallel Computing with AWS Batch
+
+[`Parallel_Computing_with_Batch/`](Parallel_Computing_with_Batch/)
+
+A template for launching parallel workloads with AWS Batch. The project demonstrates job queues, job definitions, compute environments, S3-based inputs/outputs, and worker performance monitoring.
+
+### Running Workers on EC2 using ECR
+
+[`Running_Workers_on_EC2_using_ECR/`](Running_Workers_on_EC2_using_ECR/)
+
+A workflow for building Dockerized Python workers, pushing them to Amazon ECR, launching EC2 instances, running containers through UserData and SSM, writing outputs to S3, and terminating instances automatically.
+
+### S3 Functionalities
+
+[`S3_Functionalities/`](S3_Functionalities/)
+
+A collection of reusable S3 examples for uploading, downloading, reading, and writing objects such as JSON, CSV, and Parquet files from Python.
+
+## Notes
+
+Each project folder contains its own README with more detailed setup notes, implementation details, and usage examples.
