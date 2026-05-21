@@ -32,15 +32,15 @@ Tracks the YOLO training workflow, speed tests, batch-size and dataloader-worker
 
 ### Results
 
-The best model is selected using validation mAP50-95 after sweeping inference settings such as image size, NMS IoU, and maximum detections. Final test evaluation is run only after validation-based selection.
+See here: [Results](docs/README_results.md)
 
-See [`docs/README_results.md`](docs/README_results.md)
+The best model is selected using validation mAP50-95 after sweeping inference settings such as image size, NMS IoU, and maximum detections. Final test evaluation is run only after validation-based selection.
 
 ### Deployment
 
-See here: [FastAPI / Docker Deployment](docs/README_deployment.md)
+See here: [FastAPI / Docker Deployment](deployment/README.md)
 
-This explains how the selected MLflow champion model is loaded, served through FastAPI, Dockerized, and tested with example inference requests.
+Documents the containerized inference service for the selected MLflow `champion` model. The deployment app loads `models:/GlobalWheatHeadDetector@champion`, serves image-upload predictions through FastAPI, returns structured wheat-head detections, and reports request-level latency metrics.
 
 ## Repository Layout
 
@@ -49,9 +49,11 @@ GlobalWheatHeadDetection/
 ├── README.md
 ├── requirements.txt
 ├── deployment/
+│   └── README.md
 ├── docs/
 │   ├── README_initial_dataset.md
-│   └── README_training_experiments.md
+│   ├── README_training_experiments.md
+│   └── README_results.md
 └── training/
     ├── config.example.yaml
     ├── data/
@@ -76,6 +78,8 @@ MLflow/TensorBoard tracking
 best-checkpoint evaluation
         ↓
 model selection
+        ↓
+MLflow champion registration
         ↓
 FastAPI/Docker inference service
 ```
