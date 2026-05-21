@@ -1,5 +1,18 @@
 # Computer Vision Dataset Management System
 
+```mermaid
+flowchart LR
+    Raw["Raw imagery + labels<br/>CSV / JSONL / manifests"] --> Upload["Upload workflow<br/>validate, dedupe, register"]
+    Upload --> Catalog["Canonical CVDMS catalog<br/>images, labels, metadata"]
+    Catalog --> DatasetOps["Dataset operations<br/>create, update, delete, version"]
+    DatasetOps --> Artifacts["Dataset artifacts<br/>train / val / test manifests<br/>metadata + visualization JSON"]
+    Artifacts --> Viewer["Streamlit dataset viewer<br/>class balance, split drift,<br/>quality buckets"]
+    Artifacts --> Training["Training projects<br/>PyTorch / YOLO / MLflow"]
+
+    Upload -. failures .-> DLQ["Workflow DLQ<br/>cleanup, unlock,<br/>mark failed"]
+    DatasetOps -. failures .-> DLQ
+```
+
 CVDMS is an AWS CDK-based system for managing computer vision imagery, labels, and reproducible dataset versions.
 
 It provides a durable, canonical data layer beneath model training workflows. Images and labels are ingested once, normalized into consistent internal schemas, deduplicated, registered as canonical assets, and then reused to create versioned datasets for training and evaluation.
