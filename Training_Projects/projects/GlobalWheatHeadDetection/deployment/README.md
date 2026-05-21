@@ -4,6 +4,37 @@ This folder contains the FastAPI serving app and Docker deployment files for the
 
 The app loads the selected MLflow pyfunc model from the MLflow Model Registry and serves wheat-head detections over HTTP.
 
+```mermaid
+flowchart TD
+    A["curl.exe / API client<br/>POST http://127.0.0.1:8000/predict"] --> B["Laptop host port 8000"]
+    B --> C["Docker port mapping<br/>8000 → 8000"]
+
+    subgraph D["Docker container"]
+        E["Uvicorn/FastAPI<br/>listens on container port 8000"]
+        F["Prediction service<br/>image validation + temp file"]
+        G["Loaded YOLO MLflow pyfunc model<br/>runs inference in memory"]
+
+        E --> F --> G --> F --> E
+    end
+
+    C --> E
+
+    subgraph H["Host machine MLflow server"]
+        I["MLflow server<br/>http://host.docker.internal:5000"]
+        J["Model Registry<br/>GlobalWheatHeadDetector@champion"]
+        K["Local tracking/artifact storage<br/>mlflow.db + mlartifacts/"]
+        I --> J
+        I --> K
+    end
+
+    E -. "app startup:<br/>load champion model" .-> I
+    I -. "model artifact" .-> E
+
+    E --> L["JSON response<br/>detections + latency metrics"]
+    L --> A
+
+```
+
 Default model URI:
 
 ```text
@@ -386,3 +417,12 @@ app/services/prediction_service.py
 The Docker image does not contain the trained YOLO weights directly. It loads the registered champion model from MLflow at startup.
 
 Uploaded images are written to a temporary file because the MLflow pyfunc wrapper expects an `image_path` input column. The temporary file is deleted after each request.
+
+## Architecture Description
+
+The FastAPI app runs inside the Docker container, where Uvicorn starts the application and listens on container port `8000` (see Dockerfile). The Docker run command maps the laptop’s host port `8000` to the container’s port `8000` with `-p 8000:8000`. When a client sends a request to `http://127.0.0.1:8000/predict`, the request first reaches the laptop’s local port `8000`, then Docker forwards it into the container, where FastAPI receives the upload and runs the prediction workflow.
+
+The response follows the same path in reverse. FastAPI returns a JSON response containing detections, inference settings, and latency measurements from inside the container. Docker forwards that response back from the container port to the laptop’s host port, and the `curl` client receives it as the HTTP response. In this local setup, the public-facing API entry point is therefore `http://127.0.0.1:8000`, even though the actual FastAPI process is running inside the Docker container.
+
+The MLflow server is a separate process running on the laptop at port `5000`. The container reaches it through `http://host.docker.internal:5000`, which is Docker Desktop’s special hostname for “the host machine from inside the container.” At application startup, FastAPI uses that MLflow URI to resolve and load `models:/GlobalWheatHeadDetector@champion`; after the model is loaded into memory, prediction requests are handled by the FastAPI container. In this local deployment, port `8000` is the inference API and port `5000` is the MLflow tracking/model registry server.
+
