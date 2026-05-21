@@ -4,6 +4,8 @@ This document tracks the YOLO training experiments for the Global Wheat Head Det
 
 The current training pipeline uses Ultralytics YOLO with MLflow and TensorBoard logging. Each run saves standard YOLO outputs, `best.pt`, `last.pt`, a config snapshot, a training summary, and explicit post-training evaluations of the best checkpoint on both validation and test splits.
 
+For final model-selection results, held-out test metrics, and deployment configuration, see [Final Results](README_results.md).
+
 ## Local Training Context
 
 Training is currently being run on a local laptop GPU:
