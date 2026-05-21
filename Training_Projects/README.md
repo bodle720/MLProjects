@@ -8,7 +8,7 @@ The projects focus on practical model training workflows: loading versioned data
 
 ### Single-Label EuroSAT
 
-[`projects/SingleLabel_EuroSAT/`](projects/SingleLabel_EuroSAT/)
+[`SingleLabel_EuroSAT`](projects/SingleLabel_EuroSAT/)
 
 A single-label image classification project using EuroSAT-style land-cover data exported from CVDMS.
 
@@ -23,7 +23,7 @@ This project demonstrates:
 
 ### Multi-Label BigEarthNet v2
 
-[`projects/MultiLabel_BigEarthNetv2/`](projects/MultiLabel_BigEarthNetv2/)
+[`MultiLabel_BigEarthNetv2`](projects/MultiLabel_BigEarthNetv2/)
 
 A multi-label image classification project using BigEarthNet v2-style land-cover data exported from CVDMS.
 
@@ -38,7 +38,7 @@ This project demonstrates:
 
 ### Global Wheat Head Detection
 
-[`projects/GlobalWheatHeadDetection/`](projects/GlobalWheatHeadDetection/)
+[`GlobalWheatHeadDetection`](projects/GlobalWheatHeadDetection/)
 
 An object detection project using Global Wheat Head Detection 2021 data exported from CVDMS.
 
@@ -56,7 +56,7 @@ This project demonstrates:
 
 ### CVDMS Training Common
 
-[`cvdms_training_common/`](cvdms_training_common/)
+[`cvdms_training_common`](cvdms_training_common/)
 
 Shared Python utilities used across the training projects.
 
@@ -75,6 +75,6 @@ The package is intended to be installed locally in editable mode by individual p
 
 These projects are designed to consume dataset artifacts produced by the AWS-based Computer Vision Dataset Management System:
 
-[`../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/`](../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/)
+[`Computer_Vision_DMS`](../AWS_Tools/Computer_Vision_DMS/cvdms_cdk/)
 
 CVDMS handles dataset ingestion, validation, versioning, split creation, and manifest export. The training projects then use those exported artifacts for reproducible model training and evaluation.
