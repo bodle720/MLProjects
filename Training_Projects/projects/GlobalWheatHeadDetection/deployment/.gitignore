@@ -1,0 +1,60 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment/config files
+.env
+.env.*
+!.env.example
+
+# Runtime temp uploads
+app/tmp/
+tmp/
+temp/
+
+# Runtime logs and inference traces
+app/logs/*
+logs/*
+*.log
+*.jsonl
+!app/logs/.gitkeep
+!logs/.gitkeep
+
+# Local MLflow artifacts or tracking outputs
+mlruns/
+mlartifacts/
+
+# Model artifacts should come from MLflow registry, not Git
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+*.mlmodel
+weights/
+models/
+
+# Docker/local build artifacts
+.docker/
+docker-compose.override.yml
+
+# Local copied training folders should not live in deployment
+training/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

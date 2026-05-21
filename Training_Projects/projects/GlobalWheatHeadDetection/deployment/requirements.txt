@@ -1,0 +1,15 @@
+# API server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Model loading and inference
+mlflow
+ultralytics
+torch
+torchvision
+
+# Data/model interface
+pandas
+pillow
+pydantic
