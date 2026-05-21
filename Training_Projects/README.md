@@ -4,6 +4,12 @@ This folder contains computer vision training projects built around exported CVD
 
 The projects focus on practical model training workflows: loading versioned dataset manifests, training models, logging metrics, generating diagnostics, selecting models, and preparing trained models for deployment.
 
+## Best Starting Points
+
+* [`GlobalWheatHeadDetection`](projects/GlobalWheatHeadDetection/) — object detection, YOLO training, MLflow tracking, model selection, and deployment-oriented workflow.
+* [`MultiLabel_BigEarthNetv2`](projects/MultiLabel_BigEarthNetv2/) — multi-label classification, threshold tuning, mAP, and diagnostic visualizations.
+* [`cvdms_training_common`](cvdms_training_common/) — reusable utilities shared across the training projects.
+
 ## Projects
 
 ### Single-Label EuroSAT
@@ -44,13 +50,11 @@ An object detection project using Global Wheat Head Detection 2021 data exported
 
 This project demonstrates:
 
-* CVDMS object-detection dataset exports
-* Dataset caching and YOLO-format conversion
 * YOLO training with Ultralytics
 * MLflow experiment tracking
 * Validation-based model selection
 * Inference-configuration sweeps
-* Deployment-oriented model packaging and planning
+* Deployment-oriented model packaging
 
 ## Shared Utilities
 

@@ -12,7 +12,7 @@ The goal is to build a complete train-to-deploy object detection workflow:
 - train and compare Ultralytics YOLO models
 - track experiments with MLflow and TensorBoard
 - select a best model checkpoint for deployment
-- serve the selected model through a future FastAPI/Docker inference app
+- serve the selected model through a FastAPI/Docker inference app
 
 ## Documentation
 
@@ -29,6 +29,18 @@ Explains the dataset source, CVDMS dataset creation process, train/validation/te
 See here: [YOLO Training Experiments](docs/README_training_experiments.md)
 
 Tracks the YOLO training workflow, speed tests, batch-size and dataloader-worker decisions, baseline runs, model-size comparisons, validation/test performance, and runtime tradeoffs.
+
+### Results
+
+The best model is selected using validation mAP50-95 after sweeping inference settings such as image size, NMS IoU, and maximum detections. Final test evaluation is run only after validation-based selection.
+
+See [`docs/README_results.md`](docs/README_results.md)
+
+### Deployment
+
+See here: [FastAPI / Docker Deployment](docs/README_deployment.md)
+
+This explains how the selected MLflow champion model is loaded, served through FastAPI, Dockerized, and tested with example inference requests.
 
 ## Repository Layout
 
@@ -68,7 +80,7 @@ model selection
 FastAPI/Docker inference service
 ```
 
-## Lower Level Workflow
+## Reproducible Workflow
 
 This project follows a staged workflow from CVDMS dataset artifacts to a YOLO-formatted dataset, model training, validation-time model selection, and final MLflow registration. Some commands require project-specific arguments or configuration values; see the corresponding script files and `config.example.yaml` for details.
 
