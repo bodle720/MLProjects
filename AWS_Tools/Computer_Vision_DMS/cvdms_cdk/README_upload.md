@@ -37,6 +37,16 @@ The upload client will:
 
 Example input files are available in the project’s `_samples` directory.
 
+```mermaid
+flowchart LR
+    CSV["CSV input<br/>task-specific rows"] --> Normalize["Upload client<br/>validate + normalize"]
+    JSONL["JSONL / NDJSON / manifest<br/>Ground Truth-style records"] --> Normalize
+
+    Normalize --> Internal["cvdms.manifest.v1<br/>standardized records"]
+    Internal --> Upload["Upload to S3<br/>job.json + manifest"]
+    Upload --> Workflow["Upload workflow kickoff"]
+```
+
 ## Object Detection Input
 
 Object detection uploads may be provided as CSV or JSONL.

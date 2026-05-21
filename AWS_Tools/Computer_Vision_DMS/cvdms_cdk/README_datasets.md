@@ -62,6 +62,34 @@ s3://<file-bucket>/temp/dataset-ops/<job_id>/submission.json
 
 Dataset operations use a global workflow lock so only one dataset operation runs at a time. The lock holder is also used as the `job_id`.
 
+### Dataset Operation Summary
+
+```mermaid
+flowchart LR
+    API["CvdmsApp<br/>dataset API"] --> Get["get_dataset(...)<br/>sync metadata read"]
+    API --> Create["submit_create_dataset(...)<br/>async create v1"]
+    API --> Update["submit_update_dataset(...)<br/>async create vN+1"]
+    API --> Delete["submit_delete_dataset_all_versions(...)<br/>async delete all versions"]
+
+    Get --> DDBRead["DynamoDB<br/>dataset row + latest version row"]
+
+    Create --> Submit["submission.json<br/>temp/dataset-ops/job_id/"]
+    Update --> Submit
+    Delete --> Submit
+
+    Submit --> Queue["DatasetEventsQueue"]
+    Queue --> Workflow["Dataset Step Functions workflow"]
+
+    Workflow --> CreateUpdate["Create / update path<br/>resolve candidates<br/>assign or preserve splits<br/>write new version"]
+    Workflow --> DeletePath["Delete path<br/>remove dataset metadata<br/>and artifacts"]
+
+    CreateUpdate --> Membership["Iceberg membership tables<br/>versioned rows"]
+    CreateUpdate --> Artifacts["S3 dataset artifacts<br/>manifests, metadata,<br/>visualization JSON"]
+    CreateUpdate --> DDBWrite["DynamoDB metadata<br/>dataset + version records"]
+
+    DeletePath --> Cleanup["Cleanup<br/>release lock<br/>mark job complete"]
+```
+
 ## High-Level Architecture
 
 Dataset state is stored across three layers.

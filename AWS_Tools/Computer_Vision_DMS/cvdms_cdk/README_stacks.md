@@ -1,3 +1,31 @@
+## Stack Overview
+
+```mermaid
+flowchart LR
+    Logging["Logging Stack<br/>Firehose<br/>transform Lambda<br/>S3 log storage<br/>Glue + Athena logs"]
+
+    Storage["Storage Stack<br/>S3 buckets<br/>DynamoDB tables<br/>SQS queues<br/>Glue + Athena<br/>Iceberg tables"]
+
+    Upload["Upload Stack<br/>UploadEventsQueue consumer<br/>Step Functions<br/>Lambda + Batch workers<br/>validation / dedup / registration"]
+
+    Dataset["Dataset Stack<br/>DatasetEventsQueue consumer<br/>Step Functions<br/>create / update / delete<br/>visualization generation"]
+
+    API["cvdms_platform API<br/>upload + dataset clients"] --> Storage
+    API --> Upload
+    API --> Dataset
+
+    Storage --> Upload
+    Storage --> Dataset
+    Logging --> Upload
+    Logging --> Dataset
+    Logging --> Storage
+
+    Upload --> Catalog["Canonical catalog<br/>images, labels,<br/>image-label links"]
+    Dataset --> Artifacts["Versioned dataset artifacts<br/>manifests, metadata,<br/>visualization JSON"]
+
+    Catalog --> Dataset
+```
+
 ## <u>Logging Stack</u>
 
 The **Logging Stack** implements a centralized structured logging pipeline for the application.
@@ -252,6 +280,22 @@ while maintaining strong consistency guarantees.
 
 ## <u>Upload Stack</u>
 
+```mermaid
+flowchart LR
+    Kickoff["Kickoff Lambda"] --> Validation["Validation stage<br/>batch, validate,<br/>ingest results"]
+    Validation --> Dedup["Deduplication stage<br/>batch, detect duplicates,<br/>ingest status"]
+    Dedup --> Registration["Registration stage<br/>register canonical images<br/>enrich labels<br/>ingest canonical rows"]
+    Registration --> Cleanup["Cleanup<br/>release lock<br/>delete temp files<br/>mark completed"]
+
+    Validation -. error .-> Failure["Shared failure path"]
+    Dedup -. error .-> Failure
+    Registration -. error .-> Failure
+    Cleanup -. error .-> Failure
+
+    Failure --> DLQ["Upload DLQ"]
+    DLQ --> Processor["DLQ processor Lambda<br/>mark failed<br/>release lock<br/>clean temp artifacts"]
+```
+
 ### Upload Stack Architecture
 
 The following explains how the **Upload Stack infrastructure and code
@@ -276,6 +320,16 @@ This document instead focuses on:
 The goal is to describe **how the upload workflow is engineered internally**.
 
 ### High-Level Upload Pipeline
+
+Validation, deduplication, and registration each follow this batching + distributed processing + ingest pattern.
+
+```mermaid
+flowchart LR
+    Batching["Batching Lambda<br/>create shard plan"] --> Batch["Distributed Map<br/>AWS Batch workers"]
+    Batch --> Pre["Pre-ingest Lambda<br/>verify outputs"]
+    Pre --> Map["Ingest Map<br/>write shard results"]
+    Map --> Post["Post-ingest Lambda<br/>verify counts + cleanup temp tables"]
+```
 
 Once the upload client writes `job.json` and the normalized manifest to S3, the following infrastructure activates:
 
@@ -635,6 +689,30 @@ Centralizing this logic keeps ingestion code consistent
 across workers and Lambdas.
 
 ## <u>Dataset Stack</u>
+
+```mermaid
+flowchart LR
+    Request["Dataset API request"] --> Queue["DatasetEventsQueue"]
+    Queue --> Kickoff["Kickoff Lambda"]
+    Kickoff --> Route{"task_type"}
+
+    Route -->|create_dataset| Create["Create Dataset Lambda"]
+    Route -->|update_dataset| Update["Update Dataset Lambda"]
+    Route -->|delete_dataset| Delete["Delete Dataset Lambda"]
+
+    Create --> Viz["Generate Visualization Lambda"]
+    Update --> Viz
+    Viz --> Cleanup["Cleanup Lambda"]
+    Delete --> Cleanup
+
+    Create -. error .-> DLQ["Dataset DLQ"]
+    Update -. error .-> DLQ
+    Delete -. error .-> DLQ
+    Viz -. error .-> DLQ
+    Cleanup -. error .-> DLQ
+
+    DLQ --> Processor["DLQ processor Lambda<br/>rollback or cleanup<br/>release lock<br/>mark failed"]
+```
 
 ### Dataset Stack Architecture
 
