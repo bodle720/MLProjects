@@ -1,5 +1,5 @@
 # Example run:
-# python evaluation/main.py --visualize-sample 10
+# python -m evaluation.main --visualize-sample 10
 
 import argparse
 from datetime import datetime, timezone

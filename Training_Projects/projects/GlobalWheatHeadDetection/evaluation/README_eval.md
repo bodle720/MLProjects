@@ -25,7 +25,7 @@ The script downloads/resolves the MLflow model artifact, finds the packaged YOLO
 From the project root:
 
 ```bash
-python evaluation/main.py ^
+python -m evaluation.main ^
   --data-yaml training/data/yolo/global-wheat-head-2021-v1/dataset.yaml ^
   --split test ^
   --mlflow-tracking-uri http://127.0.0.1:5000 ^
