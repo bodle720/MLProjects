@@ -139,5 +139,8 @@ _model_select/
 # Evaluation outputs
 evaluation/outputs/
 
+# Latency outputs
+deployment_latency_outputs/
+
 # Optional: legacy/older model-selection output location
 training/train_yolo/model_selection/outputs/

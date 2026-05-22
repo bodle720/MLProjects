@@ -227,22 +227,39 @@ The following is harder case, showing missed or merged heads.
 
 ### Latency Results
 
-The following chart is derived from the test set on the local GPU.
+This project reports two latency measurements:
+
+1. **Offline YOLO evaluation speed**, measured by the evaluation script on the held-out test split using the local GPU.
+2. **Docker FastAPI request latency**, measured by sending repeated `/predict` requests to the deployed API container.
+
+These numbers are not directly equivalent. The offline evaluation timing measures the YOLO evaluation pipeline. The Docker benchmark measures the deployed API path, including file upload handling, image validation, model prediction, response parsing, and JSON serialization.
+
+#### Offline YOLO Evaluation Speed
+
+The following timings come from the held-out test split evaluation using the selected MLflow `champion` model on the local GPU.
 
 | Stage | Meaning | Avg. time / image |
 |---|---|---:|
-| Preprocess | Load, resize, and prepare the image tensor for model input | 0.248 ms |
+| Preprocess | Resize / tensor preparation for model input | 0.248 ms |
 | Inference | Forward pass through the YOLO model | 5.870 ms |
-| Loss | Loss computation; mostly irrelevant during eval/inference | 0.001 ms |
-| Postprocess | NMS and formatting/filtering predictions | 1.001 ms |
-| Total pipeline | Sum of preprocess, inference, loss, and postprocess | 7.121 ms |
+| Loss | Loss computation during evaluation; mostly irrelevant for deployed inference | 0.001 ms |
+| Postprocess | NMS and prediction formatting/filtering | 1.001 ms |
+| Total eval pipeline | Sum of preprocess, inference, loss, and postprocess | 7.121 ms |
 
+#### Docker FastAPI Request Latency
 
-The `Docker CPU` numbers are produced via latency measurements from the deployed FastAPI app after running repeated `/predict` requests through Docker.
+The Docker benchmark was run against the deployed FastAPI app using 100 sequential `/predict` requests after 10 warmup requests. The app was served locally through Docker on CPU.
 
-Total Latency comparison (averaged, per image):
+| Measurement | Count | Mean | Median | P90 | P95 | Min | Max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Client wall-clock round trip | 100 | 86.818 ms | 83.665 ms | 110.807 ms | 119.628 ms | 59.694 ms | 153.541 ms |
+| Server total request | 100 | 76.379 ms | 74.196 ms | 97.621 ms | 108.508 ms | 53.189 ms | 137.450 ms |
+| Server model inference | 100 | 68.656 ms | 66.368 ms | 86.163 ms | 97.993 ms | 48.314 ms | 117.172 ms |
+| Server upload / validation | 100 | 7.117 ms | 5.178 ms | 15.630 ms | 16.044 ms | 3.540 ms | 19.738 ms |
+| Server prediction parsing | 100 | 0.403 ms | 0.343 ms | 0.687 ms | 0.732 ms | 0.102 ms | 1.168 ms |
 
-| Mode | Requests | Mean latency | Notes              |
-|---|---:|-------------:|--------------------|
-| Docker CPU | 1334 |          TBD | Local laptop Docker run |
-| Local GPU | 1334 |     7.121 ms | non-Docker GPU run |
+The deployed API averaged about **76 ms of server-side processing time per image** and about **87 ms end-to-end from the benchmark client’s perspective**. Most of the runtime is model inference, while request handling and response parsing add relatively little overhead.
+
+The benchmark used a local Docker CPU run, so it should be interpreted as a local deployment measurement rather than a cloud production benchmark.
+
+The Docker CPU benchmark is the most representative latency measurement for the deployed demo because it exercises the actual FastAPI prediction endpoint. The local GPU evaluation timing is useful as a model-side reference, but it does not include HTTP request handling, containerized serving behavior, or JSON response serialization.
