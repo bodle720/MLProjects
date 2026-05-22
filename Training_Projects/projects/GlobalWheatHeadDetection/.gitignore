@@ -136,5 +136,8 @@ events.out.tfevents*
 # Model-selection sweep outputs
 _model_select/
 
+# Evaluation outputs
+evaluation/outputs/
+
 # Optional: legacy/older model-selection output location
 training/train_yolo/model_selection/outputs/
