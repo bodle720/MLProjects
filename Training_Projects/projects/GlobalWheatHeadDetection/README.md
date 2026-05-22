@@ -4,7 +4,7 @@ This project is focused on **wheat head object detection** using the **Global Wh
 
 Wheat head detection is a practical object-detection problem connected to agriculture, crop monitoring, phenotyping, and food-security applications. The model must adapt to a more specialized visual domain with dense small-object annotations and meaningful train/test distribution differences.
 
-The goal is to build a complete train-to-deploy object detection workflow:
+The goal is to build a complete train-to-deploy (deployment-ready prototype) object detection workflow:
 
 - ingest and organize the dataset through the CVDMS dataset pipeline
 - explore dataset quality, split drift, and annotation characteristics
@@ -15,8 +15,6 @@ The goal is to build a complete train-to-deploy object detection workflow:
 - serve the selected model through a FastAPI/Docker inference app
 
 ## Documentation
-
-Detailed documentation is kept in `docs/`. The root README is intentionally short and serves as a table of contents for the project.
 
 ### Dataset Exploration
 
@@ -35,6 +33,8 @@ Tracks the YOLO training workflow, speed tests, batch-size and dataloader-worker
 See here: [Results](docs/README_results.md)
 
 The best model is selected using validation mAP50-95 after sweeping inference settings such as image size, NMS IoU, and maximum detections. Final test evaluation is run only after validation-based selection.
+
+The final model is deployed as an API and performs reasonably on the validation split, but held-out test results and visual inspection show the task remains challenging. The project therefore emphasizes the full train-select-evaluate-deploy workflow and documents model limitations.
 
 ### Deployment
 

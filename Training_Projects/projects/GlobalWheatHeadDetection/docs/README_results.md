@@ -21,7 +21,7 @@ The selected model is a YOLO11s detector trained on CVDMS-exported Global Wheat 
 | Registered alias | `champion` |
 | Deployment URI | `models:/GlobalWheatHeadDetector@champion` |
 
-The final deployment app loads this model from the MLflow Model Registry and serves it through a FastAPI/Docker inference API. See [`../deployment/README.md`](../deployment/README.md).
+The final deployment app loads this model from the MLflow Model Registry and serves it through a FastAPI/Docker inference API.
 
 ## Dataset Context
 
@@ -34,8 +34,6 @@ The model was trained on the CVDMS version of the Global Wheat Head Detection 20
 | Test | 1,334 | 50.5 |
 
 The project preserves the official source splits. The test split is expected to be more challenging because the earlier dataset analysis showed meaningful split differences, and the test split also has a higher average object density than validation.
-
-For dataset analysis, see [`README_initial_dataset.md`](README_initial_dataset.md).
 
 ## Model Selection Method
 
@@ -160,7 +158,11 @@ The selected YOLO11s model performs well on the validation split, with high prec
 
 That test gap is not unexpected for this dataset. Earlier dataset exploration showed split-level differences in image quality and distribution, and the test split has higher average object density than validation. Dense wheat-head scenes, overlapping heads, and small-object localization make stricter IoU metrics much harder than mAP50.
 
-The model is still useful as a completed object-detection workflow: it was trained on versioned CVDMS artifacts, selected by validation metrics, evaluated on a held-out test split, registered in MLflow, and served through a Dockerized FastAPI app. The result shows a realistic train-to-deploy pipeline rather than only a training notebook.
+The model is still useful as a completed object-detection workflow: it was trained on versioned CVDMS artifacts, selected by validation metrics, evaluated on a held-out test split, registered in MLflow, and served through a Dockerized FastAPI app. The result shows a realistic train-to-deploy pipeline.
+
+## Limitations
+
+The model is deployed and usable as an inference prototype, but it is not production-grade. Visual inspection shows duplicate predictions and missed wheat heads in dense scenes. Performance drops from validation to held-out test, suggesting split difficulty and domain variation. Further production work would include threshold calibration, improved NMS/postprocessing, additional augmentation or training runs, larger model experiments, and monitoring on deployment-like data.
 
 ## Deployment Handoff
 
@@ -172,58 +174,75 @@ models:/GlobalWheatHeadDetector@champion
 
 The deployment app loads this MLflow champion model at startup and exposes an image-upload prediction endpoint.
 
-See:
 
-```text
-deployment/README.md
-```
 
 The deployment response includes structured detections and request-level timing fields, including upload/validation time, model inference time, parsing time, and total request latency.
 
-## Future Additions
+## Prediction Examples
 
-### Prediction Examples
+The following shows several held-out test images with predicted boxes drawn over the original images.
 
-Add several held-out test images with predicted boxes drawn over the original images.
+Box Colors:
+- Red: ground-truth box
+- Green: matched prediction
+- Blue: unmatched prediction
 
-Planned examples:
+This is a typical successful detection.
 
-| Example | Notes |
-|---|---|
-| Example 1 | Typical successful detection |
-| Example 2 | Dense wheat-head scene |
-| Example 3 | Harder/failure case with missed or merged heads |
+<p align="center">
+  <img src="readme_imgs/results/effective_example.jpg" alt="An effective model performance example." width="900"><br>
+  <em>An example of effective model performance.</em>
+</p>
 
-Suggested folder:
+Tne following is a dense wheat-head scene.
 
-```text
-docs/images/results/
-```
+<p align="center">
+  <img src="readme_imgs/results/dense_example.jpg" alt="An example of dense wheat head presence." width="900"><br>
+  <em>An example of dense wheat head presence.</em>
+</p>
+
+The following is harder case, showing missed or merged heads.
+
+<p align="center">
+  <img src="readme_imgs/results/poor_example.jpg" alt="An example of poor model performance." width="900"><br>
+  <em>An example of poor model performance. Results vary depending on post-processing settings.</em>
+</p>
 
 ### Training Plots
 
-Add a small number of plots from `results.csv`, such as:
+<p align="center">
+  <img src="readme_imgs/results/metrics_val_mAP50B.png" alt="Validation split mAP50 score through time." width="900"><br>
+  <em>The validation split's mAP50 score through time while training.</em>
+</p>
 
-- validation mAP50-95 over epochs
-- validation box/class/DFL loss over epochs
-- train vs. validation loss if useful
+<p align="center">
+  <img src="readme_imgs/results/metrics_val_mAP50-95B.png" alt="Validation split mAP50_95 score through time." width="900"><br>
+  <em>The validation split's mAP50_95 score through time while training.</em>
+</p>
 
-Suggested files:
+<p align="center">
+  <img src="readme_imgs/results/val_box_loss.png" alt="Validation box loss through time." width="900"><br>
+  <em>The validation split's box loss through time while training.</em>
+</p>
 
-```text
-docs/images/results/baseline_003_val_map50_95.png
-docs/images/results/baseline_003_val_losses.png
-```
+### Latency Results
 
-### API Latency Results
+The following chart is derived from the test set on the local GPU.
 
-Add latency measurements from the deployed FastAPI app after running repeated `/predict` requests through Docker.
+| Stage | Meaning | Avg. time / image |
+|---|---|---:|
+| Preprocess | Load, resize, and prepare the image tensor for model input | 0.248 ms |
+| Inference | Forward pass through the YOLO model | 5.870 ms |
+| Loss | Loss computation; mostly irrelevant during eval/inference | 0.001 ms |
+| Postprocess | NMS and formatting/filtering predictions | 1.001 ms |
+| Total pipeline | Sum of preprocess, inference, loss, and postprocess | 7.121 ms |
 
-Suggested summary:
 
-| Mode | Requests | Median latency | Mean latency | Notes |
-|---|---:|---:|---:|---|
-| Docker CPU | TBD | TBD | TBD | Local laptop Docker run |
-| Local GPU | TBD | TBD | TBD | Optional, non-Docker or GPU-enabled Docker |
+The `Docker CPU` numbers are produced via latency measurements from the deployed FastAPI app after running repeated `/predict` requests through Docker.
 
-The API writes request-level timing fields that can be used to create latency histograms or summary tables.
+Total Latency comparison (averaged, per image):
+
+| Mode | Requests | Mean latency | Notes              |
+|---|---:|-------------:|--------------------|
+| Docker CPU | 1334 |          TBD | Local laptop Docker run |
+| Local GPU | 1334 |     7.121 ms | non-Docker GPU run |

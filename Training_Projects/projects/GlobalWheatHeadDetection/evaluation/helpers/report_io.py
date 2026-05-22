@@ -51,13 +51,15 @@ def build_markdown_summary(summary: dict[str, Any]) -> str:
 
 ## Speed
 
-| Stage | ms / image |
-|---|---:|
-| Preprocess | {speed["preprocess"]:.3f} |
-| Inference | {speed["inference"]:.3f} |
-| Loss | {speed["loss"]:.3f} |
-| Postprocess | {speed["postprocess"]:.3f} |
-| Total pipeline | {speed["total_pipeline"]:.3f} |
+These are Ultralytics evaluation timings averaged per image over the evaluated split. They are model-evaluation timings, not full FastAPI request latency.
+
+| Stage | Meaning | Avg. time / image |
+|---|---|---:|
+| Preprocess | Load, resize, and prepare the image tensor for model input | {speed["preprocess"]:.3f} ms |
+| Inference | Forward pass through the YOLO model | {speed["inference"]:.3f} ms |
+| Loss | Loss computation; mostly irrelevant during eval/inference | {speed["loss"]:.3f} ms |
+| Postprocess | NMS and formatting/filtering predictions | {speed["postprocess"]:.3f} ms |
+| Total pipeline | Sum of preprocess, inference, loss, and postprocess | {speed["total_pipeline"]:.3f} ms |
 
 ## Visualizations
 
