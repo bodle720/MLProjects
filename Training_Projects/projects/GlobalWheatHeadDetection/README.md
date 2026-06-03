@@ -38,13 +38,13 @@ The final model is deployed as an API and performs reasonably on the validation 
 
 ### Deployment
 
-See here: [FastAPI / Docker Deployment](deployment/README_deploy.md)
+See here: [FastAPI / Docker Deployment](deployment/README.md)
 
 Documents the containerized inference service for the selected MLflow `champion` model. The deployment app loads `models:/GlobalWheatHeadDetector@champion`, serves image-upload predictions through FastAPI, returns structured wheat-head detections, and reports request-level latency metrics.
 
 ### Evaluation
 
-See here: [Evaluation](evaluation/README_eval.md)
+See here: [Evaluation](evaluation/README.md)
 
 Includes a standalone evaluation package for running full-split YOLO evaluation, saving metric summaries, and generating visual prediction examples with ground-truth, matched prediction, and unmatched prediction boxes. The evaluator uses the selected MLflow model and configurable post-processing settings such as confidence threshold, image size, NMS IoU, and max detections.
 
