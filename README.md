@@ -52,4 +52,4 @@ This section includes:
 * [`GlobalWheatHeadDetection`](Training_Projects/projects/GlobalWheatHeadDetection/)  
   An object detection project using Global Wheat Head Detection data, CVDMS dataset exports, YOLO training, MLflow tracking, model selection, and deployment-oriented planning.
 
-Repo photo by <a href="https://unsplash.com/@andrewruiz?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Andrew Ruiz</a> on <a href="https://unsplash.com/photos/blue-and-green-lights-on-black-background-_RVrNtvaemo?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Unsplash</a>
+Social Preview photo by <a href="https://unsplash.com/@andrewruiz?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Andrew Ruiz</a> on <a href="https://unsplash.com/photos/blue-and-green-lights-on-black-background-_RVrNtvaemo?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Unsplash</a>
