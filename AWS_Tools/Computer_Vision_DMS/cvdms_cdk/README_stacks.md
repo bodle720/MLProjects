@@ -1,29 +1,31 @@
 ## Stack Overview
 
 ```mermaid
-flowchart LR
-    Logging["Logging Stack<br/>Firehose<br/>transform Lambda<br/>S3 log storage<br/>Glue + Athena logs"]
+flowchart TD
+    API["cvdms_platform API<br/>upload + dataset clients"]
 
-    Storage["Storage Stack<br/>S3 buckets<br/>DynamoDB tables<br/>SQS queues<br/>Glue + Athena<br/>Iceberg tables"]
+    S3Input["S3 workflow inputs<br/>job.json / submission.json<br/>normalized manifests"]
 
-    Upload["Upload Stack<br/>UploadEventsQueue consumer<br/>Step Functions<br/>Lambda + Batch workers<br/>validation / dedup / registration"]
+    subgraph Infra["Shared infrastructure"]
+        Storage["Storage Stack<br/>S3, DynamoDB, SQS,<br/>Glue, Athena, Iceberg"]
+        Logging["Logging Stack<br/>structured logs + Athena queries"]
+    end
 
-    Dataset["Dataset Stack<br/>DatasetEventsQueue consumer<br/>Step Functions<br/>create / update / delete<br/>visualization generation"]
+    subgraph Workflows["Workflow stacks"]
+        Upload["Upload Stack<br/>validate, dedupe, register"]
+        Dataset["Dataset Stack<br/>version datasets + generate visualizations"]
+    end
 
-    API["cvdms_platform API<br/>upload + dataset clients"] --> Storage
-    API --> Upload
-    API --> Dataset
+    Catalog["Canonical catalog<br/>images, labels, metadata"]
+    Artifacts["Dataset artifacts<br/>train / val / test manifests<br/>metadata + visualization JSON"]
 
-    Storage --> Upload
-    Storage --> Dataset
-    Logging --> Upload
-    Logging --> Dataset
-    Logging --> Storage
+    API --> S3Input
+    S3Input --> Workflows
+    Infra --> Workflows
 
-    Upload --> Catalog["Canonical catalog<br/>images, labels,<br/>image-label links"]
-    Dataset --> Artifacts["Versioned dataset artifacts<br/>manifests, metadata,<br/>visualization JSON"]
-
+    Upload --> Catalog
     Catalog --> Dataset
+    Dataset --> Artifacts
 ```
 
 ## <u>Logging Stack</u>
